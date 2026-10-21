@@ -349,12 +349,13 @@ def _import_one(run: StepRun, path: Path, progress: Progress) -> dict:
     except IngestError as exc:
         return {"file": path.name, "ok": False, "message": f"{path.name}: {exc}", "warnings": []}
     prefix = f"{res['filename']}: "
-    return {"file": res["filename"], "ok": True, "import_id": res["import_id"],
+    message = (f"{prefix}{res['message']}" if res.get("provider") == "bluemoon" else   # edits of our own export
+               f"{prefix}{res['rows_total']:,} rows: {res['rows_new']:,} new, {res['rows_updated']:,} "
+               f"updated{_unchanged_text(res.get('rows_unchanged'))}, {res['rows_skipped']:,} skipped.")
+    return {"file": res["filename"], "ok": True, "import_id": res["import_id"], "provider": res.get("provider"),
             **{k: int(res.get(k) or 0) for k in IMPORT_COUNTS},
             "unmapped_columns": res.get("unmapped_columns") or [],
-            "warnings": [prefix + w for w in res.get("warnings") or []],
-            "message": (f"{prefix}{res['rows_total']:,} rows: {res['rows_new']:,} new, {res['rows_updated']:,} "
-                        f"updated{_unchanged_text(res.get('rows_unchanged'))}, {res['rows_skipped']:,} skipped.")}
+            "warnings": [prefix + w for w in res.get("warnings") or []], "message": message}
 
 
 def _unchanged_text(n: Any) -> str:
@@ -376,6 +377,9 @@ def _rent_next(conn: sqlite3.Connection, slug: str) -> str:
 
 def _import_message(files: list[dict], counts: dict) -> str:
     failed = [f["message"] for f in files if not f["ok"]]
+    edits = [f["message"] for f in files if f["ok"] and f.get("provider") == "bluemoon"]
+    if edits and len(edits) == counts["files"]:   # only our own exports with edits: say what changed
+        return " ".join(edits + (["Not imported: " + " ".join(failed)] if failed else []))
     parts = []
     if counts["files"]:
         parts.append(f"Imported {counts['files']} file{'s' if counts['files'] != 1 else ''}: "
@@ -392,14 +396,17 @@ def _preview(run: StepRun, paths: list[Path]) -> dict:
     ok = True
     for path in paths:
         try:
-            p = preview_file(path, market_slug=run.market)
+            p = preview_file(path, market_slug=run.market, conn=run.conn)
         except IngestError as exc:
             ok = False
             lines.append(f"{path.name}: {exc}")
             continue
         missing = ", ".join(m["label"] for m in p["missing_fields"]) or "none"
-        lines.append(f"{p['filename']}: {p['rows']:,} rows ({p['provider_label']}); {len(p['column_map']):,} columns "
-                     f"matched, {len(p['unmapped_columns']):,} kept as-is; missing: {missing}.")
+        if p.get("provider") == "bluemoon":       # our own export with edits: say what would change
+            lines.append(f"{p['filename']}: {p['message']}")
+        else:
+            lines.append(f"{p['filename']}: {p['rows']:,} rows ({p['provider_label']}); {len(p['column_map']):,} "
+                         f"columns matched, {len(p['unmapped_columns']):,} kept as-is; missing: {missing}.")
         warnings += [f"{p['filename']}: {w}" for w in p.get("warnings") or []]
         previews.append({k: p[k] for k in ("filename", "sheet", "provider", "provider_label", "rows", "column_map",
                                             "unmapped_columns", "missing_fields")})

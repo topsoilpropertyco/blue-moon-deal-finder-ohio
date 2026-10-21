@@ -1,5 +1,7 @@
 /* Exports (Setup): download each file for Brad, the CRM and the mail house. Every download is built
  * fresh from the current data (a copy also lands in output/<market>/ on the Mac Mini).
+ * "Fix data in a spreadsheet" explains the round trip (download, fix in Excel, drop it on Import) and offers
+ * one set-aside group as a small review workbook (GET /export/review.xlsx?bucket=<group key>).
  */
 (() => {
   'use strict';
@@ -10,7 +12,7 @@
     console.error('exports.js needs core.js and funnel.js to load first.');
     return;
   }
-  const {esc, toNum, plural} = H;
+  const {esc, toNum, num, plural} = H;
 
   /* [file, title, what it is for, count(summary) -> text or ''] */
   const FILES = [
@@ -56,8 +58,37 @@
       '<p class="note vw-tight">Copies are also saved on the Mac Mini in the output folder. They hold owner data, so they never go to GitHub.</p></div>';
   }
 
+  /** The set-aside groups with properties in them, from the summary's Why? panel data. */
+  function groupOptions(s) {
+    const out = [];
+    (((s && s.set_aside) || {}).reasons || []).forEach((r) => (r.buckets || []).forEach((b) => {
+      if (toNum(b.count)) {
+        out.push('<option value="' + esc(b.key) + '">' + esc((r.label || r.key) + ': ' + (b.label || b.key) + ' (' + num(b.count) + ')') + '</option>');
+      }
+    }));
+    return out;
+  }
+
+  function roundTripNote(s) {
+    const opts = groupOptions(s);
+    const working = busy.has('review');
+    return '<div class="panel ex-sheets"><h2>Fix data in a spreadsheet, then bring it back</h2>' +
+      '<ol class="ex-steps"><li>Download <b>ranked_list.xlsx</b> above, or just one set-aside group below.</li>' +
+      '<li>In Excel, fix <b>Units</b>, <b>Building sq ft</b>, <b>Year built</b>, <b>Property type</b>, <b>County</b>, <b>ZIP</b> or ' +
+      '<b>Lot acres</b>. In <b>Buy box decision</b> you can type <b>Add to buy box</b>, <b>Set aside</b> or <b>Follow the rules</b>.</li>' +
+      '<li>Save it and drop it on the Import screen. It shows what will change before anything is saved.</li></ol>' +
+      '<p class="note vw-tight">Only those columns are read. Nothing is added or deleted, a row changed in the app after you ' +
+      'downloaded the file is left alone, and a later Crexi import keeps your fixes.</p>' +
+      (opts.length ? '<div class="ex-review"><label class="sr" for="ex-group">Set-aside group</label>' +
+        '<select class="select" id="ex-group" data-ex-group>' + opts.join('') + '</select>' +
+        '<button type="button" class="btn" data-ex="review"' + (working ? ' disabled' : '') + '>' +
+        (working ? 'Preparing…' : 'Download this group') + '</button></div>' : '') +
+      '<div class="bar vw-actions"><button class="btn quiet" type="button" data-go="import">Go to Import</button></div></div>';
+  }
+
   function page(s) {
-    return heading() + '<ul class="ex-list panel">' + FILES.map((f) => fileRow(f, s)).join('') + '</ul>' + sheetsNote();
+    return heading() + '<ul class="ex-list panel">' + FILES.map((f) => fileRow(f, s)).join('') + '</ul>' + sheetsNote() +
+      roundTripNote(s);
   }
 
   function fileName(res, name) {
@@ -79,8 +110,8 @@
 
   /** Fetch the file first, so a problem shows as a message instead of a page of JSON. A GET never changes
    *  anything, so the CRM handoff is POSTed with {mark: true}: that download marks the owners in it as handed off. */
-  async function download(name) {
-    const url = H.mpath('/export/' + encodeURIComponent(name));
+  async function download(name, url) {
+    url = url || H.mpath('/export/' + encodeURIComponent(name));
     const init = name === 'crm_handoff.csv'
       ? {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mark: true})}
       : {credentials: 'same-origin'};
@@ -106,12 +137,19 @@
     const b = ev.target instanceof Element ? ev.target.closest('[data-ex]') : null;
     if (!b || b.disabled) return;
     const name = b.getAttribute('data-ex');
+    let url = null;
+    if (name === 'review') {   // one set-aside group, to fix in Excel and import back
+      const pick = root.querySelector ? root.querySelector('[data-ex-group]') : null;
+      if (!pick || !pick.value) return;
+      url = H.mpath('/export/review.xlsx') + '?bucket=' + encodeURIComponent(pick.value);
+    }
     busy.add(name);
     b.disabled = true;
     b.textContent = 'Preparing…';
     try {
-      await download(name);
-      BM.toast('Downloaded ' + name + '.');
+      await download(name === 'review' ? 'review.xlsx' : name, url);
+      BM.toast(name === 'review' ? 'Downloaded the group. Fix it in Excel, then drop it on the Import screen.'
+        : 'Downloaded ' + name + '.');
       if (name === 'crm_handoff.csv') BM.refreshSummary().catch(() => {});
     } catch (err) {
       BM.toast(err.message, {error: true});
@@ -119,7 +157,7 @@
       busy.delete(name);
       if (b.isConnected) {
         b.disabled = false;
-        b.textContent = 'Download';
+        b.textContent = name === 'review' ? 'Download this group' : 'Download';
       }
     }
   }

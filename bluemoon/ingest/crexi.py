@@ -46,13 +46,17 @@ from .columns import (
     field_label,
     known_header_score,
     map_columns,
+    norm_header,
 )
+from .edits import EDITABLE_BY_FIELD, edits_count_text, latest_edits, same_value
 
 log = logging.getLogger(__name__)
 
 Progress = Callable[[float, str], None] | None
 
 HEADER_SCAN_ROWS = 15            # look this far down a sheet for the header row
+PREFERRED_SHEET = "All properties"   # our own ranked_list.xlsx: every property (Ranked has the same columns)
+BLUE_MOON_CREATOR = "Blue Moon Deal Finder"   # workbook metadata on our exports (bluemoon/exports.py)
 MIN_PLAUSIBLE_YEAR = 1700        # a "year built" before this is a typo, not a year
 EXCEL_EPOCH = date(1899, 12, 30)
 CSV_EXTS = {".csv", ".tsv", ".txt"}
@@ -181,6 +185,7 @@ class Table:
     header_row: int = 1
     skipped_columns: list[str] = field(default_factory=list)
     skipped_sheets: list[str] = field(default_factory=list)
+    made_by_blue_moon: bool = False      # the workbook says this app wrote it (our own export)
 
 
 # --- reading files ----------------------------------------------------------------------------
@@ -262,17 +267,63 @@ def _read_xlsx(path: Path) -> Table:
             if not any(any(c is not None for c in r) for r in head):
                 continue
             score = max((known_header_score(r) for r in head), default=0)
-            if best is None or score > best[0]:
+            # On a tie the first sheet wins, except our own export's 'All properties' (every row, not just
+            # the ranked ones).
+            if best is None or score > best[0] or (score == best[0] and ws.title == PREFERRED_SHEET):
                 best = (score, ws.title)
         if best is None:
             raise IngestError(f"{path.name} has no rows in any sheet.")
         ws = wb[best[1]]
         grid = [[_xlsx_cell(c) for c in r] for r in ws.iter_rows(values_only=True)]
+        ours = _made_by_blue_moon(wb)
     finally:
         wb.close()
     table = _grid_to_table(path.name, grid, sheet=best[1])
     table.skipped_sheets = [t for t in titles if t != best[1]]
+    table.made_by_blue_moon = ours
     return table
+
+
+def _made_by_blue_moon(wb: Any) -> bool:
+    try:
+        return str(getattr(wb.properties, "creator", "") or "").startswith(BLUE_MOON_CREATOR)
+    except Exception:  # unreadable metadata never stops an import
+        return False
+
+
+def read_sheets(path: str | Path) -> list[Table]:
+    """Every sheet of an XLSX that looks like a list (a header row with known column names), or the one table
+    of a CSV. Used for our own exports, whose property sheets (Ranked, All properties, Excluded) can each
+    carry edits."""
+    path = Path(path).expanduser()
+    if path.suffix.lower() not in XLSX_EXTS:
+        return [_read(path)]
+    import openpyxl
+
+    if not path.exists():
+        raise IngestError(f"I can't find the file {path}.")
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=False)
+    except Exception as exc:
+        raise IngestError(f"I couldn't open {path.name} as an Excel file ({exc.__class__.__name__}). "
+                          f"Try exporting it again, or save it as .csv.") from exc
+    out: list[Table] = []
+    try:
+        ours = _made_by_blue_moon(wb)
+        for ws in wb.worksheets:
+            grid = [[_xlsx_cell(c) for c in r] for r in ws.iter_rows(values_only=True)]
+            if not any(any(c is not None for c in r) for r in grid[:HEADER_SCAN_ROWS]):
+                continue
+            if max((known_header_score(r) for r in grid[:HEADER_SCAN_ROWS]), default=0) == 0:
+                continue
+            table = _grid_to_table(path.name, grid, sheet=ws.title)
+            table.made_by_blue_moon = ours
+            out.append(table)
+    finally:
+        wb.close()
+    if not out:
+        raise IngestError(f"{path.name} has no rows in any sheet.")
+    return out
 
 
 def _xlsx_cell(v: Any) -> Any:
@@ -822,14 +873,19 @@ def _check_identity(table: Table, column_map: Mapping[str, str]) -> None:
 # --- public: preview ------------------------------------------------------------------------
 
 def preview_file(path: str | Path, overrides: Mapping[str, str | None] | None = None,
-                 market_slug: str | None = None) -> dict:
+                 market_slug: str | None = None, conn: sqlite3.Connection | None = None) -> dict:
     """What the import screen shows before importing: sheet, column matches and 5 sample rows.
 
-    The sample never includes owner names or mailing addresses.
+    The sample never includes owner names or mailing addresses. A Blue Moon export (our own file, edited in
+    Excel) gets the edits preview instead: how many properties would change, and what (conn is used to
+    compare; without one the app's database is opened).
     """
     settings = get_settings()
     table = _read(Path(path).expanduser())
-    provider = detect_provider(table.headers)
+    provider = _provider(table)
+    if provider == "bluemoon":
+        from .roundtrip import preview_blue_moon_edits
+        return preview_blue_moon_edits(conn, market_slug, Path(path).expanduser())
     asset_class = _asset_class_for(settings, market_slug)
     opts = _options(settings, asset_class, provider)
     all_overrides = _merged_overrides(settings, overrides)
@@ -864,6 +920,15 @@ def preview_file(path: str | Path, overrides: Mapping[str, str | None] | None = 
     }
 
 
+def _provider(table: Table) -> str:
+    """detect_provider, plus our own workbooks known by their metadata (with a Property ID column)."""
+    provider = detect_provider(table.headers)
+    if provider != "bluemoon" and table.made_by_blue_moon and any(
+            norm_header(h) == "property id" for h in table.headers):
+        return "bluemoon"
+    return provider
+
+
 def _asset_class_for(settings: Settings, market_slug: str | None) -> str | None:
     if not market_slug:
         return None
@@ -889,12 +954,18 @@ def _read_warnings(table: Table) -> list[str]:
 # --- public: import -------------------------------------------------------------------------
 
 def import_file(conn: sqlite3.Connection, market_slug: str, path: str | Path, limit: int | None = None,
-                overrides: Mapping[str, str | None] | None = None, progress: Progress = None) -> dict:
+                overrides: Mapping[str, str | None] | None = None, progress: Progress = None,
+                actor: str | None = None) -> dict:
     """Import one Crexi (or other provider) export into a market. Safe to re-run: rows merge, never delete.
 
     Returns {import_id, filename, rows_total, rows_new, rows_updated, rows_unchanged, rows_skipped, column_map,
     unmapped_columns, warnings, ...extra counts}. rows_unchanged is the part of rows_updated whose stored values
-    did not change (re-importing the same rows).
+    did not change (re-importing the same rows). Corrections made by hand (property_edits) are put back after
+    the merge (edits_kept counts the ones the file disagreed with).
+
+    A Blue Moon export (one of our own files, edited in Excel) never goes through the merge: it goes to
+    roundtrip.import_blue_moon_edits, which changes only the editable columns of known properties.
+    actor: who is importing (the dashboard's signed-in person; 'cli' when None).
     """
     _progress(progress, 0.02, "Reading the file")
     settings = get_settings()
@@ -905,7 +976,10 @@ def import_file(conn: sqlite3.Connection, market_slug: str, path: str | Path, li
         raise IngestError(f"There is no market called '{market_slug}'. Markets: {known}.") from None
     path = Path(path).expanduser()
     table = _read(path)
-    provider = detect_provider(table.headers)
+    provider = _provider(table)
+    if provider == "bluemoon":
+        from .roundtrip import import_blue_moon_edits
+        return import_blue_moon_edits(conn, market_slug, path, limit=limit, actor=actor, progress=progress)
     opts = _options(settings, market["asset_class"], provider)
     all_overrides = _merged_overrides(settings, overrides)
     column_map, unmapped = map_columns(table.headers, all_overrides, opts.min_score)
@@ -930,6 +1004,7 @@ def import_file(conn: sqlite3.Connection, market_slug: str, path: str | Path, li
         merge = _merge_records(conn, market["id"], records, import_id, opts, progress)
         skipped = no_identity + duplicates
         warnings += _row_warnings(no_identity, duplicates, parsed, merge["flag_counts"], unmapped)
+        warnings += _kept_edits_warnings(merge["edits_kept"], merge["edits_kept_fields"], merge["edits_crexi_new"])
         conn.execute(
             "UPDATE imports SET rows_total=?, rows_new=?, rows_updated=?, rows_skipped=?, notes=? WHERE id=?",
             (len(data_rows), merge["new"], merge["updated"], skipped, "\n".join(warnings), import_id))
@@ -958,8 +1033,22 @@ def import_file(conn: sqlite3.Connection, market_slug: str, path: str | Path, li
         "mapped_columns": len(table.headers) - len(unmapped),
         "total_columns": len(table.headers),
         "flag_counts": merge["flag_counts"],
+        "edits_kept": merge["edits_kept"],
         "warnings": warnings,
     }
+
+
+def _kept_edits_warnings(kept: int, fields: Mapping[str, int], crexi_new: int) -> list[str]:
+    """'Kept 3 values you corrected by hand ...': a Crexi file never quietly undoes a correction."""
+    if not kept:
+        return []
+    out = [f"Kept {_plural(kept, 'value', 'values')} you corrected by hand ({edits_count_text(fields)}) instead "
+           f"of this file's {'value' if kept == 1 else 'values'}. The file's values are still saved with the "
+           f"original columns."]
+    if crexi_new:
+        out.append(f"For {_plural(crexi_new, 'of them', 'of them')} Crexi now shows a different value than when you "
+                   f"corrected it. Your correction still counts; look at those properties if you like.")
+    return out
 
 
 def _progress(progress: Progress, fraction: float, message: str) -> None:
@@ -1110,9 +1199,13 @@ def _stored(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _merge_records(conn: sqlite3.Connection, market_id: int, records: list[ParsedRow], import_id: int,
                    opts: ImportOptions, progress: Progress) -> dict:
-    """Insert or merge every record. Returns {new, updated, unchanged, flag_counts}: `unchanged` counts the
-    updated properties whose stored values came out exactly as they were (a re-import of the same rows)."""
+    """Insert or merge every record. Returns {new, updated, unchanged, flag_counts, edits_kept,
+    edits_kept_fields, edits_crexi_new}: `unchanged` counts the updated properties whose stored values came out
+    exactly as they were (a re-import of the same rows); edits_* count the corrections made by hand that this
+    file disagreed with and that were kept."""
     ex = _load_existing(conn, market_id)
+    edits = latest_edits(conn, market_id)
+    kept: Counter[str] = Counter()
     taken: set[int] = set()
     before: dict[int, tuple[dict, dict]] = {}     # property id -> (stored values before, the live row)
     new = updated = 0
@@ -1135,7 +1228,7 @@ def _merge_records(conn: sqlite3.Connection, market_id: int, records: list[Parse
                 before[match["id"]] = (_stored(match), match)
             if match["property_key"] != p.key and p.key and p.key not in ex.by_key and _upgrade_key(match, p.key):
                 ex.rekey(match, p.key)
-            flags = _update(conn, match, p, import_id, now, opts)
+            flags = _update(conn, match, p, import_id, now, opts, edits.get(match["id"]), kept)
             row = match
             updated += match["id"] not in taken   # one property merged twice is still one update
         taken.add(row["id"])
@@ -1143,7 +1236,9 @@ def _merge_records(conn: sqlite3.Connection, market_id: int, records: list[Parse
         if progress and i % step == 0:
             _progress(progress, 0.3 + 0.65 * i / max(1, len(records)), f"Saved {i:,} of {len(records):,}")
     unchanged = sum(1 for old, row in before.values() if _stored(row) == old)
-    return {"new": new, "updated": updated, "unchanged": unchanged, "flag_counts": dict(sorted(flag_counts.items()))}
+    fields = {f: n for f, n in kept.items() if f in EDITABLE_BY_FIELD}
+    return {"new": new, "updated": updated, "unchanged": unchanged, "flag_counts": dict(sorted(flag_counts.items())),
+            "edits_kept": sum(fields.values()), "edits_kept_fields": fields, "edits_crexi_new": kept["_crexi_new"]}
 
 
 def _upgrade_key(existing: Mapping[str, Any], new_key: str) -> bool:
@@ -1169,8 +1264,13 @@ def _insert(conn: sqlite3.Connection, market_id: int, p: ParsedRow, flags: list[
 
 
 def _update(conn: sqlite3.Connection, existing: dict, p: ParsedRow, import_id: int, now: str,
-            opts: ImportOptions) -> list[str]:
-    """New non-empty values win; empty cells never wipe what we already know."""
+            opts: ImportOptions, edits: Mapping[str, dict] | None = None,
+            kept: Counter[str] | None = None) -> list[str]:
+    """New non-empty values win; empty cells never wipe what we already know. Corrections made by hand
+    (edits: {field: {value, old_value}}) win over the file; each one the file disagreed with is counted in
+    kept (by field, and '_crexi_new' when the file's value is not even the one that was corrected).
+    updated_at only moves when a stored value changes (the 'Row as of' guard of the round trip uses it)."""
+    before = _stored(existing)
     old_flags = set(loads(existing.get("flags_json"), []) or [])
     new_values = p.record.model_dump()
     notes = set(p.notes)
@@ -1180,6 +1280,17 @@ def _update(conn: sqlite3.Connection, existing: dict, p: ParsedRow, import_id: i
     merged = {c: (new_values[c] if new_values[c] is not None else existing.get(c)) for c in RECORD_COLUMNS}
     if new_values["units"] is None and "units_from_addresses" in old_flags and merged["units"] is not None:
         notes.add("units_from_addresses")
+    for f, edit in (edits or {}).items():
+        if f not in merged:
+            continue
+        incoming = new_values[f]
+        if incoming is not None and not same_value(f, incoming, edit["value"]) and kept is not None:
+            kept[f] += 1
+            if not same_value(f, incoming, edit.get("old_value")):
+                kept["_crexi_new"] += 1
+        merged[f] = edit["value"]
+        if f == "units":
+            notes.discard("units_from_addresses")   # a count typed by hand is a real unit count
     rec = PropertyRecord.model_construct(**merged)  # values are already typed (ours or the DB's)
     notes |= old_flags & STICKY_FLAGS
     flags = sorted(set(final_flags(rec, notes, opts.units_metric, opts.year_in_buybox)) | (old_flags - INGEST_FLAGS))
@@ -1192,6 +1303,8 @@ def _update(conn: sqlite3.Connection, existing: dict, p: ParsedRow, import_id: i
     data = rec.model_dump()
     data.update(property_key=existing["property_key"], raw_json=dumps(raw), flags_json=dumps(flags),
                 last_import_id=import_id, updated_at=now)
+    if _stored({**existing, **data}) == before:
+        data["updated_at"] = existing.get("updated_at") or now   # nothing changed: keep its 'as of' time
     sets = ",".join(f"{c}=?" for c in data)
     conn.execute(f"UPDATE properties SET {sets} WHERE id=?", (*data.values(), existing["id"]))
     existing.update(data)

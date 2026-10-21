@@ -248,6 +248,21 @@ CREATE INDEX IF NOT EXISTS ix_override_log_property ON buybox_override_log(prope
 CREATE INDEX IF NOT EXISTS ix_override_log_batch ON buybox_override_log(batch_id);
 CREATE INDEX IF NOT EXISTS ix_override_log_created ON buybox_override_log(created_at);
 
+-- Corrections made by hand to a property's facts (units, year built, county...), for now by editing a Blue
+-- Moon export in Excel and importing it back (ingest/roundtrip.py). Append-only: the newest row per
+-- (property, field) is the correction in force, and a later Crexi import keeps it. Values are JSON.
+CREATE TABLE IF NOT EXISTS property_edits (
+  id INTEGER PRIMARY KEY,
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  field TEXT NOT NULL,             -- a properties column from ingest/roundtrip.py EDITABLE
+  old_value TEXT,                  -- JSON: what it was before (usually what Crexi said)
+  new_value TEXT,                  -- JSON: the correction (null = cleared)
+  via TEXT,                        -- 'import:<imports.id>'
+  actor TEXT NOT NULL,             -- email | this Mac | team | open | cli
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_property_edits_property ON property_edits(property_id, field);
+
 -- Cache of every external API response, so re-runs never re-pay.
 CREATE TABLE IF NOT EXISTS api_cache (
   key TEXT PRIMARY KEY,

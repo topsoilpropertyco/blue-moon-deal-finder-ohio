@@ -343,12 +343,32 @@ _PROVIDER_SIGNATURES: dict[str, tuple[str, ...]] = {
 }
 PROVIDER_LABELS: dict[str, str] = {
     "crexi": "Crexi export", "propstream": "PropStream export", "reonomy": "Reonomy export",
-    "costar": "CoStar export", "other": "Property list",
+    "costar": "CoStar export", "bluemoon": "Blue Moon export (your edits)", "other": "Property list",
 }
+
+# Our own export files (bluemoon/exports.py) also carry Crexi's column names, so they are checked first:
+# brought back in, they go to the safe edits importer (ingest/roundtrip.py), never through the Crexi merge.
+# 'Row as of' is ours alone (added for the round trip); older exports are known by >= 2 of the others.
+BLUE_MOON_MARKERS: tuple[str, ...] = ("Row as of",)
+BLUE_MOON_SIGNATURE: tuple[str, ...] = ("Blue Moon score %", "Why set aside", "Score signals known",
+                                        "Next DRILL step", "Buy box decision", "Set-aside groups")
+
+
+def is_blue_moon_export(headers: list[str]) -> bool:
+    """True for a file this app exported (ranked list, excluded file, review file), even after Excel."""
+    have = {norm_header(h) for h in headers if h}
+    if "property id" not in have:
+        return False
+    if any(norm_header(m) in have for m in BLUE_MOON_MARKERS):
+        return True
+    return sum(1 for s in BLUE_MOON_SIGNATURE if norm_header(s) in have) >= 2
 
 
 def detect_provider(headers: list[str]) -> str:
-    """Best guess of which list provider made this file: crexi | propstream | reonomy | costar | other."""
+    """Best guess of which list provider made this file: bluemoon (our own export) | crexi | propstream |
+    reonomy | costar | other."""
+    if is_blue_moon_export(headers):
+        return "bluemoon"
     have = {norm_header(h) for h in headers if h}
     best, best_hits = "other", 0
     for provider, sig in _PROVIDER_SIGNATURES.items():

@@ -736,24 +736,26 @@ def model(slug: str, conn: Conn) -> dict:
 
 @router.post("/api/m/{slug}/import/preview")
 def import_preview(slug: str, conn: Conn, file: Annotated[UploadFile, File()]) -> dict:
+    """What importing the file would do. A Blue Moon export (ours, edited in Excel) shows its changes."""
     require_market(conn, slug)
     name = upload_name(file.filename)
     folder = upload_tmp_dir() / f"preview_{os.getpid()}_{threading.get_ident()}_{time.time_ns()}"
     try:
-        return preview_file(save_upload(file, folder / name), market_slug=slug)
+        return preview_file(save_upload(file, folder / name), market_slug=slug, conn=conn)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
 
 
 @router.post("/api/m/{slug}/import")
-def import_upload(slug: str, conn: Conn, file: Annotated[UploadFile, File()],
+def import_upload(slug: str, request: Request, conn: Conn, file: Annotated[UploadFile, File()],
                   limit: Annotated[int | None, Form(ge=1)] = None) -> dict:
+    """Import a Crexi (or other) export, or a Blue Moon export with Seth's edits (who: the signed-in person)."""
     require_market(conn, slug)
     crexi_dir = get_settings().path("crexi_dir")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = save_upload(file, crexi_dir / f"{stamp}_{upload_name(file.filename)}")
     try:
-        result = import_file(conn, slug, path, limit=limit)
+        result = import_file(conn, slug, path, limit=limit, actor=_actor(request))
     except IngestError:
         path.unlink(missing_ok=True)   # not a property list: don't leave it in data/crexi
         raise
@@ -839,6 +841,18 @@ def _export_response(slug: str, name: str, path: Any) -> FileResponse:
     if not path or not Path(path).is_file():
         raise HTTPException(404, f"{name} wasn't created for this market.")
     return FileResponse(path, media_type=EXPORT_FILES[name], filename=f"{slug}_{name}",
+                        headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/m/{slug}/export/review.xlsx")
+def export_review(slug: str, conn: Conn, bucket: str = Query(..., max_length=120)) -> FileResponse:
+    """One set-aside group as a small workbook to check and fix in Excel, then import back on the Import
+    screen. Registered before /export/{name}, which would otherwise take this path."""
+    require_market(conn, slug)
+    path = optional_function("exports", "export_review", "Exports")(conn, slug, bucket)
+    if not path or not Path(path).is_file():
+        raise HTTPException(404, "The review file wasn't created.")
+    return FileResponse(path, media_type=EXPORT_FILES["ranked_list.xlsx"], filename=f"{slug}_{Path(path).name}",
                         headers={"Cache-Control": "no-store"})
 
 
