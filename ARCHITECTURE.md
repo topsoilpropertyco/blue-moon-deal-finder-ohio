@@ -196,6 +196,16 @@ Every function that writes commits its own transaction.
   `owners`, `drive`, `rent`, `photos`, `classify`, `score`, `drill`, `all`, `estimate`, `export`, `calibrate`,
   `serve` (a wildcard host without APP_PASSWORD runs on 127.0.0.1 only), `status`.
 
+## Team link (`bluemoon/share.py`)
+
+`run.py share` runs Cloudflare's free Quick Tunnel (`cloudflared tunnel --url http://localhost:<port>`), with one
+`--allowed-mail` per person on the list in `data/share_emails.txt` (Cloudflare emails each visitor a one-time
+code), or no email list and the dashboard password. The live link is saved to `data/share.json` (with the pid) and
+shown by `/api/settings` / `/api/health` (`share`), the Settings screen and `run.py status`. The web app refuses
+requests from any non-local host name unless `APP_PASSWORD` is set or an email-code share is running; login
+throttling uses `CF-Connecting-IP` only when the direct peer is this computer. `scripts/install_service.sh --share`
+runs it as a second LaunchAgent (`com.bluemoon.share`).
+
 ## Web API (`bluemoon/web/app.py`, JSON)
 
 All market routes are under `/api/m/{slug}`. Errors: `{"detail": "..."}` with 4xx.

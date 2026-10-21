@@ -52,6 +52,7 @@ from fastapi.responses import (
 from pydantic import BaseModel, Field
 
 from .. import __version__, db
+from .. import share as sharing
 from ..config import get_settings
 from ..drill import credits as drill_credits
 from ..drill import engine
@@ -398,7 +399,21 @@ def health(request: Request) -> dict:
     except Exception:  # noqa: BLE001 - a broken vision setting must not break the health check
         backend, cli = "unknown", False
     return {"ok": ok, "version": __version__, "keys": queries.key_status(), "vision_backend": backend,
-            "claude_cli": bool(cli), "auth_required": auth.enabled(), "authenticated": auth.is_authenticated(request)}
+            "claude_cli": bool(cli), "auth_required": auth.enabled(), "authenticated": auth.is_authenticated(request),
+            "share": share_status()}
+
+
+def share_status() -> dict:
+    """The team link (free Cloudflare tunnel): on/off, the link, email codes or password, how many people."""
+    try:
+        live = sharing.current()
+        p = sharing.plan()
+    except Exception:  # noqa: BLE001 - sharing problems must never break the dashboard
+        log.debug("Could not read the share state", exc_info=True)
+        return {"on": False}
+    return {"on": bool(live), "url": (live or {}).get("url"), "started_at": (live or {}).get("started_at"),
+            "mode": (live or {}).get("mode") or p["mode"], "people": len(p["emails"]),
+            "cloudflared": sharing.find_cloudflared() is not None, "problem": None if live else p["problem"]}
 
 
 # Login guessing: each device (IP address) gets `app.login_max_failures` wrong passwords, then has to wait a
@@ -451,7 +466,7 @@ def _login_failed(ip: str, now: float) -> None:
 async def login(body: LoginIn, request: Request) -> Response:
     if not auth.enabled():
         return JSONResponse({"ok": True, "auth_required": False, "message": "No password is set."})
-    ip = request.client.host if request.client else "unknown"
+    ip = sharing.client_ip(request.client.host if request.client else None, request.headers)
     wait = _login_locked_for(ip, _login_clock())
     if wait > 0:   # not even checked while this device waits
         minutes = max(1, math.ceil(wait / 60))
@@ -465,7 +480,8 @@ async def login(body: LoginIn, request: Request) -> Response:
     with _login_lock:
         _login_failures.pop(ip, None)
     resp = JSONResponse({"ok": True, "auth_required": True, "message": "Logged in."})
-    auth.set_cookie(resp, secure=request.url.scheme == "https")
+    auth.set_cookie(resp, secure=request.url.scheme == "https"
+                    or request.headers.get("x-forwarded-proto", "").lower() == "https")
     return resp
 
 
@@ -483,7 +499,9 @@ def list_markets(conn: Conn) -> list[dict]:
 
 @router.get("/api/settings")
 def settings_view() -> dict:
-    return queries.readable_settings()
+    out = queries.readable_settings()
+    out["share"] = share_status()
+    return out
 
 
 @router.get("/api/sources")
@@ -877,7 +895,7 @@ def host_allowed(host_header: str) -> bool:
     """Is this a name the dashboard may be opened under? Raw IP addresses (DNS rebinding needs a domain name),
     localhost, this computer's own name, Tailscale names and app.allowed_hosts in config.yaml."""
     h = _host_name(host_header)
-    if not h or h in ("localhost", "testserver") or h.endswith((".ts.net", ".localhost")):
+    if not h or h in ("localhost", "testserver") or h.endswith((".ts.net", ".localhost", ".trycloudflare.com")):
         return True
     try:
         ipaddress.ip_address(h)
@@ -907,6 +925,10 @@ def install_middleware(app: FastAPI) -> None:
         if not host_allowed(host):
             return JSONResponse({"detail": "This address isn't allowed. Add it to app.allowed_hosts in "
                                            "config.yaml."}, status_code=400)
+        if not sharing.outside_access_ok(host, auth.enabled()):
+            return JSONResponse({"detail": "This dashboard isn't open to other devices. Add people with "
+                                           "'uv run run.py share add name@example.com' or set APP_PASSWORD "
+                                           "in .env, then restart sharing."}, status_code=403)
         origin = request.headers.get("origin")
         if request.method in WRITE_METHODS and origin is not None and \
                 urlsplit(origin).netloc.lower() != host.strip().lower():

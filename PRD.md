@@ -117,7 +117,7 @@ DRILL = Data Resolution through Incremental List Liquidation. Industry: buy a li
 ## 12. Tech stack and structure
 
 - Python 3.11+, `uv`. `pandas`, `openpyxl`, `httpx`, `pydantic`, `python-dotenv`, `pyyaml`, `rapidfuzz`, `fastapi`, `uvicorn`, `anthropic` (optional backend), stdlib `sqlite3`.
-- Dashboard: FastAPI backend + no-build vanilla-JS single-page app (replaces Streamlit; works on phone and computer). Phone access over Tailscale (free).
+- Dashboard: FastAPI backend + no-build vanilla-JS single-page app (replaces Streamlit; works on phone and computer). Team access through Cloudflare's free Quick Tunnel (`run.py share`): a public https link with one-time email codes for listed people, or one shared password. No account or domain; the link changes when sharing restarts.
 - Photo check: Claude Code on the Mac Mini (`claude -p`, Seth's plan). Optional: Anthropic API (`claude-sonnet-5-5`).
 - Google APIs (key `GOOGLE_MAPS_API_KEY`): Geocoding, Routes, Street View Static, Maps Static.
 - Free: HUD map service, US Census geocoder, county and state public-record sites (links only).
@@ -167,7 +167,8 @@ Crexi scraping or automated login; automating people-search sites; automated out
 | 2026-10 | Goal is owner contact (credits + DRILL); pricing is a later, separate buildout |
 | 2026-10 | Three contact levels; only a conversation confirms an owner |
 | 2026-10 | One app, many markets (asset class + geography), same screens |
-| 2026-10 | Custom web dashboard instead of Streamlit; phone access over Tailscale |
+| 2026-10 | Custom web dashboard instead of Streamlit |
+| 2026-10 | Team access through Cloudflare's free Quick Tunnel with email codes (Tailscale's free plan is non-commercial only; a domain for a permanent link is an optional ~$10/year upgrade) |
 | 2026-10 | Photo check runs on Seth's Claude plan via Claude Code; API optional |
 | 2026-10 | HUD rents from HUD's free map service (HUD's download site blocks scripts) |
 | 2026-10 | Package renamed `walkup/` → `bluemoon/` because the scope grew past walk-ups |

@@ -182,6 +182,28 @@
       '<li><p>Reload this page. If the app does not come back, the error is in output/server.log.</p></li></ol>', 'vw-full');
   }
 
+  function sharePanel(sh) {
+    sh = sh || {};
+    const people = toNum(sh.people) || 0;
+    const how = sh.mode === 'email'
+      ? 'Each person types their email and gets a one-time code. ' + num(people) + (people === 1 ? ' person is' : ' people are') + ' on the list.'
+      : 'Everyone types the dashboard password (APP_PASSWORD in .env).';
+    const link = sh.on && sh.url
+      ? '<p><b>Your team link</b></p>' + H.command(sh.url) +
+        '<p class="note vw-tight">' + esc(how) + ' The link changes whenever sharing restarts (for example after the Mac restarts); this card always shows the current one.</p>'
+      : '<p><b>Sharing is off.</b> ' + esc(sh.problem || 'Start it on the Mac Mini:') + '</p>' +
+        (sh.cloudflared === false ? H.command('cd ' + APP_FOLDER + ' && scripts/install_cloudflared.sh') : '') +
+        H.command('cd ' + APP_FOLDER + ' && scripts/install_service.sh --share');
+    return panel('Team link (free)', link +
+      '<details class="im-more"><summary>Add or remove people</summary>' +
+      '<p class="note">Add someone (or *@yourcompany.com for everyone there):</p>' +
+      H.command('cd ' + APP_FOLDER + ' && uv run run.py share add name@example.com') +
+      '<p class="note">Remove someone:</p>' + H.command('cd ' + APP_FOLDER + ' && uv run run.py share remove name@example.com') +
+      '<p class="note">Then restart sharing. The link changes, so send the new one from this card:</p>' +
+      H.command('launchctl kickstart -k gui/$(id -u)/com.bluemoon.share') +
+      '<p class="note">With nobody on the list, the link asks for the dashboard password instead.</p></details>', 'vw-full');
+  }
+
   /* ---------- page ---------- */
 
   const HEAD = H.head('Setup · Settings', 'Settings', [
@@ -194,7 +216,7 @@
     const acs = st.asset_classes || {};
     const s = BM.state.summary;
     const acKey = (s && s.asset_class && s.asset_class.key) || ((H.currentMarket() || {}).asset_class);
-    return HEAD + '<div class="grid2">' + marketsPanel(cfg, acs) + buyBoxPanel(acs[acKey]) + keysPanel(st.keys) +
+    return HEAD + '<div class="grid2">' + sharePanel(st.share) + marketsPanel(cfg, acs) + buyBoxPanel(acs[acKey]) + keysPanel(st.keys) +
       photoPanel(cfg, health) + usagePanel(cfg, usage) + pathsPanel(cfg) + safetyPanel(cfg) + howPanel() + '</div>';
   }
 

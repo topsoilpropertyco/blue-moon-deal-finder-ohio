@@ -815,14 +815,19 @@ def test_other_websites_cannot_write_or_rebind(client, sample_csv):
     assert client.post(f"/api/m/{MARKET}/properties/{pid}/level", json={"action": "note", "note": "x"}).status_code \
         == 200                                                           # no Origin: the command line, curl
     import socket
-    for host in ("127.0.0.1:8765", "100.101.102.103:8765", f"{socket.gethostname()}.tail1234.ts.net",
-                 f"{socket.gethostname()}:8765", "localhost:8765", "[::1]:8765"):
+    for host in ("127.0.0.1:8765", f"{socket.gethostname()}:8765", "localhost:8765", "[::1]:8765"):
         assert client.get(f"/api/m/{MARKET}/summary", headers={"Host": host}).status_code == 200, host
+    # Other devices (Tailscale, a LAN address, the free Cloudflare link) are allowed names, but with no
+    # password and no email-code share they are refused rather than let in.
+    for host in ("100.101.102.103:8765", f"{socket.gethostname()}.tail1234.ts.net", "a-b-c.trycloudflare.com"):
+        r = client.get(f"/api/m/{MARKET}/summary", headers={"Host": host})
+        assert r.status_code == 403 and "other devices" in r.json()["detail"], host
 
 
 def test_allowed_hosts_from_config(client, settings):
     settings.raw["app"]["allowed_hosts"] = ["mac-mini.example.lan"]
-    assert client.get("/api/markets", headers={"Host": "mac-mini.example.lan:8765"}).status_code == 200
+    # An allowed name passes the name check (no 400); with no password it is then refused as an outside device.
+    assert client.get("/api/markets", headers={"Host": "mac-mini.example.lan:8765"}).status_code == 403
     assert client.get("/api/markets", headers={"Host": "other.example.lan:8765"}).status_code == 400
 
 

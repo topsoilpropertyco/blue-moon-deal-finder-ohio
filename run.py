@@ -31,6 +31,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from bluemoon import pipeline
+from bluemoon import share as sharing
 from bluemoon.config import Settings, get_settings, has_secret, secret
 from bluemoon.db import connect, scalar
 from bluemoon.drill.credits import credit_status
@@ -106,6 +107,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", help="default: app.host in config.yaml (0.0.0.0 to reach it from your phone)")
     serve.add_argument("--port", type=positive_int, help="default: app.port in config.yaml")
     add("status", "Where every market stands (keys are shown as yes/no, never their values).")
+    sh = add("share", "Share the dashboard with your team through Cloudflare's free link (keeps running).")
+    sh.add_argument("action", nargs="?", default="start", choices=["start", "add", "remove", "list"],
+                    help="start (default), add or remove people by email, or list them")
+    sh.add_argument("emails", nargs="*", help="email addresses for add/remove (*@company.com = everyone there)")
     return parser
 
 
@@ -353,6 +358,10 @@ def cmd_status(args: argparse.Namespace, conn: sqlite3.Connection, markets: list
                                                       ("hud", "HUD"), ("census", "Census"),
                                                       ("app_password", "dashboard password"))))
     say(f"Crexi credits: {credit_status(conn)['message']}")
+    live = sharing.current()
+    if live:
+        how = "email codes" if live.get("mode") == "email" else "the dashboard password"
+        say(f"Team link: {live['url']} (people get in with {how}).")
     empty = []
     for slug in markets:
         status = pipeline.market_status(conn, slug)
@@ -409,6 +418,53 @@ def cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK
 
 
+def cmd_share(args: argparse.Namespace, settings: Settings) -> int:
+    """Manage the people list, or start the free Cloudflare link (runs until Ctrl+C)."""
+    if args.action in ("add", "remove"):
+        if not args.emails:
+            say(f"Say who to {args.action}, for example: uv run run.py share {args.action} pat@example.com")
+            return EXIT_USAGE
+        try:
+            people = (sharing.add_emails if args.action == "add" else sharing.remove_emails)(args.emails)
+        except sharing.ShareError as exc:
+            say(str(exc))
+            return EXIT_ERROR
+        say(f"People who can open the dashboard: {', '.join(people) if people else 'nobody yet'}.")
+        if sharing.current():
+            say("Restart sharing so the change takes effect (the link will change): "
+                "launchctl kickstart -k gui/$(id -u)/com.bluemoon.share")
+        return EXIT_OK
+    if args.action == "list":
+        people = sharing.list_emails()
+        say(f"People who can open the dashboard: {', '.join(people) if people else 'nobody yet'}.")
+        live = sharing.current()
+        say(f"Sharing is on: {live['url']}" if live else "Sharing is off. Start it with: uv run run.py share")
+        return EXIT_OK
+    plan = sharing.plan(settings)
+    if plan["problem"]:
+        say(plan["problem"])
+        return EXIT_ERROR
+    how = (f"Each person types their email and gets a one-time code ({len(plan['emails'])} on the list)."
+           if plan["mode"] == "email" else "Everyone types the dashboard password (APP_PASSWORD).")
+    say("Starting Cloudflare's free link to the dashboard. Keep this window open (or use the background "
+        "service). " + how)
+
+    def on_url(url: str) -> None:
+        say()
+        say(f"Your team link: {url}")
+        say("Send it to your people. It changes whenever sharing restarts; the current one is always on the "
+            "Settings screen.")
+        say()
+
+    try:
+        code = sharing.run(settings, on_url=on_url, echo=(log.info if args.debug else None))
+    except sharing.ShareError as exc:
+        say(str(exc))
+        return EXIT_ERROR
+    say("Sharing stopped. The team link no longer works.")
+    return EXIT_OK if code in (0, None) else EXIT_ERROR
+
+
 # --- main --------------------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
@@ -418,6 +474,8 @@ def main(argv: list[str] | None = None) -> int:
         settings = get_settings()
         if args.command == "serve":
             return cmd_serve(args, settings)
+        if args.command == "share":
+            return cmd_share(args, settings)
         markets = ([resolve_market(args.market, settings)] if args.market or args.command != "status"
                    else [m.slug for m in settings.markets])
         conn = connect(settings=settings)

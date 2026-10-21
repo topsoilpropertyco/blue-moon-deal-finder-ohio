@@ -60,7 +60,17 @@ scripts/install_service.sh
 
 So it also comes back after a power cut or update restart, turn on automatic login: System Settings > Users & Groups > Automatically log in as > your name. If FileVault is on, macOS hides that option, so after a restart log in once at the Mac.
 
-**From your phone:** in `config.yaml` set `app: host: 0.0.0.0`, put a long passphrase in `.env` (`APP_PASSWORD=` four or more random words, 12+ characters), restart, then open `http://<Mac Mini's Tailscale name>:8765`. Without `APP_PASSWORD` the dashboard stays on this computer only. The login lasts 30 days on each device; after 5 wrong passwords a device has to wait a minute (longer each time). Other websites can't send changes to the dashboard, and it only answers to localhost, IP addresses, the Mac's own name and Tailscale names (add others under `app: allowed_hosts`). To restart the background service after a settings change:
+**Share it with your team (free):** Cloudflare's free link puts the dashboard on the internet as `https://<random-words>.trycloudflare.com`, with no account, no domain and nothing to install for your team. Your data stays on the Mac Mini. Install Cloudflare's connector once, add the people who may get in, and start sharing in the background:
+
+```bash
+scripts/install_cloudflared.sh
+uv run run.py share add pat@example.com
+scripts/install_service.sh --share
+```
+
+Each person opens the link, types their email and gets a one-time code (`*@yourcompany.com` lets in everyone at that company). With nobody on the list, the link asks for the dashboard password (`APP_PASSWORD` in `.env`, four or more random words) instead. Without either it refuses to start. The current link is on the **Settings** screen and in `uv run run.py share list`. It changes whenever sharing restarts (for example after the Mac restarts), so send the new one when that happens. To add or remove someone: `uv run run.py share add name@example.com` or `share remove name@example.com`, then restart sharing with `launchctl kickstart -k gui/$(id -u)/com.bluemoon.share` (the link changes). The dashboard itself only listens on this computer; outside visitors reach it only through the link, and only with the email code or password.
+
+To restart the background service after a settings change:
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.bluemoon.dealfinder
