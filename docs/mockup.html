@@ -1,0 +1,719 @@
+<title>Blue Moon Deal Finder</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: quiet top bar + tabs; Deals = summary strip, filters, list (or drive-time rings), detail drawer slides in from the right (full sheet on phones). */
+:root{
+  --bg:#F5F6F8; --surface:#FFFFFF; --sunk:#EEF0F4; --ink:#121620; --muted:#586072; --faint:#8b93a2; --line:#E1E4EA;
+  --accent:#2C4BD3; --accent-ink:#FFFFFF; --accent-soft:#E7EBFB;
+  --good:#1D8657; --warn:#C08410; --bad:#BF4337; --na:#A9B0BC;
+  --moon-dim:#DCE1EC; --shadow:0 12px 40px rgba(18,22,32,.14);
+  --f-display:"Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --f-ui:"Hanken Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono:"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0D1016; --surface:#151922; --sunk:#10141B; --ink:#E7EAF0; --muted:#A1A9B8; --faint:#6D7585; --line:#252B37;
+  --accent:#8CA2FF; --accent-ink:#0D1016; --accent-soft:#1C2340;
+  --good:#4BC189; --warn:#E2AE48; --bad:#EE7B6F; --na:#596172; --moon-dim:#283040; --shadow:0 12px 40px rgba(0,0,0,.5); color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0D1016; --surface:#151922; --sunk:#10141B; --ink:#E7EAF0; --muted:#A1A9B8; --faint:#6D7585; --line:#252B37;
+  --accent:#8CA2FF; --accent-ink:#0D1016; --accent-soft:#1C2340;
+  --good:#4BC189; --warn:#E2AE48; --bad:#EE7B6F; --na:#596172; --moon-dim:#283040; --shadow:0 12px 40px rgba(0,0,0,.5); color-scheme:dark}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-ui);font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:30;background:var(--surface)}
+button{font:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.num{font-variant-numeric:tabular-nums}
+.gutter{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+
+/* top bar */
+.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--surface);border-bottom:1px solid var(--line)}
+.top-in{max-width:1280px;margin:0 auto;display:flex;align-items:center;gap:24px;padding-block:12px}
+.brand{display:flex;align-items:center;gap:10px;white-space:nowrap}
+.brand b{font-family:var(--f-display);font-style:italic;font-weight:400;font-size:24px;letter-spacing:.2px}
+.brand small{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+.tabs{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;flex:1;min-width:0}
+.tabs::-webkit-scrollbar{display:none}
+.tab{border:0;background:none;padding:8px 12px;border-radius:8px;color:var(--muted);font-weight:500;white-space:nowrap;display:flex;gap:6px;align-items:center}
+.tab:hover{background:var(--sunk);color:var(--ink)}
+.tab[aria-selected="true"]{background:var(--accent-soft);color:var(--accent)}
+.badge{font-size:11px;font-weight:600;background:var(--accent);color:var(--accent-ink);border-radius:10px;padding:1px 7px}
+.sample{font-size:11px;color:var(--warn);border:1px solid currentColor;border-radius:999px;padding:2px 8px;white-space:nowrap}
+
+main{max-width:1280px;margin:0 auto;padding-block:24px 64px}
+.view[hidden]{display:none}
+h1{font-family:var(--f-display);font-weight:400;font-size:34px;line-height:1.1;margin:0;text-wrap:balance}
+h2{font-size:15px;font-weight:600;margin:0}
+.eyebrow{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);font-weight:600}
+.lede{color:var(--muted);max-width:62ch;margin:6px 0 0}
+
+/* summary strip */
+.lines{list-style:none;padding:0;margin:10px 0 0;display:flex;flex-direction:column;gap:2px;color:var(--muted);font-size:15px}
+.lines b{color:var(--ink);font-weight:600}
+.strip{display:flex;gap:10px;overflow-x:auto;scrollbar-width:none;margin:22px 0 18px;padding-bottom:2px}
+.strip::-webkit-scrollbar{display:none}
+.stat{flex:1 0 170px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px;display:flex;align-items:baseline;gap:10px}
+.stat .v{font-family:var(--f-display);font-size:30px;line-height:1}
+.stat .l{color:var(--muted);font-size:12.5px;line-height:1.25}
+@media (max-width:720px){.stat{flex:0 0 132px;flex-direction:column;gap:4px}}
+@media (max-width:760px){.top-in{flex-wrap:wrap;gap:6px 12px;padding-block:10px 4px}.brand{flex:1}.brand small{display:none}.tabs{order:3;flex-basis:100%;margin:0 -6px}}
+/* bars (funnel + analytics) */
+.hbars{display:flex;flex-direction:column;gap:8px}
+.hb{display:grid;grid-template-columns:minmax(110px,190px) minmax(0,1fr) 64px;gap:12px;align-items:center;font-size:13px}
+.hb .t{height:20px;background:var(--sunk);border-radius:4px;overflow:hidden}
+.hb .t i{display:block;height:100%;background:var(--accent);border-radius:0 4px 4px 0;min-width:3px;transition:width .3s}
+.hb .t i.close{background:var(--good)}
+.hb .c{text-align:right;font-weight:600}
+.hb:hover .t i{filter:brightness(1.1)}
+.drop{font-size:11.5px;color:var(--faint);padding-left:calc(min(190px,30%) + 12px);margin:-4px 0 2px}
+.stagehead{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);font-weight:600;margin-top:10px}
+@media (max-width:560px){.hb{grid-template-columns:96px minmax(0,1fr) 52px}.drop{padding-left:108px}}
+
+/* toolbar */
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:6px 12px;font-size:13px;color:var(--muted)}
+.chip:hover{border-color:var(--faint);color:var(--ink)}
+.chip[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--bg)}
+.spacer{flex:1}
+.search{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:7px 14px;font:inherit;color:var(--ink);width:220px;max-width:100%}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:2px;background:var(--surface)}
+.seg button{border:0;background:none;border-radius:999px;padding:5px 12px;font-size:13px;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--sunk);color:var(--ink);font-weight:600}
+
+/* table */
+.tablewrap{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:900px}
+th{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+tbody tr{cursor:pointer}
+tbody tr:hover td{background:var(--sunk)}
+tbody tr.sel td{background:var(--accent-soft)}
+.addr{font-weight:600}
+.city{color:var(--muted);font-size:12.5px}
+.moon{display:flex;align-items:center;gap:10px}
+.moon .pct{font-family:var(--f-display);font-size:22px;min-width:52px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:1px}
+.g{background:var(--good)}.y{background:var(--warn)}.r{background:var(--bad)}.n{background:transparent;border:1.5px dashed var(--na)}
+.cov{display:inline-flex;gap:2px;vertical-align:middle}
+.cov i{width:4px;height:12px;border-radius:2px;background:var(--moon-dim)}
+.cov i.on{background:var(--muted)}
+.pill{font-size:12px;border-radius:999px;padding:2px 9px;background:var(--sunk);color:var(--muted)}
+.pill.hot{background:var(--accent-soft);color:var(--accent)}
+.muted{color:var(--muted)}
+
+/* phone list */
+.cards{display:none;flex-direction:column;gap:8px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;display:grid;grid-template-columns:auto 1fr;gap:4px 14px;text-align:left;width:100%}
+.card .meta{grid-column:2;display:flex;flex-wrap:wrap;gap:4px 12px;color:var(--muted);font-size:12.5px}
+@media (max-width:760px){.tablewrap{display:none}.cards{display:flex}.search{width:100%}}
+
+/* rings */
+.rings{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px;display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:16px}
+.rings svg{width:100%;height:auto;max-height:620px;display:block}
+.rings .legend{display:flex;flex-direction:column;gap:10px;font-size:13px;color:var(--muted)}
+@media (max-width:760px){.rings{grid-template-columns:1fr}}
+
+/* drawer */
+.scrim{position:fixed;inset:0;background:rgba(10,12,18,.32);z-index:40}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(560px,100%);background:var(--surface);z-index:50;box-shadow:var(--shadow);overflow-y:auto;
+  padding:calc(env(safe-area-inset-top,0px) + 20px) max(22px,env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 40px) 22px;
+  transform:translateX(0);transition:transform .25s ease}
+.drawer[hidden]{display:block!important;transform:translateX(105%);visibility:hidden}
+@media (prefers-reduced-motion:reduce){.drawer{transition:none}}
+.dhead{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.x{border:1px solid var(--line);background:var(--surface);border-radius:999px;width:34px;height:34px;flex:none}
+.score{display:flex;align-items:center;gap:18px;margin:18px 0 6px;padding:18px;border-radius:14px;background:var(--sunk)}
+.score .big{font-family:var(--f-display);font-size:58px;line-height:1}
+.score p{margin:2px 0 0;color:var(--muted);font-size:13px}
+.sec{margin-top:24px;display:flex;flex-direction:column;gap:10px}
+.photos{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.photos .sat{grid-column:1/-1}
+.photos svg{width:100%;height:auto;border-radius:8px;display:block}
+.verdict{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.factors{display:flex;flex-direction:column;gap:2px}
+.f{display:grid;grid-template-columns:132px minmax(0,1fr) 46px;gap:10px;align-items:center;font-size:13px;padding:5px 0}
+.f .lab b{display:block;font-weight:600}
+.f .lab span{color:var(--faint);font-size:12px}
+.track{position:relative;height:10px}
+.track::before{content:"";position:absolute;left:50%;top:-4px;bottom:-4px;width:1px;background:var(--line)}
+.track .up,.track .dn{position:absolute;top:0;height:10px;border-radius:3px}
+.track .up{left:50%;background:var(--accent)}
+.track .dn{right:50%;background:var(--bad);opacity:.8}
+.track .miss{position:absolute;inset:3px 10%;border-top:1.5px dashed var(--na)}
+.f .m{text-align:right;font-family:var(--f-mono);font-size:12px;color:var(--muted)}
+.f.missing .lab b{color:var(--faint)}
+.kv{display:grid;grid-template-columns:140px minmax(0,1fr);gap:6px 12px;font-size:13px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;overflow-wrap:anywhere}
+.links{display:flex;flex-wrap:wrap;gap:8px}
+.links a{color:var(--accent);text-decoration:none;font-size:13px;border:1px solid var(--line);border-radius:999px;padding:5px 12px}
+.steps{display:flex;flex-wrap:wrap;gap:6px}
+.steps button{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 10px;font-size:12.5px;color:var(--muted)}
+.steps button[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:9px 14px;font-weight:600}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.note{font-size:12.5px;color:var(--muted)}
+
+/* review */
+.rev{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:20px;margin-top:20px}
+.rev .imgs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.rev .imgs .main{grid-column:1/-1}
+.rev .imgs svg{width:100%;height:auto;border-radius:10px;display:block}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:14px;min-width:0}
+.choices{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.choice{border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:12px;text-align:left;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.choice:hover{border-color:var(--accent)}
+.choice kbd{font-family:var(--f-mono);font-size:11px;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;color:var(--muted)}
+.progress{height:4px;background:var(--sunk);border-radius:4px;overflow:hidden}
+.progress i{display:block;height:100%;background:var(--accent);transition:width .2s}
+@media (max-width:860px){.rev{grid-template-columns:1fr}}
+
+/* score + data views */
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-top:20px}
+@media (max-width:860px){.grid2{grid-template-columns:1fr}}
+.how{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:20px}
+.how div{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px}
+.how b{display:block;margin-bottom:4px}
+.how p{margin:0;color:var(--muted);font-size:13px}
+.how .k{font-family:var(--f-display);font-size:28px;color:var(--accent);line-height:1;margin-bottom:8px}
+@media (max-width:860px){.how{grid-template-columns:1fr 1fr}}
+.wt{width:100%;border-collapse:collapse;min-width:560px}
+.wt td,.wt th{white-space:normal}
+.funnel{display:flex;flex-direction:column;gap:8px}
+.fun{display:grid;grid-template-columns:150px minmax(0,1fr) 64px;gap:12px;align-items:center;font-size:13px}
+.fun .b{height:22px;border-radius:5px;background:var(--accent);opacity:.85}
+.layers{display:flex;flex-direction:column}
+.layer{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}
+.layer:last-child{border-bottom:0}
+.layer .st{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700}
+.st.done{background:var(--good);color:var(--surface)}
+.st.next{border:1.5px solid var(--accent);color:var(--accent)}
+.st.later{border:1.5px dashed var(--na);color:var(--faint)}
+.layer p{margin:0;color:var(--muted);font-size:12.5px}
+
+/* contact levels */
+.lv{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;white-space:nowrap}
+.lv .pips{display:inline-flex;gap:2px}
+.lv .pips i{width:7px;height:7px;border-radius:2px;background:var(--moon-dim)}
+.lv.l1 .pips i:nth-child(-n+1),.lv.l2 .pips i:nth-child(-n+2){background:var(--warn)}
+.lv.l3 .pips i{background:var(--good)}
+.chs{display:inline-flex;gap:3px;margin-left:8px;vertical-align:middle}
+.ch{font-size:10.5px;font-weight:600;letter-spacing:.02em;border-radius:5px;padding:1px 5px;border:1px solid var(--line);color:var(--faint);background:transparent}
+.ch.v{background:var(--good);border-color:var(--good);color:var(--surface)}
+.ch.u{border-color:var(--warn);color:var(--warn)}
+.ch.w{border-color:var(--bad);color:var(--bad);text-decoration:line-through}
+.ch.none{border-style:dashed;opacity:.7}
+.ladder{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
+.ladder div{border-radius:8px;padding:8px 10px;background:var(--sunk);font-size:12px;color:var(--faint);min-width:0}
+.ladder div b{display:block;font-size:12.5px;color:var(--muted)}
+.ladder div.on{background:var(--warn);color:var(--surface)}
+.ladder div.on b{color:var(--surface)}
+.ladder.done div.on{background:var(--good)}
+.ladder div.cur{outline:2px solid var(--ink);outline-offset:-2px}
+.timeline{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.timeline li{display:grid;grid-template-columns:14px minmax(0,1fr);gap:10px;padding:0 0 12px;position:relative;font-size:13px}
+.timeline li::before{content:"";width:10px;height:10px;border-radius:50%;margin-top:4px;background:var(--muted)}
+.timeline li::after{content:"";position:absolute;left:4.5px;top:16px;bottom:0;width:1px;background:var(--line)}
+.timeline li:last-child::after{display:none}
+.timeline li.hit::before{background:var(--good)}
+.timeline li.miss::before{background:var(--bad)}
+.timeline li.next::before{background:transparent;border:2px dashed var(--accent);width:6px;height:6px}
+.timeline .src{font-weight:600}
+.timeline .res{color:var(--muted)}
+.big{font-family:var(--f-display);font-size:64px;line-height:1}
+.credit{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
+.credit:last-child{border-bottom:0}
+.wt td.c{text-align:right}
+.road{display:flex;flex-direction:column;gap:12px;margin-top:20px}
+.phase{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;display:grid;grid-template-columns:48px minmax(0,1fr);gap:4px 14px}
+.phase .n{font-family:var(--f-display);font-size:34px;line-height:1;color:var(--accent);grid-row:1/4}
+.phase ul{margin:4px 0 0;padding-left:18px;color:var(--muted)}
+.phase.now{border-color:var(--accent)}
+
+.toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 24px);transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;z-index:60;font-size:13px;max-width:calc(100% - 32px)}
+</style>
+
+<header class="top">
+  <div class="top-in gutter">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="10" fill="var(--accent)"/><circle cx="15" cy="8" r="9" fill="var(--surface)"/></svg>
+      <b>Blue Moon</b><small>Deal Finder · Ohio</small>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab" role="tab" data-v="deals">Deals</button>
+      <button class="tab" role="tab" data-v="contact">Owner contact</button>
+      <button class="tab" role="tab" data-v="funnel">Funnel</button>
+      <button class="tab" role="tab" data-v="review">Photo review <span class="badge" id="revBadge">0</span></button>
+      <button class="tab" role="tab" data-v="data">Analytics</button>
+      <button class="tab" role="tab" data-v="score">The score</button>
+      <button class="tab" role="tab" data-v="roadmap">Roadmap</button>
+    </nav>
+    <span class="sample">Mockup · sample data</span>
+  </div>
+</header>
+
+<main class="gutter">
+  <!-- DEALS -->
+  <section class="view" id="v-deals">
+    <div class="eyebrow">Brad · Springfield buy box</div>
+    <h1>Where the rare deals are</h1>
+    <ul class="lines">
+      <li><b>Blue Moon score:</b> how worth chasing the owner is.</li>
+      <li><b>Contact level:</b> 1 no owner data, 2 possible owner, 3 confirmed.</li>
+      <li>Work from the top. Get every owner to level 3.</li>
+    </ul>
+    <div class="strip" id="strip"></div>
+    <div class="bar">
+      <div id="chips" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+      <span class="spacer"></span>
+      <input class="search" id="q" type="search" placeholder="Search address, city, owner" aria-label="Search">
+      <div class="seg" role="group" aria-label="View">
+        <button id="asList" aria-pressed="true">List</button>
+        <button id="asRings" aria-pressed="false">Drive-time rings</button>
+      </div>
+    </div>
+    <div id="listWrap">
+      <div class="tablewrap"><table><thead><tr>
+        <th>Blue Moon</th><th>Property</th><th>Contact level</th><th>Units</th><th>Drive</th><th>Walk-up</th><th>Rent fit</th><th>Owner</th><th>Owned</th><th title="How many of the 10 signals we have data for">Data</th>
+      </tr></thead><tbody id="rows"></tbody></table></div>
+      <div class="cards" id="cards"></div>
+    </div>
+    <div class="rings" id="ringsWrap" hidden>
+      <svg id="ringsSvg" viewBox="0 0 640 640" role="img" aria-label="Properties by drive time from downtown Springfield"></svg>
+      <div class="legend">
+        <h2>Drive time from downtown Springfield</h2>
+        <span>Rings at 15, 30, 45 and 60 minutes. Direction is real; distance is drive time, not miles.</span>
+        <span><span class="dot g"></span>Blue Moon 10% or higher</span>
+        <span><span class="dot y"></span>5–10%</span>
+        <span><span class="dot r"></span>Under 5%</span>
+        <span>Tap a dot to open the property.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- REVIEW -->
+  <section class="view" id="v-review" hidden>
+    <div class="eyebrow">Photo review</div>
+    <h1>Is it a walk-up?</h1>
+    <p class="lede">The AI is unsure about these. Your answer replaces its guess, updates the Blue Moon score, and becomes an example it learns from next time. Use the number keys to move fast.</p>
+    <div id="revBody"></div>
+  </section>
+
+  <!-- SCORE -->
+  <section class="view" id="v-score" hidden>
+    <div class="eyebrow">The model</div>
+    <h1>How the Blue Moon score works</h1>
+    <ul class="lines">
+      <li>The Blue Moon score answers one question: is this owner worth chasing?</li>
+      <li>It works like a weather forecast. Start rare, then each signal pushes the odds up or down.</li>
+    </ul>
+    <div class="how">
+      <div><div class="k">1.5%</div><b>Start rare</b><p>Before we know anything, about 1 in 70 properties in the buy box could be bought at a Blue Moon price.</p></div>
+      <div><div class="k">×</div><b>Each signal multiplies</b><p>A 25-year owner doubles the odds (×2.0). An institutional owner cuts them sharply (×0.15).</p></div>
+      <div><div class="k">—</div><b>Missing means skipped</b><p>No data on a signal? It's left out, not counted against the property. The bars show which ones were skipped.</p></div>
+      <div><div class="k">▮▮▯</div><b>Data shows certainty</b><p>The Data column shows how many of the 10 signals we have. A 12% on 9 of 10 is firmer than a 12% on 4 of 10.</p></div>
+    </div>
+    <div class="grid2">
+      <div class="panel" style="grid-column:1/-1">
+        <h2>Starting weights</h2>
+        <p class="note">These are starting estimates from common investor practice for finding motivated sellers. They are labeled as estimates until your own deals confirm or correct them.</p>
+        <div style="overflow-x:auto"><table class="wt" id="wt"></table></div>
+      </div>
+      <div class="panel">
+        <h2>How it learns</h2>
+        <div class="kv">
+          <dt>Outcomes logged</dt><dd class="num" id="nOut">0</dd>
+          <dt>Past deals added</dt><dd class="num">0</dd>
+          <dt>Weights adjusted</dt><dd>Not yet. After about 30 outcomes, weights start shifting toward what actually happened.</dd>
+        </div>
+        <p class="note">Every owner you reach, and every deal that later works out in your CRM, is evidence. The model compares the signals on owners who sold against ones who didn't, and nudges each weight.</p>
+        <button class="btn" data-toast="In the real tool you paste the Crexi link of a property you already bought. It pulls the data as it looked before you bought it and tests the score against it.">Add a past deal</button>
+      </div>
+      <div class="panel">
+        <h2>What it can't see yet</h2>
+        <p class="note">Unpaid property taxes, code violations, probate and evictions are strong signs a seller may take a low price. Counties publish some of these. They're good candidates for a later layer.</p>
+        <p class="note">Pricing and the Blue Moon strike price will come from Brad's spreadsheet in a separate buildout.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- DATA -->
+  <section class="view" id="v-contact" hidden>
+    <div class="eyebrow">Owner contact · the DRILL</div>
+    <h1>Get every owner confirmed</h1>
+    <ul class="lines">
+      <li><b>Level 1</b> No owner data. <b>Level 2</b> Possible owner. <b>Level 3</b> Confirmed owner.</li>
+      <li>Confirmed means we talked to them and they said they own it. Then it goes to the CRM.</li>
+    </ul>
+    <div class="grid2">
+      <div class="panel">
+        <h2>Penetration</h2>
+        <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap"><span class="big num" id="pen">0%</span><span class="note" id="penNote"></span></div>
+        <div class="hbars" id="lvBars"></div>
+      </div>
+      <div class="panel">
+        <h2>Crexi credits this month</h2>
+        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span class="big num" id="crLeft">500</span><span class="note">of 500 left · they expire at month end, so the plan spends them all</span></div>
+        <p class="note" style="margin:0">Next in line: the highest-ranked possible owners after the free sources were tried.</p>
+        <div id="creditList"></div>
+      </div>
+      <div class="panel" style="grid-column:1/-1">
+        <h2>Which sources work</h2>
+        <p class="note" style="margin:0">Hit rate by source and owner type. The drill uses this to try the source most likely to work first. Sample numbers.</p>
+        <div style="overflow-x:auto"><table class="wt" id="srcTable"></table></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="v-funnel" hidden>
+    <div class="eyebrow">Funnel · live</div>
+    <h1>From raw list to reachable owner</h1>
+    <ul class="lines">
+      <li>Updates as you review photos and move owners up a level.</li>
+      <li>The gray % under each bar is how many moved on.</li>
+    </ul>
+    <div class="grid2">
+      <div class="panel"><h2>Find the property</h2><div class="hbars" id="fFind"></div></div>
+      <div class="panel"><h2>Reach the owner</h2><div class="hbars" id="fClose"></div></div>
+    </div>
+    <p class="note" style="margin-top:12px">Sample properties. Try it: open a property, mark the owner confirmed, and come back.</p>
+  </section>
+
+  <section class="view" id="v-roadmap" hidden>
+    <div class="eyebrow">Roadmap</div>
+    <h1>What gets built, in order</h1>
+    <ul class="lines">
+      <li><b>Goal:</b> find the owner and confirm we can reach them.</li>
+      <li>Conversations happen in your CRM. Pricing comes later, separately.</li>
+    </ul>
+    <div class="road">
+      <div class="phase now"><span class="n">1</span><h2>Foundation</h2><ul><li>Import Crexi files into one master list; merge duplicates</li><li>Brad's buy box: 10–80 units, sweet spot 20–50, within 60 minutes, built 1970+</li><li>Size from units + sq ft, then units, then sq ft</li><li>Drive time, HUD rent fit, ranked list to Google Sheets</li></ul></div>
+      <div class="phase"><span class="n">2</span><h2>DRILL and contact levels</h2><ul><li>Levels 1–3 per property: no owner data, possible owner, confirmed owner</li><li>Channel badges for mail, phone, text, email, social and voicemail drop</li><li>Free sources first: Ohio Secretary of State, county auditor and recorder, web search</li><li>Spend all 500 Crexi credits each month on the top-ranked owners not yet confirmed</li><li>Penetration dashboard and a drill timeline on every property</li><li>Do Not Call flags on phone numbers</li></ul></div>
+      <div class="phase"><span class="n">3</span><h2>Walk-up photo check</h2><ul><li>Street View and satellite photos read by AI on your Claude plan</li><li>Review queue for unsure results; your answers become examples</li></ul></div>
+      <div class="phase"><span class="n">4</span><h2>Learning loops</h2><ul><li>Hit rate of each source by owner type, so the drill tries the best source first</li><li>Blue Moon score weights tuned from real results and past deals</li></ul></div>
+      <div class="phase"><span class="n">5</span><h2>Owner profiles and archetypes</h2><ul><li>A profile of the people behind each property, built from everything gathered</li><li>Archetypes with guesses about their situation, what they value, and how to message them</li><li>Starting archetypes: long-time local owner, distant heirs, tired self-manager, small portfolio operator, institution</li><li>Only property, business and public-record facts. No guesses about health, religion, ethnicity or other personal traits</li></ul></div>
+      <div class="phase"><span class="n">+</span><h2>Later</h2><ul><li>Blue Moon strike price from Brad's spreadsheet (separate buildout)</li><li>More buy boxes for wholesale buyers</li><li>Distress data: tax delinquency, code violations</li></ul></div>
+    </div>
+  </section>
+
+  <section class="view" id="v-data" hidden>
+    <div class="eyebrow">Analytics</div>
+    <h1>What's in the data</h1>
+    <ul class="lines">
+      <li><b>Last import:</b> Oct 12, 2026 · 4 Crexi files · 3,000 properties.</li>
+      <li>Every number on this tab comes from your real file.</li>
+    </ul>
+    <div class="grid2">
+      <div class="panel">
+        <h2>Filter funnel</h2>
+        <div class="hbars" id="funnel"></div>
+        <p class="note" style="margin:0">Uses straight-line distance for now. Real drive times will tighten it.</p>
+      </div>
+      <div class="panel">
+        <h2>How complete the data is</h2>
+        <div class="hbars" id="coverage"></div>
+      </div>
+      <div class="panel">
+        <h2>Properties by county</h2>
+        <div class="hbars" id="counties"></div>
+      </div>
+      <div class="panel">
+        <h2>Properties by unit count</h2>
+        <div class="hbars" id="unitsDist"></div>
+        <p class="note" style="margin:0">Brad's range is 10–80. His sweet spot is 20–50.</p>
+      </div>
+      <div class="panel" style="grid-column:1/-1">
+        <h2>Data layers</h2>
+        <div class="layers" id="layers"></div>
+      </div>
+    </div>
+    <div class="bar" style="margin-top:16px">
+      <button class="btn" data-toast="In the real tool: drop Crexi CSV or Excel files here. They merge into the list.">Import Crexi file</button>
+      <button class="btn primary" data-toast="In the real tool: sends the ranked list to a Google Sheet for Brad.">Send ranked list to Google Sheets</button>
+    </div>
+  </section>
+</main>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="Property detail"></aside>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(function(){
+/* ---------- sample data (made up) ---------- */
+function rng(seed){return function(){seed|=0;seed=seed+0x6D2B79F5|0;var t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+var R=rng(20261021), pick=function(a){return a[Math.floor(R()*a.length)]}, between=function(a,b){return a+Math.floor(R()*(b-a+1))};
+var towns=[["Springfield",6,0],["Enon",13,225],["New Carlisle",15,285],["Urbana",22,355],["Fairborn",22,228],["Huber Heights",25,255],["Beavercreek",28,215],["Xenia",29,190],["London",30,100],["Kettering",38,232],["Dayton",36,240],["Troy",34,305],["Piqua",40,312],["Bellefontaine",43,350],["Marysville",46,40],["Sidney",48,328],["Columbus",50,92],["Richmond, IN",56,268]];
+var streets=["Ridgewood","Sycamore","Kenton","Larchmont","Bellbrook","Rolling Hill","Fairway","Linden","Meadowlark","Northgate","Buckeye","Oak Knoll","Woodside","Clifton","Prairie","Mill Run","Hawthorne","Crestview","Willow Bend","Stonegate"];
+var sfx=["Dr","Ave","Ct","Rd","Ln","Pl"];
+var sur=["Pruitt","McAllister","Hendershot","Kowalski","Brandt","Delacroix","Whitlock","Osterman","Varga","Lindqvist","Abernathy","Tolliver","Reinholt","Sato","Okafor"];
+var first=["Ronald & Joan","Gary","Linda","Dennis & Carol","Marjorie","Walter","Sandra","Earl & Betty"];
+var props=[];
+for(var i=0;i<64;i++){
+  var t=pick(towns), st=pick(streets);
+  var units=R()<.06?null:pick([8,10,12,12,16,18,20,24,24,28,32,36,40,44,48,52,60,72,84,96,120]);
+  var sqft=R()<.08?null:(units?units*between(720,980):between(9000,30000));
+  var yr=between(1970,1998), stories=R()<.1?null:(yr<1990?pick([2,2,2,3]):pick([2,3,3,4]));
+  var ot=pick(["individual","individual","trust","small","small","small","portfolio","institutional"]);
+  var owner= ot=="individual"?pick(sur).toUpperCase()+" "+pick(first).toUpperCase()
+    : ot=="trust"?pick(sur).toUpperCase()+" FAMILY TRUST"
+    : ot=="small"?st.toUpperCase()+" APARTMENTS LLC"
+    : ot=="portfolio"?pick(["BUCKEYE RESIDENTIAL HOLDINGS LLC","MIAMI VALLEY RENTALS LLC","GEM CITY PROPERTIES LP"])
+    : pick(["MIDWEST MULTIFAMILY INCOME REIT","GREAT LAKES APARTMENT FUND III LP"]);
+  var count= ot=="portfolio"?between(6,19): ot=="institutional"?between(40,210): ot=="small"?between(1,2):1;
+  var yrs=R()<.12?null:(ot=="institutional"?between(1,7):ot=="portfolio"?between(2,14):between(3,34));
+  var loan= yrs==null?null: (yrs>18&&R()<.7)?"none":(R()<.18?"maturing":"active");
+  var away=pick(["local","local","local","instate","outofstate"]); if(ot=="institutional")away="outofstate";
+  var label, p;
+  var r=R();
+  if(stories&&stories>=4){label=r<.7?"INTERIOR_CORRIDOR":"MIXED"} else if(yr<1992){label=r<.55?"EXTERIOR_CORRIDOR":r<.75?"DIRECT_ENTRY":r<.88?"MIXED":"INTERIOR_CORRIDOR"} else {label=r<.4?"EXTERIOR_CORRIDOR":r<.6?"DIRECT_ENTRY":r<.75?"MIXED":"INTERIOR_CORRIDOR"}
+  p= label=="EXTERIOR_CORRIDOR"||label=="DIRECT_ENTRY"?between(70,97): label=="MIXED"?between(45,70): between(4,30);
+  var noPhoto=R()<.12; if(noPhoto){p=null}
+  var lr=R(), level=lr<.07?1:lr<.86?2:3;
+  var person= ot=="individual"?owner : ot=="institutional"?"Asset manager (unknown)" : pick(["Dale","Karen","Mark","Teresa","Brian","Joyce","Phil","Renee"])+" "+pick(sur);
+  var ch={mail:"none",phone:"none",text:"none",email:"none",social:"none"};
+  var log=[];
+  if(level==1){log.push(["Crexi export","No owner name on record","miss"])}
+  else{log.push(["Crexi export","Owner "+owner.toLowerCase().replace(/\b\w/g,function(c){return c.toUpperCase()})+", mailing address","hit"]);ch.mail="u"}
+  if(level>=2&&R()<.55){log.push(ot=="individual"||ot=="trust"?["County auditor","Deed lists "+person+"; not confirmed yet","hit"]:["Ohio Secretary of State","LLC agent is "+person+"; not confirmed yet","hit"])}
+  if(level==2&&R()<.4){log.push(["Web search","Phone found on a business listing; not tested yet","hit"]);ch.phone="u"}
+  if(level==3){var s1=R()<.5;log.push(s1?["Crexi credit","Cell phone and email","hit"]:["Web search","LinkedIn profile and email","hit"]);
+    if(R()<.3){log.push(["Call","Number belongs to someone else","miss"])}
+    log.push(s1?["Call","Talked to "+person.split(" ")[0]+"; confirmed they own it","hit"]:["Email","Replied; confirmed they own it","hit"]);
+    ch.mail="v";if(s1){ch.phone="v";ch.text="v";ch.email="u"}else{ch.email="v";ch.social="u"}}
+  props.push({level:level,person:person,ch:ch,log:log,dnc:false,id:i+1,addr:between(100,4800)+" "+st+" "+pick(sfx),city:t[0],drive:Math.max(5,t[1]+between(-5,6)),bearing:(t[2]+between(-14,14)+360)%360,
+    units:units,sqft:sqft,yr:yr,stories:stories,owner:owner,ot:ot,count:count,yrs:yrs,loan:loan,away:away,
+    vacant:R()<.06,worn:R()<.15,label:noPhoto?"UNKNOWN":label,aiLabel:noPhoto?"UNKNOWN":label,p:p,
+    rent:pick(["in","in","in","near","near","out"]),reviewed:false,credit:false});
+}
+
+/* ---------- the score ---------- */
+var BASE=0.015;
+function factors(x){
+  var f=[];
+  // size: units+sqft > units > sqft > nothing
+  if(x.units){var m=x.units>=20&&x.units<=50?1.3:(x.units>=10&&x.units<=80?1.0:0.5);
+    f.push({k:"Size",v:x.units+" units"+(x.sqft?" · "+(x.sqft/1000).toFixed(1)+"k sq ft":""),m:m,why:x.units>=20&&x.units<=50?"In Brad's 20–50 sweet spot":x.units>=10&&x.units<=80?"Inside 10–80":"Outside 10–80"});}
+  else if(x.sqft){var est=Math.round(x.sqft/850);f.push({k:"Size",v:"~"+est+" units (est. from sq ft)",m:est>=10&&est<=80?1.0:0.6,why:"Estimated, unit count missing"});}
+  else f.push({k:"Size",v:"Unknown",m:null,why:"No units or sq ft"});
+  // walk-up
+  if(x.p==null) f.push({k:"Walk-up",v:"Needs photo review",m:null,why:"No clear photo yet"});
+  else {var w=x.p>=80?1.4:x.p>=55?1.1:x.p>20?0.8:0.4;f.push({k:"Walk-up",v:x.p+"% outdoor entry",m:w,why:x.reviewed?"Confirmed by you":"AI from Street View"});}
+  // rent
+  f.push({k:"Rent fit",v:{in:"Area rents match Brad's scale",near:"Close to Brad's scale",out:"Area rents off his scale"}[x.rent],m:{in:1.2,near:1.0,out:0.7}[x.rent],why:"HUD rents vs studio $800 to 3BR $1,500"});
+  // drive
+  f.push({k:"Drive time",v:x.drive+" min",m:x.drive<=30?1.1:x.drive<=50?1.0:0.85,why:"From downtown Springfield"});
+  // owner type
+  var om={individual:1.8,trust:2.0,small:1.2,portfolio:0.6,institutional:0.15}[x.ot];
+  f.push({k:"Owner type",v:{individual:"Individual",trust:"Family trust",small:"Small LLC",portfolio:"Portfolio owner",institutional:"Institutional"}[x.ot]+" · owns "+x.count,m:om,why:"Name pattern + how many properties they own"});
+  // years owned
+  if(x.yrs==null) f.push({k:"Years owned",v:"Unknown",m:null,why:"No sale date"});
+  else f.push({k:"Years owned",v:x.yrs+" years",m:x.yrs>=20?2.0:x.yrs>=10?1.4:x.yrs>=5?1.0:0.5,why:"Long holds mean more equity and less attachment to price"});
+  // debt
+  if(x.loan==null) f.push({k:"Debt",v:"Unknown",m:null,why:"No loan record"});
+  else f.push({k:"Debt",v:{none:"Likely free and clear",maturing:"Loan due within 18 months",active:"Active loan"}[x.loan],m:{none:1.6,maturing:1.5,active:0.9}[x.loan],why:"From recorded mortgages"});
+  // absentee
+  f.push({k:"Owner location",v:{local:"Local owner",instate:"Elsewhere in Ohio",outofstate:"Out of state"}[x.away],m:{local:1.0,instate:1.15,outofstate:1.4}[x.away],why:"Mailing address vs property"});
+  f.push({k:"Vacancy",v:x.vacant?"USPS marks vacant":"Occupied",m:x.vacant?1.5:1.0,why:"USPS vacancy flag"});
+  f.push({k:"Condition",v:x.worn?"Building value low vs land":"Normal",m:x.worn?1.3:1.0,why:"County building vs land value"});
+  return f;
+}
+function score(x){var o=BASE/(1-BASE),fs=factors(x),have=0;fs.forEach(function(f){if(f.m!=null){o*=f.m;have++}});return{p:o/(1+o),fs:fs,have:have,n:fs.length}}
+var lvName={1:"No owner data",2:"Possible owner",3:"Confirmed owner"};
+var chName={mail:"Mail",phone:"Call",text:"Text",email:"Email",social:"Social"};
+function lvHtml(x){return'<span class="lv l'+x.level+'" title="Level '+x.level+': '+lvName[x.level]+'"><span class="pips"><i></i><i></i><i></i></span>'+(x.dnc?"Do not contact":lvName[x.level])+'</span>'}
+function chHtml(x){return'<span class="chs">'+Object.keys(chName).map(function(k){var s=x.ch[k];return'<span class="ch '+s+'" title="'+chName[k]+': '+{v:"verified",u:"not tested",w:"wrong",none:"none found"}[s]+'">'+chName[k]+'</span>'}).join("")+'</span>'}
+function money(v){return v>=1e6?"$"+(v/1e6).toFixed(v>=1e7?0:2).replace(/\.?0+$/,"")+"M":"$"+Math.round(v/1000)+"K"}
+function pct(v){return v<0.1?(v*100).toFixed(1)+"%":Math.round(v*100)+"%"}
+function walkDot(x){return x.p==null?"n":x.p>=80?"g":x.p>20?"y":"r"}
+function rentDot(x){return{in:"g",near:"y",out:"r"}[x.rent]}
+function needsReview(x){return !x.reviewed&&(x.p==null||(x.p>20&&x.p<80))}
+var ownerShort={individual:"Individual",trust:"Trust",small:"Small LLC",portfolio:"Portfolio",institutional:"Institutional"};
+
+/* moon glyph: lit share grows with the score (30% = full moon) */
+function moon(v,size){size=size||22;var r=size/2-1,f=Math.min(1,v/0.30),d=(2*r)*(1-f),id="m"+Math.random().toString(36).slice(2,8);
+  return '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" aria-hidden="true"><defs><clipPath id="'+id+'"><circle cx="'+size/2+'" cy="'+size/2+'" r="'+r+'"/></clipPath></defs><circle cx="'+size/2+'" cy="'+size/2+'" r="'+r+'" fill="var(--moon-dim)"/><circle clip-path="url(#'+id+')" cx="'+(size/2+d)+'" cy="'+size/2+'" r="'+r+'" fill="var(--accent)"/></svg>'}
+function cov(s){var h="";for(var i=0;i<s.n;i++)h+='<i class="'+(i<s.have?"on":"")+'"></i>';return'<span class="cov" title="'+s.have+' of '+s.n+' signals">'+h+"</span>"}
+
+/* ---------- illustrated "photos" (stand-ins for Street View) ---------- */
+function photo(label,seed,kind){var r2=rng(seed),W=320,H=kind=="main"?180:200;
+  var sky='<rect width="'+W+'" height="'+H+'" fill="#BFD3E6"/><rect y="'+(H*0.78)+'" width="'+W+'" height="'+(H*0.22)+'" fill="#8C9A86"/><rect y="'+(H*0.86)+'" width="'+W+'" height="'+(H*0.14)+'" fill="#6E7378"/>';
+  var b="",x0=20+r2()*30,brick=["#B88A6E","#A7765C","#C7B299","#9E9C94"][Math.floor(r2()*4)];
+  if(label=="UNKNOWN"){b='<g fill="#5E7F52">';for(var k=0;k<9;k++){b+='<circle cx="'+(k*40+r2()*20)+'" cy="'+(H*0.55+r2()*30)+'" r="'+(28+r2()*16)+'"/>'}b+='</g><rect x="0" y="'+(H*0.74)+'" width="'+W+'" height="6" fill="#4A4F55"/>'}
+  else if(label=="INTERIOR_CORRIDOR"){var bw=200,bh=H*0.62,by=H*0.8-bh;b='<rect x="'+x0+'" y="'+by+'" width="'+bw+'" height="'+bh+'" fill="'+brick+'"/>';for(var fl=0;fl<4;fl++)for(var c=0;c<7;c++)b+='<rect x="'+(x0+10+c*27)+'" y="'+(by+8+fl*(bh/4.3))+'" width="14" height="'+(bh/8)+'" fill="#3E4A57"/>';b+='<rect x="'+(x0+bw/2-16)+'" y="'+(H*0.8-26)+'" width="32" height="26" fill="#2E3540"/><rect x="'+(x0+bw/2-30)+'" y="'+(H*0.8-32)+'" width="60" height="6" fill="#55606C"/>'}
+  else if(label=="DIRECT_ENTRY"){var bh2=H*0.42,by2=H*0.8-bh2;for(var u=0;u<6;u++){var ux=x0-10+u*48;b+='<rect x="'+ux+'" y="'+by2+'" width="46" height="'+bh2+'" fill="'+brick+'"/><polygon points="'+ux+','+by2+' '+(ux+23)+','+(by2-18)+' '+(ux+46)+','+by2+'" fill="#5A5048"/><rect x="'+(ux+6)+'" y="'+(H*0.8-24)+'" width="12" height="24" fill="#33414F"/><rect x="'+(ux+24)+'" y="'+(by2+10)+'" width="14" height="14" fill="#3E4A57"/><rect x="'+(ux+3)+'" y="'+(H*0.8)+'" width="18" height="4" fill="#9A9A93"/>'}}
+  else {var bw3=250,bh3=H*0.5,by3=H*0.8-bh3;b='<rect x="'+x0+'" y="'+by3+'" width="'+bw3+'" height="'+bh3+'" fill="'+brick+'"/>';var mid=by3+bh3/2;
+    b+='<rect x="'+x0+'" y="'+(mid-3)+'" width="'+bw3+'" height="5" fill="#E9E6DF"/>';for(var q=0;q<bw3;q+=8)b+='<rect x="'+(x0+q)+'" y="'+(mid-14)+'" width="1.5" height="11" fill="#E9E6DF"/>';b+='<rect x="'+x0+'" y="'+(mid-15)+'" width="'+bw3+'" height="2" fill="#E9E6DF"/>';
+    for(var dd=0;dd<6;dd++){b+='<rect x="'+(x0+16+dd*40)+'" y="'+(by3+8)+'" width="12" height="'+(bh3/2-14)+'" fill="#33414F"/><rect x="'+(x0+16+dd*40)+'" y="'+(mid+6)+'" width="12" height="'+(bh3/2-8)+'" fill="#33414F"/>'}
+    b+='<polygon points="'+(x0+bw3)+','+(H*0.8)+' '+(x0+bw3+34)+','+(H*0.8)+' '+(x0+bw3+34)+','+(mid+2)+'" fill="none" stroke="#E9E6DF" stroke-width="3"/>';
+    if(label=="MIXED"){b+='<rect x="'+(x0+bw3-70)+'" y="'+(by3-30)+'" width="70" height="'+(bh3+30)+'" fill="#8E8A82"/><rect x="'+(x0+bw3-48)+'" y="'+(H*0.8-22)+'" width="26" height="22" fill="#2E3540"/>'}}
+  var tree='<circle cx="'+(W-30)+'" cy="'+(H*0.6)+'" r="'+(18+r2()*10)+'" fill="#5E7F52"/><rect x="'+(W-32)+'" y="'+(H*0.6)+'" width="4" height="'+(H*0.2)+'" fill="#5A4A3A"/>';
+  return '<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Street View photo stand-in">'+sky+b+(label=="UNKNOWN"?"":tree)+'</svg>'}
+function sat(label,seed){var r2=rng(seed+7),W=640,H=220,g='<rect width="'+W+'" height="'+H+'" fill="#6F7F63"/><rect y="'+(H-36)+'" width="'+W+'" height="22" fill="#55595E"/>';
+  var n=label=="INTERIOR_CORRIDOR"?1:label=="UNKNOWN"?3:5;for(var k=0;k<n;k++){var w=label=="INTERIOR_CORRIDOR"?220:80+r2()*40,h=label=="INTERIOR_CORRIDOR"?110:34+r2()*12;g+='<rect x="'+(40+k*(W-80)/Math.max(n,1)+r2()*20)+'" y="'+(30+r2()*60)+'" width="'+w+'" height="'+h+'" fill="#8A8C8E" stroke="#5C5F62" stroke-width="2"/>'}
+  for(var t=0;t<14;t++)g+='<circle cx="'+r2()*W+'" cy="'+r2()*(H-40)+'" r="'+(6+r2()*9)+'" fill="#4E6B45"/>';
+  g+='<g fill="#9DA0A3">';for(var c=0;c<16;c++)g+='<rect x="'+(60+c*30)+'" y="'+(H-70)+'" width="20" height="10"/>';g+="</g>";
+  return '<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Satellite view stand-in">'+g+'</svg>'}
+var labelText={EXTERIOR_CORRIDOR:"Exterior corridor",DIRECT_ENTRY:"Direct entry",INTERIOR_CORRIDOR:"Interior corridor",MIXED:"Mixed",UNKNOWN:"Can't see the building"};
+
+/* ---------- state ---------- */
+var state={filter:"all",q:"",mode:"list",sel:null,outcomes:0};
+var creditsUsed=188;
+var filters=[["all","All in buy box"],["below","Not confirmed yet"],["sweet","20–50 units"],["walk","Walk-up"],["mom","Mom-and-pop"],["long","Owned 15+ yrs"],["moon","Blue Moon 10%+"],["review","Needs photo review"]];
+function visible(){var q=state.q.toLowerCase();return props.map(function(x){return{x:x,s:score(x)}}).filter(function(o){var x=o.x;
+  if(q&&(x.addr+" "+x.city+" "+x.owner).toLowerCase().indexOf(q)<0)return false;
+  switch(state.filter){case"below":return x.level<3&&!x.dnc;case"sweet":return x.units&&x.units>=20&&x.units<=50;case"walk":return x.p!=null&&x.p>=80;case"mom":return x.ot=="individual"||x.ot=="trust"||x.ot=="small";case"long":return x.yrs!=null&&x.yrs>=15;case"moon":return o.s.p>=0.10;case"review":return needsReview(x)}return true}).sort(function(a,b){return b.s.p-a.s.p})}
+
+function penetration(){return props.filter(function(x){return x.level==3}).length/props.length}
+function renderStrip(){var all=props.map(score),hi=all.filter(function(s){return s.p>=0.10}).length,rv=props.filter(needsReview).length;
+  document.getElementById("strip").innerHTML=
+   '<div class="stat"><div class="v num">'+props.length+'</div><div class="l">Properties in the buy box</div></div>'+
+   '<div class="stat"><div class="v num">'+Math.round(penetration()*100)+'%</div><div class="l">Owners confirmed</div></div>'+
+   '<div class="stat"><div class="v num">'+hi+'</div><div class="l">Blue Moon 10% or higher</div></div>'+
+   '<div class="stat"><div class="v num">'+(500-creditsUsed)+'</div><div class="l">Crexi credits left this month</div></div>'+
+   '<div class="stat"><div class="v num">'+rv+'</div><div class="l">Need your photo review</div></div>';
+  document.getElementById("revBadge").textContent=rv;}
+function renderChips(){document.getElementById("chips").innerHTML=filters.map(function(f){return'<button class="chip" aria-pressed="'+(state.filter==f[0])+'" data-f="'+f[0]+'">'+f[1]+"</button>"}).join("")}
+function renderList(){var v=visible();
+  document.getElementById("rows").innerHTML=v.map(function(o){var x=o.x,s=o.s;return'<tr data-id="'+x.id+'" class="'+(state.sel==x.id?"sel":"")+'">'+
+    '<td><div class="moon">'+moon(s.p)+'<span class="pct num">'+pct(s.p)+'</span></div></td>'+
+    '<td><div class="addr">'+x.addr+'</div><div class="city">'+x.city+'</div></td>'+
+    '<td>'+lvHtml(x)+'</td>'+
+    '<td class="num">'+(x.units?x.units:(x.sqft?'<span class="muted">~'+Math.round(x.sqft/850)+'</span>':'<span class="muted">?</span>'))+'</td>'+
+    '<td class="num">'+x.drive+' min</td>'+
+    '<td><span class="dot '+walkDot(x)+'"></span>'+(x.p==null?'<span class="muted">Review</span>':x.p+"%")+'</td>'+
+    '<td><span class="dot '+rentDot(x)+'"></span>'+{in:"Match",near:"Close",out:"Off"}[x.rent]+'</td>'+
+    '<td>'+ownerShort[x.ot]+'</td>'+
+    '<td class="num">'+(x.yrs==null?'<span class="muted">?</span>':x.yrs+" yrs")+'</td>'+
+    '<td>'+cov(s)+'</td></tr>'}).join("")||'<tr><td colspan="10" class="muted" style="padding:28px">No properties match this filter.</td></tr>';
+  document.getElementById("cards").innerHTML=v.map(function(o){var x=o.x,s=o.s;return'<button class="card" data-id="'+x.id+'"><div style="grid-row:1/3;display:flex;flex-direction:column;align-items:center;gap:2px">'+moon(s.p,30)+'<span class="num" style="font-family:var(--f-display);font-size:20px">'+pct(s.p)+'</span></div><div><div class="addr">'+x.addr+'</div><div class="city">'+x.city+' · '+x.drive+' min</div></div><div class="meta"><span style="flex-basis:100%">'+lvHtml(x)+'</span><span>'+(x.units||"?")+' units</span><span><span class="dot '+walkDot(x)+'"></span>Walk-up</span><span><span class="dot '+rentDot(x)+'"></span>Rent</span><span>'+ownerShort[x.ot]+'</span></div></button>'}).join("")}
+function renderRings(){var C=320,scale=270/60,s='';
+  [15,30,45,60].forEach(function(m){s+='<circle cx="'+C+'" cy="'+C+'" r="'+m*scale+'" fill="none" stroke="var(--line)" stroke-width="1"/><text x="'+(C+4)+'" y="'+(C-m*scale+14)+'" fill="var(--faint)" font-size="11" font-family="var(--f-ui)">'+m+' min</text>'});
+  [["N",0],["E",90],["S",180],["W",270]].forEach(function(d){var a=d[1]*Math.PI/180;s+='<text x="'+(C+Math.sin(a)*300)+'" y="'+(C-Math.cos(a)*300+4)+'" text-anchor="middle" fill="var(--faint)" font-size="12" font-weight="600" font-family="var(--f-ui)">'+d[0]+'</text>'});
+  visible().slice().reverse().forEach(function(o){var x=o.x,a=x.bearing*Math.PI/180,rr=Math.min(60,x.drive)*scale,px=C+Math.sin(a)*rr,py=C-Math.cos(a)*rr,p=o.s.p;
+    s+='<circle data-id="'+x.id+'" cx="'+px.toFixed(1)+'" cy="'+py.toFixed(1)+'" r="'+(p>=0.10?9:p>=0.05?7:5)+'" fill="'+(p>=0.10?"var(--good)":p>=0.05?"var(--warn)":"var(--bad)")+'" fill-opacity="'+(p>=0.05?1:.75)+'" stroke="var(--surface)" stroke-width="1.5" style="cursor:pointer"><title>'+x.addr+", "+x.city+" · "+pct(p)+'</title></circle>'});
+  s+='<circle cx="'+C+'" cy="'+C+'" r="5" fill="var(--ink)"/><text x="'+(C+9)+'" y="'+(C+4)+'" font-size="12" fill="var(--ink)" font-weight="600" font-family="var(--f-ui)">Springfield</text>';
+  document.getElementById("ringsSvg").innerHTML=s}
+
+/* ---------- drawer ---------- */
+function nextStep(x){if(x.dnc)return"Do not contact. Off every list.";
+  if(x.level==1)return"County auditor: look up the owner by parcel number (free)";
+  if(x.level==2){var u=["phone","email","social","text"].filter(function(c){return x.ch[c]=="u"})[0];if(u)return"Reach out by "+chName[u].toLowerCase()+" to confirm it's the owner";
+    return(x.ot=="individual"||x.ot=="trust")?"Find a phone or email: county records and web search (free), then a Crexi credit":"Ohio Secretary of State: find the person behind the LLC (free), then a Crexi credit"}
+  return"Handed to the CRM. Drill done."}
+function promote(x){var up={1:["County auditor","Owner name found: "+x.owner.toLowerCase().replace(/\b\w/g,function(c){return c.toUpperCase()}),"hit"],2:["Call","Talked to "+x.person.split(" ")[0]+"; confirmed they own it","hit"]}[x.level];
+  if(!up)return;x.log.push(up);if(x.level==1)x.ch.mail="u";if(x.level==2){x.ch.mail="v";x.ch.phone="v";if(x.ch.text=="none")x.ch.text="v"}x.level++}
+function useCredit(x){creditsUsed++;x.credit=true;x.log.push(["Crexi credit","Cell phone and email for "+x.person,"hit"]);if(x.ch.phone=="none")x.ch.phone="u";if(x.ch.email=="none")x.ch.email="u"}
+function wrongInfo(x){var k=["phone","email","social","text"].filter(function(c){return x.ch[c]=="v"||x.ch[c]=="u"})[0]||"phone";x.ch[k]="w";x.log.push([chName[k],"Reached someone else. Marked wrong.","miss"]);if(x.level==3)x.level=2}
+function openDrawer(id){state.sel=id;var x=props.find(function(p){return p.id==id}),s=score(x),max=Math.log(2.2);
+  var bars=s.fs.map(function(f){if(f.m==null)return'<div class="f missing"><div class="lab"><b>'+f.k+'</b><span>'+f.v+'</span></div><div class="track"><span class="miss"></span></div><div class="m">skip</div></div>';
+    var l=Math.log(f.m),w=Math.min(50,Math.abs(l)/max*50);return'<div class="f"><div class="lab"><b>'+f.k+'</b><span>'+f.v+'</span></div><div class="track" title="'+f.why+'">'+(l>=0?'<span class="up" style="width:'+w+'%"></span>':'<span class="dn" style="width:'+w+'%"></span>')+'</div><div class="m">×'+f.m.toFixed(2)+'</div></div>'}).join("");
+  var seed=x.id*97,d=document.getElementById("drawer");
+  var ladder='<div class="ladder'+(x.level==3?" done":"")+'">'+[1,2,3].map(function(n){return'<div class="'+(n<=x.level?"on":"")+(n==x.level?" cur":"")+'"><b>Level '+n+'</b>'+lvName[n]+'</div>'}).join("")+'</div>';
+  var tl='<ul class="timeline">'+x.log.map(function(e){return'<li class="'+e[2]+'"><div><span class="src">'+e[0]+'</span> <span class="res">· '+e[1]+'</span></div></li>'}).join("")+(x.level<3&&!x.dnc?'<li class="next"><div><span class="src">Next</span> <span class="res">· '+nextStep(x)+'</span></div></li>':'')+'</ul>';
+  var acts='';if(!x.dnc){if(x.level<3)acts+='<button class="btn primary" data-act="up">'+{1:"Owner name found",2:"Talked to them, confirmed"}[x.level]+'</button>';
+    if(x.level==2&&!x.credit)acts+='<button class="btn" data-act="credit">Use a Crexi credit</button>';
+    if(x.level>=2&&["phone","email","social","text"].some(function(c){return x.ch[c]=="u"||x.ch[c]=="v"}))acts+='<button class="btn" data-act="wrong">Wrong info</button>';}
+  acts+='<button class="btn" data-act="dnc">'+(x.dnc?"Allow contact again":"Do not contact")+'</button>';
+  d.innerHTML='<div class="dhead"><div><div class="eyebrow">'+x.city+' · '+x.drive+' min from Springfield</div><h1 style="font-size:28px;margin-top:4px">'+x.addr+'</h1></div><button class="x" id="close" aria-label="Close">✕</button></div>'+
+   '<div class="score">'+moon(s.p,64)+'<div><div class="big num" style="font-size:58px">'+pct(s.p)+'</div><p>Blue Moon score: how worth chasing this owner is. Based on '+s.have+' of '+s.n+' signals.</p></div></div>'+
+   '<div class="sec"><h2>Owner contact</h2>'+ladder+
+     '<dl class="kv"><dt>Owner on record</dt><dd>'+(x.level==1?"Not on record":x.owner)+'</dd><dt>Decision-maker</dt><dd>'+(x.level==3?x.person+" (confirmed)":x.level==2?"Best guess: "+x.person:"Unknown")+'</dd><dt>Type</dt><dd>'+ownerShort[x.ot]+' · owns '+x.count+' propert'+(x.count==1?"y":"ies")+'</dd><dt>Channels</dt><dd>'+chHtml(x).replace('class="chs"','class="chs" style="margin-left:0;flex-wrap:wrap"')+'</dd></dl>'+
+     '<p class="note" style="margin:0">Green = verified · yellow = found, not tested · red = wrong · dashed = none found.</p>'+
+     '<h2 style="margin-top:6px">Drill so far</h2>'+tl+
+     '<div class="bar" style="margin:0">'+acts+'</div></div>'+
+   '<div class="sec"><h2>Why this score</h2><p class="note" style="margin:0">Starts at 1.5%. Blue bars raise the odds, red bars lower them. Dashed lines are signals with no data, left out.</p><div class="factors">'+bars+'</div></div>'+
+   '<div class="sec"><h2>Walk-up check</h2><div class="photos">'+photo(x.label,seed)+photo(x.label,seed+1)+photo(x.label,seed+2)+'<div class="sat">'+sat(x.label,seed)+'</div></div>'+
+   '<div class="verdict"><b>'+labelText[x.label]+'</b><span class="muted">'+(x.p==null?"No usable photo. Needs your review.":(x.reviewed?"Confirmed by you":"AI is "+x.p+"% sure it has outdoor entry"))+'</span></div></div>'+
+   '<div class="sec"><h2>Building</h2><dl class="kv"><dt>Units</dt><dd class="num">'+(x.units||"Unknown")+'</dd><dt>Building size</dt><dd class="num">'+(x.sqft?x.sqft.toLocaleString()+" sq ft":"Unknown")+'</dd><dt>Year built</dt><dd class="num">'+x.yr+'</dd><dt>Stories</dt><dd class="num">'+(x.stories||"Unknown")+'</dd><dt>Owned</dt><dd>'+(x.yrs==null?"Unknown":x.yrs+" years")+'</dd></dl>'+
+   '<div class="links"><a href="https://www.crexi.com" target="_blank" rel="noopener">Crexi record</a><a href="https://maps.google.com" target="_blank" rel="noopener">Google Maps</a><a href="https://maps.google.com" target="_blank" rel="noopener">Street View</a><a href="https://businesssearch.ohiosos.gov" target="_blank" rel="noopener">Ohio Secretary of State</a></div></div>';
+  d.hidden=false;document.getElementById("scrim").hidden=false;
+  document.getElementById("close").onclick=closeDrawer;
+  d.querySelectorAll("[data-act]").forEach(function(b){b.onclick=function(){var a=b.dataset.act,before=x.level;
+    if(a=="up"){promote(x);toast("Moved to level "+x.level+": "+lvName[x.level])}
+    else if(a=="credit"){useCredit(x);toast("1 Crexi credit used. "+(500-creditsUsed)+" left this month.")}
+    else if(a=="wrong"){wrongInfo(x);toast("Marked wrong. The drill will try the next source.")}
+    else if(a=="dnc"){x.dnc=!x.dnc;toast(x.dnc?"Marked do not contact.":"Contact allowed again.")}
+    renderAll();openDrawer(id)}});
+  renderList()}
+function closeDrawer(){state.sel=null;document.getElementById("drawer").hidden=true;document.getElementById("scrim").hidden=true;renderList()}
+
+/* ---------- review queue ---------- */
+var revIdx=0;
+function renderReview(){var q=props.filter(needsReview),body=document.getElementById("revBody"),total=props.filter(function(x){return x.reviewed}).length+q.length;
+  if(!q.length){body.innerHTML='<div class="panel" style="margin-top:20px;align-items:flex-start"><h2>All caught up</h2><p class="note" style="margin:0">Every unsure property has an answer. Your answers are now examples the AI reads before its next guesses.</p></div>';return}
+  var x=q[0],s=score(x),seed=x.id*97,done=total-q.length;
+  body.innerHTML='<div class="rev"><div class="imgs"><div class="main">'+photo(x.label,seed,"main")+'</div>'+photo(x.label,seed+1)+photo(x.label,seed+2)+'<div>'+sat(x.label,seed)+'</div></div>'+
+   '<div class="panel"><div class="progress"><i style="width:'+(done/total*100)+'%"></i></div><div class="note">'+done+' of '+total+' reviewed</div>'+
+   '<div><div class="eyebrow">'+x.city+' · '+(x.units||"?")+' units · built '+x.yr+'</div><h2 style="font-size:20px;margin-top:4px">'+x.addr+'</h2></div>'+
+   '<div class="kv"><dt>AI guess</dt><dd>'+labelText[x.aiLabel]+'</dd><dt>Confidence</dt><dd>'+(x.p==null?"No usable photo":x.p+"% outdoor entry")+'</dd><dt>Blue Moon now</dt><dd class="num">'+pct(s.p)+'</dd></div>'+
+   '<div class="choices"><button class="choice" data-a="out">Outdoor entry <kbd>1</kbd></button><button class="choice" data-a="in">Indoor hallways <kbd>2</kbd></button><button class="choice" data-a="mixed">Mixed <kbd>3</kbd></button><button class="choice" data-a="skip">Can\'t tell <kbd>4</kbd></button></div>'+
+   '<div class="links"><a href="https://maps.google.com" target="_blank" rel="noopener">Open Street View</a><a href="https://www.crexi.com" target="_blank" rel="noopener">Crexi record</a></div></div></div>';
+  body.querySelectorAll("[data-a]").forEach(function(b){b.onclick=function(){answer(x,b.dataset.a)}})}
+function answer(x,a){var before=score(x).p;
+  if(a=="out"){x.p=100;x.label=x.label=="DIRECT_ENTRY"?"DIRECT_ENTRY":"EXTERIOR_CORRIDOR"}else if(a=="in"){x.p=0;x.label="INTERIOR_CORRIDOR"}else if(a=="mixed"){x.p=60;x.label="MIXED"}
+  x.reviewed=true;var after=score(x).p;renderAll();toast(a=="skip"?"Skipped. Kept for a closer look later.":"Saved. Blue Moon "+pct(before)+" → "+pct(after))}
+
+/* ---------- score + data views ---------- */
+function renderWeights(){var rows=[["Size","20–50 units ×1.3 · 10–80 ×1.0 · outside ×0.5. Missing units: estimate from sq ft","Brad's buy box"],["Walk-up","Clear outdoor entry ×1.4 · interior halls ×0.4","Brad: most important"],["Rent fit","Area rents match his scale ×1.2 · off ×0.7","HUD rents vs Brad's scale"],["Drive time","Under 30 min ×1.1 · 50–60 min ×0.85","Brad's 60-minute limit"],["Owner type","Family trust ×2.0 · individual ×1.8 · institutional ×0.15","Institutions rarely sell cheap"],["Years owned","20+ years ×2.0 · under 5 years ×0.5","Long holds, low basis"],["Debt","Likely free and clear ×1.6 · loan due soon ×1.5","Equity and timing pressure"],["Owner location","Out of state ×1.4","Distant owners sell more readily"],["Vacancy","USPS vacant ×1.5","Possible distress"],["Condition","Low building value vs land ×1.3","Deferred upkeep"]];
+  document.getElementById("wt").innerHTML='<thead><tr><th>Signal</th><th>Starting multipliers</th><th>Reasoning</th><th>Learned</th></tr></thead><tbody>'+rows.map(function(r){return'<tr><td style="font-weight:600">'+r[0]+'</td><td class="num">'+r[1]+'</td><td class="muted">'+r[2]+'</td><td class="muted">Not yet</td></tr>'}).join("")+"</tbody>"}
+function bars(rows,max,opts){opts=opts||{};return rows.map(function(r,i){var h='<div class="hb" title="'+r[0]+': '+r[1].toLocaleString()+(opts.unit||"")+'"><span>'+r[0]+'</span><div class="t"><i class="'+(r[2]||"")+'" style="width:'+(max?r[1]/max*100:0)+'%"></i></div><span class="c num">'+r[1].toLocaleString()+(opts.unit||"")+'</span></div>';
+  if(opts.drops&&i<rows.length-1&&!rows[i+1][3]){var a=r[1],b=rows[i+1][1];h+='<div class="drop num">'+(a?Math.round(b/a*100):0)+'% move on</div>'}
+  if(rows[i+1]&&rows[i+1][3])h+='<div class="stagehead">'+rows[i+1][3]+'</div>';return h}).join("")}
+function atLeast(n){return props.filter(function(x){return !x.dnc&&x.level>=n}).length}
+function renderFunnel(){var checked=props.filter(function(x){return x.p!=null}).length,walk=props.filter(function(x){return x.p!=null&&x.p>=80}).length,bm=props.filter(function(x){return x.p!=null&&x.p>=80&&score(x).p>=0.05}).length;
+  var find=[["In buy box",props.length],["Photo checked",checked],["Walk-up confirmed",walk],["Blue Moon 5%+",bm]];
+  var reach=[["In the drill",atLeast(1)],["Possible owner found",atLeast(2)],["Confirmed owner",atLeast(3),"close"]];
+  document.getElementById("fFind").innerHTML=bars(find,props.length,{drops:true});
+  document.getElementById("fClose").innerHTML=bars(reach,Math.max(1,reach[0][1]),{drops:true});
+  renderContact()}
+function renderContact(){var n4=atLeast(3);document.getElementById("pen").textContent=Math.round(penetration()*100)+"%";
+  document.getElementById("penNote").textContent=n4+" of "+props.length+" owners confirmed · goal 100%";
+  var at=function(n){return props.filter(function(x){return !x.dnc&&x.level==n}).length},dnc=props.filter(function(x){return x.dnc}).length;
+  var rows=[["Level 1 · no owner data",at(1)],["Level 2 · possible owner",at(2)],["Level 3 · confirmed owner",at(3),"close"]];if(dnc)rows.push(["Do not contact",dnc]);
+  document.getElementById("lvBars").innerHTML=bars(rows,props.length);
+  document.getElementById("crLeft").textContent=500-creditsUsed;
+  var cand=props.filter(function(x){return !x.dnc&&!x.credit&&x.level==2}).map(function(x){return{x:x,p:score(x).p}}).sort(function(a,b){return b.p-a.p}).slice(0,6);
+  var cl=document.getElementById("creditList");
+  cl.innerHTML=cand.map(function(o){return'<div class="credit"><div><div class="addr">'+o.x.addr+' <span class="muted" style="font-weight:400">· '+o.x.city+'</span></div><div class="note">'+lvHtml(o.x)+' · Blue Moon '+pct(o.p)+'</div></div><button class="btn" data-credit="'+o.x.id+'">Use credit</button></div>'}).join("");
+  cl.querySelectorAll("[data-credit]").forEach(function(b){b.onclick=function(){var x=props.find(function(p){return p.id==+b.dataset.credit});useCredit(x);renderAll();toast("1 credit used on "+x.addr+". "+(500-creditsUsed)+" left.")}});
+  var src=[["Crexi export","3,000","2,862","95%","Every owner type (name and mailing only)"],["Ohio Secretary of State","410","318","78%","LLCs: finds the person behind them"],["County auditor","265","231","87%","Individuals and trusts: confirms the deed"],["Web search","190","74","39%","Small LLCs with a business listing"],["Crexi credit","188","129","69%","Individuals: cell phones"],["Physical letter","—","—","—","Every owner; replies are slow"]];
+  document.getElementById("srcTable").innerHTML='<thead><tr><th>Source</th><th style="text-align:right">Tried</th><th style="text-align:right">Found</th><th style="text-align:right">Hit rate</th><th>Works best for</th></tr></thead><tbody>'+src.map(function(r){return'<tr><td style="font-weight:600">'+r[0]+'</td><td class="num c">'+r[1]+'</td><td class="num c">'+r[2]+'</td><td class="num c">'+r[3]+'</td><td class="muted">'+r[4]+'</td></tr>'}).join("")+'</tbody>'}
+function renderData(){var f=[["Loaded from Crexi",3000],["Near Springfield, built 1970+",2407],["10–80 units, 3 stories or fewer",884],["20–50 units",322]];
+  document.getElementById("funnel").innerHTML=bars(f,3000,{drops:true});
+  var cv=[["Map location",100],["Year built",100],["Building sq ft",100],["Total parcel value",99.8],["Units",96.4],["Owner name",95.4],["Owner mailing",94.5],["Stories",89],["Last sale",83.3],["Loan record",70.5]];
+  document.getElementById("coverage").innerHTML=bars(cv,100,{unit:"%"});
+  var co=[["Franklin",1237],["Montgomery",452],["Butler",380],["Greene",117],["Delaware",115],["Warren",77],["Miami",77],["Clermont",77],["Clark (Springfield)",71],["Hamilton",64],["23 other counties",333]];
+  document.getElementById("counties").innerHTML=bars(co,1237);
+  var ud=[["1–4",613],["5–9",598],["10–24",728],["25–49",271],["50–99",306],["100–199",224],["200+",152],["Unknown",108]];
+  document.getElementById("unitsDist").innerHTML=bars(ud,728);
+  var L=[["done","Crexi base list","Cleaned, duplicates merged","Ready"],["done","Size","Units + sq ft, best evidence first","Ready"],["done","Owner and equity","Owner type, years owned, debt, mailing location","From Crexi"],["next","Drive time","Google Routes from downtown Springfield","Next"],["next","Rent fit","HUD yearly rents vs Brad's scale","Next"],["later","Walk-up photos","Street View + satellite, read by AI, checked by you","After rent"],["later","Distress","County tax delinquency, code violations","Later"]];
+  document.getElementById("layers").innerHTML=L.map(function(l,i){return'<div class="layer"><span class="st '+l[0]+'">'+(l[0]=="done"?"✓":i+1)+'</span><div><b>'+l[1]+'</b><p>'+l[2]+'</p></div><span class="pill '+(l[0]=="next"?"hot":"")+'">'+l[3]+'</span></div>'}).join("")}
+
+/* ---------- shell ---------- */
+function toast(m){var t=document.getElementById("toast");t.textContent=m;t.hidden=false;clearTimeout(toast.h);toast.h=setTimeout(function(){t.hidden=true},2600)}
+function renderAll(){renderStrip();renderChips();renderList();if(state.mode=="rings")renderRings();if(current=="review")renderReview();renderFunnel()}
+var current="deals";
+function show(v){current=v;document.querySelectorAll(".view").forEach(function(s){s.hidden=s.id!="v-"+v});document.querySelectorAll(".tab").forEach(function(t){t.setAttribute("aria-selected",t.dataset.v==v)});if(v=="review")renderReview();try{history.replaceState(null,"","#"+v)}catch(e){}window.scrollTo(0,0)}
+document.querySelectorAll(".tab").forEach(function(t){t.onclick=function(){show(t.dataset.v)}});
+document.getElementById("chips").onclick=function(e){var b=e.target.closest("[data-f]");if(b){state.filter=b.dataset.f;renderAll()}};
+document.getElementById("q").oninput=function(e){state.q=e.target.value;renderList();if(state.mode=="rings")renderRings()};
+document.getElementById("rows").onclick=function(e){var r=e.target.closest("[data-id]");if(r)openDrawer(+r.dataset.id)};
+document.getElementById("cards").onclick=function(e){var r=e.target.closest("[data-id]");if(r)openDrawer(+r.dataset.id)};
+document.getElementById("ringsSvg").onclick=function(e){var r=e.target.closest("[data-id]");if(r)openDrawer(+r.dataset.id)};
+document.getElementById("scrim").onclick=closeDrawer;
+function setMode(m){state.mode=m;document.getElementById("asList").setAttribute("aria-pressed",m=="list");document.getElementById("asRings").setAttribute("aria-pressed",m=="rings");document.getElementById("listWrap").hidden=m!="list";document.getElementById("ringsWrap").hidden=m!="rings";if(m=="rings")renderRings()}
+document.getElementById("asList").onclick=function(){setMode("list")};document.getElementById("asRings").onclick=function(){setMode("rings")};
+document.querySelectorAll("[data-toast]").forEach(function(b){b.onclick=function(){toast(b.dataset.toast)}});
+document.addEventListener("keydown",function(e){if(e.key=="Escape"&&state.sel)closeDrawer();
+  if(current=="review"&&!e.metaKey&&!e.ctrlKey&&document.activeElement.tagName!="INPUT"){var m={"1":"out","2":"in","3":"mixed","4":"skip"}[e.key];var q=props.filter(needsReview);if(m&&q.length){if(m=="skip"){q[0].reviewed=true;renderAll();toast("Skipped. Kept for a closer look later.")}else answer(q[0],m)}}});
+renderWeights();renderData();renderAll();
+var h=(location.hash||"").slice(1);show(["deals","contact","funnel","review","score","data","roadmap"].indexOf(h)>=0?h:"deals");
+})();
+</script>

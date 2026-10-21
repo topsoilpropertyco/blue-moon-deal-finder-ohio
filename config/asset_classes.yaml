@@ -1,0 +1,195 @@
+# Asset classes. Each market (config.yaml) picks one.
+# Every asset class gets the same screens; these settings change what "fits".
+#
+# size.metric: units | building_sqft | lot_acres
+# size.ideal / size.ok: [min, max]. ideal = green, ok = yellow, outside = red.
+# size.fallback: how to estimate the metric when it is missing
+#   (apartments: units from building sq ft / sqft_per_unit).
+# visual_check: what the Street View + satellite photo check decides.
+# signals: Blue Moon score multipliers (likelihood ratios). Missing data = skipped.
+
+default_signals:
+  size:          {ideal: 1.3, ok: 1.0, outside: 0.5}
+  visual:        {green: 1.4, yellow_high: 1.1, yellow_low: 0.8, red: 0.4}
+  rent_fit:      {in: 1.2, near: 1.0, out: 0.7}
+  drive:         {near: 1.1, mid: 1.0, far: 0.85, near_max: 30, mid_max: 50}
+  owner_type:
+    trust: 2.0
+    estate: 2.2
+    individual: 1.8
+    small_llc: 1.2
+    corporation: 0.9
+    portfolio: 0.6
+    institutional: 0.15
+    government: 0.05
+    nonprofit: 0.5
+  years_owned:   {"20+": 2.0, "10-19": 1.4, "5-9": 1.0, "0-4": 0.5}
+  debt:          {free_and_clear: 1.6, maturing_soon: 1.5, active: 0.9}
+  absentee:      {outofstate: 1.4, instate: 1.15, local: 1.0}
+  vacancy:       {vacant: 1.5, occupied: 1.0}
+  condition:     {worn: 1.3, normal: 1.0}
+  distress:      {preforeclosure: 2.0, none: 1.0}
+
+asset_classes:
+  apartments:
+    label: Apartments
+    crexi_property_types: [multifamily, apartment, mixed use multifamily]
+    size: {metric: units, ideal: [20, 50], ok: [10, 80], fallback: building_sqft, sqft_per_unit: 850}
+    year_built_min: 1970
+    max_stories_hint: 3
+    rent:
+      enabled: true
+      # Brad's sweet spot, monthly rent by bedroom count (0 = studio)
+      scale: {0: 800, 1: 1000, 2: 1200, 3: 1500}
+      focus_bedrooms: 2
+      margin: 0.15                 # within 15% of the scale = "in", within 30% = "near"
+    visual_check:
+      enabled: true
+      question: Is it a walk-up? How do residents reach their front doors?
+      target_name: Walk-up   # what a good photo verdict is called on screens
+      labels: [EXTERIOR_CORRIDOR, DIRECT_ENTRY, INTERIOR_CORRIDOR, MIXED, UNKNOWN]
+      target_labels: [EXTERIOR_CORRIDOR, DIRECT_ENTRY]
+      score_name: p_exterior
+      label_help:
+        EXTERIOR_CORRIDOR: Garden or motel style. Doors open onto open-air breezeways, exterior stairs, outdoor walkways.
+        DIRECT_ENTRY: Townhome or row style. Each unit has its own ground-level door.
+        INTERIOR_CORRIDOR: Shared lobby and enclosed hallways; unit doors are inside.
+        MIXED: Both kinds on the site.
+        UNKNOWN: Imagery missing or the residential buildings are not visible.
+      prompt: |
+        You are classifying an apartment property for a real estate investor. You will see up to 3 Street View photos aimed at the property and 1 overhead satellite image. Determine how residents reach their unit front doors.
+        Categories: EXTERIOR_CORRIDOR (doors on open-air breezeways, exterior stairs, outdoor walkways), DIRECT_ENTRY (each unit has its own ground-level door), INTERIOR_CORRIDOR (shared entrance into enclosed hallways), MIXED (both types on site), UNKNOWN (can't tell).
+        Visual cues. Exterior corridor: exterior stair towers, open breezeway gaps, rows of doors along a railing, 2-3 stories, no lobby. Direct entry: repeating doors at grade, stoops, often 2 stories. Interior corridor: few central entrances, canopy, no upper-floor exterior doors, 4+ stories, elevator overrun.
+        The photo may show a leasing office, a neighbor, or a commercial building. Only judge the residential buildings. If you can't tell which building is the property, say so.
+      prior:
+        stories_4_plus: -15          # lean interior corridor
+        stories_3_less_built_1970_1995: 15
+        units_12_or_less: 10
+    signals: {}
+
+  self_storage:
+    label: Self-storage
+    crexi_property_types: [self storage, self-storage, mini storage, storage]
+    size: {metric: building_sqft, ideal: [30000, 90000], ok: [10000, 150000]}
+    year_built_min: null
+    rent: {enabled: false}
+    visual_check:
+      enabled: true
+      question: Drive-up units or interior climate-controlled?
+      target_name: Drive-up   # what a good photo verdict is called on screens
+      labels: [DRIVE_UP, INTERIOR, MIXED, UNKNOWN]
+      target_labels: [DRIVE_UP, MIXED]
+      score_name: p_target
+      label_help:
+        DRIVE_UP: Rows of single-story buildings with roll-up doors facing drive aisles.
+        INTERIOR: Multi-story building; units reached through interior hallways.
+        MIXED: Both on the site.
+        UNKNOWN: Can't see the facility.
+      prompt: |
+        You are classifying a self-storage facility for a real estate investor. You will see up to 3 Street View photos and 1 satellite image. Decide whether the storage units are DRIVE_UP (roll-up doors facing outdoor drive aisles, single-story rows), INTERIOR (multi-story building, climate-controlled units off interior halls), MIXED, or UNKNOWN. Only judge the storage facility, not neighbors.
+      prior: {}
+    signals: {}
+
+  warehouse:
+    label: Warehouses
+    crexi_property_types: [industrial, warehouse, flex, distribution, manufacturing]
+    size: {metric: building_sqft, ideal: [20000, 100000], ok: [5000, 250000]}
+    year_built_min: null
+    rent: {enabled: false}
+    visual_check:
+      enabled: true
+      question: Does it have truck loading?
+      target_name: Truck loading   # what a good photo verdict is called on screens
+      labels: [DOCK_HIGH, GRADE_LEVEL, BOTH, NONE_VISIBLE, UNKNOWN]
+      target_labels: [DOCK_HIGH, BOTH]
+      score_name: p_target
+      label_help:
+        DOCK_HIGH: Truck-height loading docks.
+        GRADE_LEVEL: Drive-in overhead doors at ground level only.
+        BOTH: Both kinds.
+        NONE_VISIBLE: No loading doors visible.
+        UNKNOWN: Can't see the building.
+      prompt: |
+        You are classifying a warehouse for a real estate investor. You will see up to 3 Street View photos and 1 satellite image. Decide the loading type: DOCK_HIGH (truck-height docks), GRADE_LEVEL (drive-in overhead doors at ground level), BOTH, NONE_VISIBLE, or UNKNOWN. Only judge the subject building.
+      prior: {}
+    signals: {}
+
+  campground_rv:
+    label: Campgrounds & RV parks
+    crexi_property_types: [rv park, campground, rv, recreational, camp]
+    size: {metric: lot_acres, ideal: [10, 60], ok: [3, 150]}
+    year_built_min: null
+    rent: {enabled: false}
+    visual_check:
+      enabled: true
+      question: Is it an operating park with RV sites?
+      target_name: Operating park   # what a good photo verdict is called on screens
+      labels: [OPERATING_PARK, UNDEVELOPED, OTHER_USE, UNKNOWN]
+      target_labels: [OPERATING_PARK]
+      score_name: p_target
+      label_help:
+        OPERATING_PARK: Visible RV pads, campsites, hookups or parked RVs.
+        UNDEVELOPED: Mostly open land or woods.
+        OTHER_USE: Something else (farm, homes, business).
+        UNKNOWN: Can't tell.
+      prompt: |
+        You are classifying a campground or RV park for a real estate investor. You will see up to 3 Street View photos and 1 satellite image. Decide: OPERATING_PARK (visible RV pads, campsites, hookups or parked RVs), UNDEVELOPED, OTHER_USE, or UNKNOWN. The satellite image matters most here.
+      prior: {}
+    signals: {}
+
+  mobile_home_park:
+    label: Mobile home parks
+    crexi_property_types: [mobile home, manufactured, mhp]
+    size: {metric: units, ideal: [30, 120], ok: [10, 250], fallback: lot_acres, acres_per_unit: 0.15}
+    year_built_min: null
+    rent: {enabled: false}
+    visual_check:
+      enabled: true
+      question: Is it an operating mobile home community?
+      target_name: Operating park   # what a good photo verdict is called on screens
+      labels: [OPERATING_PARK, MOSTLY_VACANT, OTHER_USE, UNKNOWN]
+      target_labels: [OPERATING_PARK]
+      score_name: p_target
+      label_help:
+        OPERATING_PARK: Rows of manufactured homes on pads with internal roads.
+        MOSTLY_VACANT: Pads or roads with few homes.
+        OTHER_USE: Something else.
+        UNKNOWN: Can't tell.
+      prompt: |
+        You are classifying a mobile home park for a real estate investor. You will see up to 3 Street View photos and 1 satellite image. Decide: OPERATING_PARK (rows of manufactured homes on pads with internal roads), MOSTLY_VACANT, OTHER_USE, or UNKNOWN.
+      prior: {}
+    signals: {}
+
+  outdoor_storage:
+    label: Outdoor storage
+    crexi_property_types: [outdoor storage, ios, industrial outdoor storage, truck terminal, contractor yard, land]
+    size: {metric: lot_acres, ideal: [2, 10], ok: [1, 25]}
+    year_built_min: null
+    rent: {enabled: false}
+    visual_check:
+      enabled: true
+      question: Is it a usable fenced or paved yard?
+      target_name: Usable yard   # what a good photo verdict is called on screens
+      labels: [PAVED_YARD, GRAVEL_YARD, BUILDING_MOSTLY, RAW, UNKNOWN]
+      target_labels: [PAVED_YARD, GRAVEL_YARD]
+      score_name: p_target
+      label_help:
+        PAVED_YARD: Paved or concrete open yard, often fenced, trucks or containers.
+        GRAVEL_YARD: Gravel yard used for storage or parking.
+        BUILDING_MOSTLY: Mostly covered by buildings.
+        RAW: Undeveloped grass or woods.
+        UNKNOWN: Can't tell.
+      prompt: |
+        You are classifying an industrial outdoor storage site for a real estate investor. You will see up to 3 Street View photos and 1 satellite image. Decide: PAVED_YARD, GRAVEL_YARD, BUILDING_MOSTLY, RAW, or UNKNOWN. The satellite image matters most.
+      prior: {}
+    signals: {}
+
+  raw_land:
+    label: Raw land
+    crexi_property_types: [land, vacant land, agricultural, farm]
+    size: {metric: lot_acres, ideal: [5, 50], ok: [1, 200]}
+    year_built_min: null
+    rent: {enabled: false}
+    visual_check: {enabled: false}
+    signals:
+      condition: {worn: 1.0, normal: 1.0}
