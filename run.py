@@ -435,8 +435,13 @@ def cmd_share(args: argparse.Namespace, settings: Settings) -> int:
                 "launchctl kickstart -k gui/$(id -u)/com.bluemoon.share")
         return EXIT_OK
     if args.action == "list":
-        people = sharing.list_emails()
-        say(f"People who can open the dashboard: {', '.join(people) if people else 'nobody yet'}.")
+        people = sharing.people_status()
+        if not people:
+            say("Nobody is on the people list yet. Add someone with: uv run run.py share add name@example.com")
+        labels = {"active": "has access now", "waiting": "added; gets in after sharing restarts",
+                  "removed": "removed; still gets in until sharing restarts", "listed": "on the list (sharing is off)"}
+        for p in people:
+            say(f"  {p['email']}  ({labels[p['status']]})")
         live = sharing.current()
         say(f"Sharing is on: {live['url']}" if live else "Sharing is off. Start it with: uv run run.py share")
         return EXIT_OK

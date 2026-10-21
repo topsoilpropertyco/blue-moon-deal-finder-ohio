@@ -125,14 +125,18 @@ def current(settings: Settings | None = None) -> dict | None:
         return None
     if not isinstance(data, dict) or not _pid_alive(data.get("pid")):
         return None
-    return {k: data.get(k) for k in ("url", "mode", "started_at", "people")}
+    return {k: data.get(k) for k in ("url", "mode", "started_at", "people", "emails")}
 
 
-def _save_state(url: str, mode: str, people: int, settings: Settings | None = None) -> None:
+def _save_state(url: str, mode: str, emails: list[str], settings: Settings | None = None) -> None:
     path = state_file(settings)
-    data = {"url": url, "mode": mode, "people": people, "pid": os.getpid(),
+    data = {"url": url, "mode": mode, "people": len(emails), "emails": list(emails), "pid": os.getpid(),
             "started_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
     path.write_text(json.dumps(data), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _clear_state(settings: Settings | None = None) -> None:
@@ -143,6 +147,25 @@ def _clear_state(settings: Settings | None = None) -> None:
             path.unlink()
     except (OSError, ValueError):
         pass
+
+
+def people_status(settings: Settings | None = None) -> list[dict]:
+    """Everyone on the list or let in by the running link, with where they stand:
+    active   = on the list and the running link lets them in
+    waiting  = added, gets in after sharing restarts
+    removed  = taken off the list, still gets in until sharing restarts
+    listed   = on the list, sharing is off"""
+    listed = list_emails(settings)
+    live = current(settings)
+    active = [e.lower() for e in ((live or {}).get("emails") or [])] if live and live.get("mode") == "email" else []
+    out = []
+    for e in listed:
+        status = "listed" if not live else ("active" if e in active else "waiting")
+        out.append({"email": e, "status": status})
+    for e in active:
+        if e not in listed:
+            out.append({"email": e, "status": "removed"})
+    return out
 
 
 # --- request checks used by the web app ----------------------------------------------------------
@@ -243,7 +266,7 @@ def run(settings: Settings | None = None, on_url: Callable[[str], None] | None =
                 m = URL_RE.search(line)
                 if m:
                     url = m.group(0)
-                    _save_state(url, p["mode"], len(p["emails"]), s)
+                    _save_state(url, p["mode"], p["emails"], s)
                     if on_url:
                         on_url(url)
         return proc.wait()

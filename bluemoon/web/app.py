@@ -411,8 +411,10 @@ def share_status() -> dict:
     except Exception:  # noqa: BLE001 - sharing problems must never break the dashboard
         log.debug("Could not read the share state", exc_info=True)
         return {"on": False}
+    people = sharing.people_status()
     return {"on": bool(live), "url": (live or {}).get("url"), "started_at": (live or {}).get("started_at"),
-            "mode": (live or {}).get("mode") or p["mode"], "people": len(p["emails"]),
+            "mode": (live or {}).get("mode") or p["mode"], "people": len(p["emails"]), "people_list": people,
+            "needs_restart": any(x["status"] in ("waiting", "removed") for x in people),
             "cloudflared": sharing.find_cloudflared() is not None, "problem": None if live else p["problem"]}
 
 

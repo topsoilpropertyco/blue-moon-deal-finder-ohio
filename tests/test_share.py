@@ -97,3 +97,23 @@ def test_web_shows_share_status(settings, monkeypatch):
         assert st["on"] is True and st["url"] == "https://a-b.trycloudflare.com" and st["mode"] == "email"
         # Through the tunnel with email codes: allowed in without a password.
         assert c.get("/api/markets", headers={"Host": "a-b.trycloudflare.com"}).status_code == 200
+
+
+def test_people_status_tracks_restarts(settings):
+    share.add_emails(["a@x.com", "b@x.com"])
+    assert [p["status"] for p in share.people_status()] == ["listed", "listed"]      # sharing off
+    share.state_file().write_text(json.dumps({"url": "https://q.trycloudflare.com", "mode": "email",
+                                              "pid": os.getpid(), "people": 2, "emails": ["a@x.com", "c@x.com"]}))
+    got = {p["email"]: p["status"] for p in share.people_status()}
+    assert got == {"a@x.com": "active", "b@x.com": "waiting", "c@x.com": "removed"}
+
+
+def test_settings_lists_people(settings):
+    from fastapi.testclient import TestClient
+    from bluemoon.web.app import app
+    share.add_emails(["pat@example.com"])
+    share.state_file().write_text(json.dumps({"url": "https://q.trycloudflare.com", "mode": "email",
+                                              "pid": os.getpid(), "people": 1, "emails": ["pat@example.com"]}))
+    with TestClient(app) as c:
+        st = c.get("/api/settings").json()["share"]
+    assert st["people_list"] == [{"email": "pat@example.com", "status": "active"}] and st["needs_restart"] is False
