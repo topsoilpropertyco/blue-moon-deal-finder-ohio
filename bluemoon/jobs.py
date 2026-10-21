@@ -6,6 +6,8 @@
     cancel_job(job_id)
 
 - One job runs per market at a time; the others wait in line. Different markets run side by side.
+  AI research has a line of its own (one research job at a time on this computer, any market), so a run
+  that takes hours never holds up a market's import, rent or score jobs.
 - Each job opens its own database connection.
 - Cancelling: a waiting job is dropped at once. A running job stops at its next progress update (the
   step's progress callback raises `Cancelled`); work it already saved stays saved.
@@ -47,6 +49,8 @@ PROGRESS_EVERY_SECONDS = 0.5     # copy progress to the database at most this of
 PROGRESS_LOCK_WAIT = 0.05        # seconds a progress write may wait for the database before skipping
 MAX_LIST = 200
 PID_KEY = "_pid"                 # stored in params_json so another process can tell whose job it is
+# Steps with a line of their own instead of their market's line.
+OWN_LANES = {"research": "claude:research"}
 
 Progress = Callable[[float, str], None]
 Execute = Callable[[sqlite3.Connection, str, str, "JobParams", Progress], dict]
@@ -76,6 +80,7 @@ class _Job:
     market: str
     params: JobParams
     settings: Settings
+    lane: str = ""                   # which line it waits in: the market, or its own (OWN_LANES)
     status: str = "queued"
     progress: float = 0.0
     message: str = ""
@@ -115,15 +120,18 @@ class JobRunner:
             market = conn.execute("SELECT id FROM markets WHERE slug = ?", (market_slug,)).fetchone()
             if market is None:
                 raise ValueError(f"Unknown market '{market_slug}'.")
+            lane = OWN_LANES.get(step, market_slug)
             with self._lock:
-                busy = market_slug in self._workers
-            message = "Waiting for the job ahead of it in this market" if busy else "Starting"
+                busy = lane in self._workers
+            ahead = "Waiting for the AI research job ahead of it" if lane != market_slug else \
+                "Waiting for the job ahead of it in this market"
+            message = ahead if busy else "Starting"
             stored = {**job_params.model_dump(exclude_none=True), PID_KEY: os.getpid()}
             cur = conn.execute("INSERT INTO jobs(kind, market_id, status, progress, message, params_json, created_at) "
                                "VALUES(?, ?, 'queued', 0, ?, ?, ?)",
                                (step, market["id"], message, db.dumps(stored), db.now_iso()))
             job_id = int(cur.lastrowid)
-        self._enqueue(_Job(job_id, step, market_slug, job_params, settings, message=message))
+        self._enqueue(_Job(job_id, step, market_slug, job_params, settings, lane=lane, message=message))
         return job_id
 
     def get(self, job_id: int) -> dict | None:
@@ -146,7 +154,7 @@ class JobRunner:
         with self._lock:
             job = self._jobs.get(int(job_id))
             if job is not None and job.status == "queued":
-                self._queues.get(job.market, deque()).remove(job.id)
+                self._queues.get(job.lane or job.market, deque()).remove(job.id)
                 job.status, job.message = "cancelled", CANCELLED
                 dropped = job
             elif job is not None and job.status == "running":
@@ -187,29 +195,29 @@ class JobRunner:
     # --- running -----------------------------------------------------------------------------
 
     def _enqueue(self, job: _Job) -> None:
+        lane = job.lane or job.market
         with self._lock:
             self._jobs[job.id] = job
-            self._queues.setdefault(job.market, deque()).append(job.id)
-            if job.market not in self._workers:
-                worker = threading.Thread(target=self._work, args=(job.market,), daemon=True,
-                                          name=f"job-{job.market}")
-                self._workers[job.market] = worker
+            self._queues.setdefault(lane, deque()).append(job.id)
+            if lane not in self._workers:
+                worker = threading.Thread(target=self._work, args=(lane,), daemon=True, name=f"job-{lane}")
+                self._workers[lane] = worker
                 worker.start()
 
-    def _work(self, market: str) -> None:
-        """Run this market's jobs one after another until its line is empty."""
+    def _work(self, lane: str) -> None:
+        """Run one line's jobs (a market's, or AI research's) one after another until the line is empty."""
         while True:
             with self._lock:
-                queue = self._queues.get(market)
+                queue = self._queues.get(lane)
                 if not queue:
-                    self._queues.pop(market, None)
-                    self._workers.pop(market, None)
+                    self._queues.pop(lane, None)
+                    self._workers.pop(lane, None)
                     return
                 job = self._jobs[queue.popleft()]
                 job.status, job.message = "running", "Starting"
             try:
                 self._run(job)
-            except Exception:  # never let one job's bookkeeping stop this market's line
+            except Exception:  # never let one job's bookkeeping stop this line
                 log.exception("Job %s could not be finished cleanly", job.id)
                 with self._lock:
                     self._jobs.pop(job.id, None)

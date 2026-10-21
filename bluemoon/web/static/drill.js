@@ -175,7 +175,7 @@
   // ---------------------------------------------------------------------------------------------
 
   const PAGE = 20;
-  const COST = { free: ['Free', 'free'], credit: ['Crexi credit', 'credit'], paid: ['Paid', 'paid'] };
+  const COST = { free: ['Free', 'free'], credit: ['Crexi credit', 'credit'], paid: ['Paid', 'paid'], plan: ['Your Claude plan', 'free'] };
   const AUTOMATION = { auto: 'Runs by itself', assisted: 'Assisted: the app opens the pages', manual: 'By hand' };
   const OUTCOME_TEXT = { found: 'Found', nothing: 'Nothing found', skipped: 'Skipped' };
   const CHANNEL_TEXT = { phone: 'Call', text: 'Text', email: 'Email', social: 'Social', vm: 'Voicemail', mail: 'Mail' };
@@ -447,6 +447,9 @@
   /** What to put in a stage row's last column. */
   function stageAction(row, firstOpen) {
     if (row.enabled === false) return `<span class="pill" title="${esc(OFF_TEXT)}">Off</span>`;
+    if (row.background) {   // AI research: its own job on the Run screen
+      return `<button class="btn" data-go="run">Run AI research${row.queue ? ` · ${num(row.queue)}` : ''}</button>`;
+    }
     if (row.automation === 'auto') {
       return row.queue
         ? `<button class="btn" data-go="drill" data-params="${esc(row.stage_key)}">Check ${num(row.queue)}</button>`
@@ -485,6 +488,7 @@
 
   function stageNote(row) {
     if (row.enabled === false) return `<div class="note dr-off-note">${esc(OFF_TEXT)}</div>`;
+    if (row.background) return '<div class="note">Runs as its own job (Run screen, AI research)</div>';
     return `<div class="note">${esc(AUTOMATION[row.automation] || '')}</div>`;
   }
 

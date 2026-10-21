@@ -4,10 +4,11 @@
 - links:   pre-filled research links from config/sources.yaml (and the owner-name -> person parser).
 - credits: the Crexi owner-contact credit ledger and the monthly spend-them-all plan.
 - stats:   hit rates by stage and owner type, tips, and the CRM handoff rows.
+- research: AI web research on each owner (Claude Code on your Claude plan; the ai_research stage).
 
 Import the submodules directly (`from bluemoon.drill import engine`); this package does not import them
 eagerly, so `bluemoon.ingest` can import the engine without pulling in everything else.
 """
 from __future__ import annotations
 
-__all__ = ["credits", "engine", "links", "stats"]
+__all__ = ["credits", "engine", "links", "research", "stats"]

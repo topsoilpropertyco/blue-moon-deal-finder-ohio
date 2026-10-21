@@ -195,6 +195,44 @@ CREATE TABLE IF NOT EXISTS outreach (
   created_at TEXT NOT NULL
 );
 
+-- AI web research (the ai_research DRILL stage): one run per owner, the findings per property.
+CREATE TABLE IF NOT EXISTS research_runs (
+  id INTEGER PRIMARY KEY,
+  market_id INTEGER REFERENCES markets(id),
+  owner_key TEXT NOT NULL,         -- 'pk:<portfolio key>' or 'name:<normalized owner name>'
+  owner_name TEXT NOT NULL,
+  cache_key TEXT,                  -- api_cache.key of the answer
+  model TEXT, prompt_version TEXT,
+  outcome TEXT NOT NULL,           -- found | nothing | error
+  from_cache INTEGER NOT NULL DEFAULT 0,
+  summary TEXT, error TEXT, num_turns INTEGER, seconds REAL,
+  property_ids TEXT NOT NULL DEFAULT '[]',
+  actor TEXT NOT NULL DEFAULT 'ai',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_research_runs_market ON research_runs(market_id);
+
+CREATE TABLE IF NOT EXISTS research_findings (
+  id INTEGER PRIMARY KEY,
+  run_id INTEGER NOT NULL REFERENCES research_runs(id) ON DELETE CASCADE,
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,              -- entity | person | website | phone | email | social
+  value TEXT NOT NULL,             -- blank for a finding from a blocked site (nothing from it is kept)
+  label TEXT, person_name TEXT, role TEXT,
+  source_url TEXT,
+  confidence TEXT,                 -- high | medium | low
+  match_reason TEXT,
+  status TEXT NOT NULL DEFAULT 'kept',  -- kept | lead | blocked | rejected | wrong
+  why TEXT,                        -- why it is only a lead, or was blocked or rejected
+  contact_point_id INTEGER REFERENCES contact_points(id) ON DELETE SET NULL,
+  person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+  marked_by TEXT, marked_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_findings_property ON research_findings(property_id);
+CREATE INDEX IF NOT EXISTS ix_findings_contact ON research_findings(contact_point_id);
+CREATE INDEX IF NOT EXISTS ix_findings_run ON research_findings(run_id);
+
 CREATE TABLE IF NOT EXISTS credit_ledger (
   id INTEGER PRIMARY KEY,
   property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,

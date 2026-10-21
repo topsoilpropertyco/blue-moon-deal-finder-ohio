@@ -56,6 +56,7 @@ from .. import share as sharing
 from ..config import get_settings
 from ..drill import credits as drill_credits
 from ..drill import engine
+from ..drill import research as drill_research
 from ..imagery import (
     claude_cli_available,
     review_queue,
@@ -269,6 +270,10 @@ class ContactIn(BaseModel):
 class ContactStatusIn(BaseModel):
     status: str = Field(max_length=40)
     allow_contact: bool = False     # 'Allow contact again': the only way to take a contact off do-not-contact
+
+
+class FindingStatusIn(BaseModel):
+    status: str = Field(max_length=20)      # wrong | kept
 
 
 class OutreachIn(BaseModel):
@@ -636,8 +641,15 @@ def add_person(slug: str, pid: int, body: PersonIn, conn: Conn) -> dict:
 
 
 @router.patch("/api/contacts/{cid}")
-def set_contact_status(cid: int, body: ContactStatusIn, conn: Conn) -> dict:
-    return engine.set_contact_status(conn, cid, body.status, allow_contact=body.allow_contact)
+def set_contact_status(cid: int, body: ContactStatusIn, conn: Conn, request: Request) -> dict:
+    return engine.set_contact_status(conn, cid, body.status, allow_contact=body.allow_contact,
+                                     actor=auth.signed_in_as(request))
+
+
+@router.patch("/api/research/findings/{fid}")
+def mark_research_finding(fid: int, body: FindingStatusIn, conn: Conn, request: Request) -> dict:
+    """An AI research finding is wrong (or not after all). Who said so is kept with it."""
+    return drill_research.mark_finding(conn, fid, body.status, actor=auth.signed_in_as(request))
 
 
 @router.post("/api/m/{slug}/properties/{pid}/outreach")
