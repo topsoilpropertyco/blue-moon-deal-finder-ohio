@@ -65,8 +65,8 @@
     if (!root.isConnected || slug !== BM.state.market) return;
     const prefs = prefsFor(slug);
     const chips = chipDefs(s);
-    if (params && params[0] && chips.some((c) => c.key === params[0])) prefs.view = params[0];
-    if (!chips.some((c) => c.key === prefs.view)) prefs.view = 'all';
+    if (params && params[0] && knownView(s, chips, params[0])) prefs.view = params[0];
+    if (!knownView(s, chips, prefs.view)) prefs.view = 'all';
 
     const ctx = {root, slug, s, prefs, chips, cols: columns(s), items: [], total: 0, counts: {}, token: 0,
       loading: false, observer: null};
@@ -77,7 +77,7 @@
       root.innerHTML = headHtml(s) + ui.emptyMarket();
       return;
     }
-    root.innerHTML = headHtml(s) + '<div class="strip" data-tiles>' + tilesHtml(s) + '</div>' + toolbarHtml(ctx) +
+    root.innerHTML = headHtml(s) + '<div class="strip" data-tiles>' + tilesHtml(s) + '</div>' + setAsideHtml(s) + toolbarHtml(ctx) +
       '<div class="deals-status note" data-status aria-live="polite"></div><div data-body></div>';
     bind(ctx);
     await refresh(ctx);
@@ -90,11 +90,55 @@
     return '<div class="deals-head"><div class="eyebrow">' + esc(eyebrow) + '</div>' +
       '<h1>Where the rare deals are</h1>' +
       '<ul class="lines">' +
-      '<li><b>Blue Moon score:</b> how worth chasing the owner is.</li>' +
-      '<li><b>Contact levels:</b> Level 1 = ' + esc(BM.LEVEL_NAMES[1]) + ' · Level 2 = ' + esc(BM.LEVEL_NAMES[2]) +
-      ' · Level 3 = ' + esc(BM.LEVEL_NAMES[3]) + '.</li>' +
-      '<li>Work from the top. Get every owner to level 3.</li>' +
-      '</ul></div>';
+      '<li><b>Blue Moon score:</b> how worth chasing the owner is. Work from the top.</li>' +
+      '<li><b>Contact levels:</b> move every owner in the buy box up to level 3. Click a level to see those properties.</li>' +
+      '</ul>' + ui.levelLadder(s.levels_in_buybox || s.levels, {label: 'Contact levels in the buy box'}) + '</div>';
+  }
+
+  /* ---------- why only some are in the buy box ---------- */
+
+  const LS_WHY = 'bm.deals.whyClosed';
+
+  function setAsideHtml(s) {
+    const sa = s.set_aside;
+    if (!sa || !sa.total) return '';
+    let closed = false;
+    try { closed = window.localStorage.getItem(LS_WHY) === '1'; } catch (e) { /* private mode: fine */ }
+    const max = Math.max(1, ...sa.reasons.map((r) => r.count));
+    const rows = sa.reasons.map((r) =>
+      '<li><span class="why-l">' + esc(r.label) + '</span>' +
+      '<span class="why-bar" aria-hidden="true"><i style="width:' + Math.round((100 * r.count) / max) + '%"></i></span>' +
+      '<span class="why-n num">' + fmt.num(r.count) + '</span>' +
+      '<span class="why-only note">' + (r.only ? fmt.num(r.only) + ' for this reason alone' : 'always with another reason') + '</span></li>').join('');
+    const notes = [];
+    if (sa.several) notes.push(fmt.num(sa.several) + ' have more than one reason, so the counts add up to more than ' + fmt.num(sa.total) + '.');
+    if (sa.drive_estimated) {
+      let t = 'Drive times are straight-line estimates until the Google key is in.';
+      if (sa.drive_close_calls) {
+        t += ' ' + fmt.num(sa.drive_close_calls) + ' are set aside only for an estimated ' + fmt.num(sa.max_drive_minutes + 1) + '–' +
+          fmt.num(sa.max_drive_minutes + sa.close_call_minutes) + ' min drive; some may come back once Google measures the real drive.';
+      }
+      notes.push(t);
+    }
+    notes.push('Missing data never sets a property aside: unknown units, year or drive time stay in.');
+    return '<details class="why panel"' + (closed ? '' : ' open') + ' data-why>' +
+      '<summary><b>' + fmt.num(s.in_buybox) + ' of ' + fmt.num(s.properties) + '</b> are in the buy box. ' +
+      '<b>' + fmt.num(sa.total) + '</b> are set aside (never deleted). <span class="why-toggle">Why?</span></summary>' +
+      '<ul class="why-list">' + rows + '</ul>' +
+      notes.map((n) => '<p class="note">' + esc(n) + '</p>').join('') +
+      '<div class="why-acts"><button type="button" class="btn" data-why-view="excluded">See the ' + fmt.num(sa.total) + ' set aside</button>' +
+      '<button type="button" class="btn quiet" data-why-view="everything">See all ' + fmt.num(s.properties) + '</button></div></details>';
+  }
+
+  function knownView(s, chips, key) {
+    return chips.some((c) => c.key === key) || (Array.isArray(s.views) && s.views.some((v) => v.key === key));
+  }
+
+  function viewLabel(ctx, key) {
+    const chip = ctx.chips.find((c) => c.key === key);
+    if (chip) return chip.label;
+    const v = Array.isArray(ctx.s.views) ? ctx.s.views.find((x) => x.key === key) : null;
+    return v ? v.label : key;
   }
 
   function tilesHtml(s) {
@@ -183,6 +227,18 @@
       const b = ev.target.closest('[data-view]');
       if (b) setView(ctx, b.getAttribute('data-view'));
     });
+    const why = r.querySelector('[data-why]');
+    if (why) {
+      why.addEventListener('toggle', () => {
+        try { window.localStorage.setItem(LS_WHY, why.open ? '0' : '1'); } catch (e) { /* private mode: fine */ }
+      });
+      why.addEventListener('click', (ev) => {
+        const b = ev.target.closest('[data-why-view]');
+        if (!b) return;
+        setView(ctx, b.getAttribute('data-why-view'));
+        r.querySelector('[data-chips]').scrollIntoView({behavior: 'smooth', block: 'start'});
+      });
+    }
     r.querySelector('[data-tiles]').addEventListener('click', (ev) => {
       const b = ev.target.closest('[data-tile]');
       if (!b) return;
@@ -235,7 +291,7 @@
   }
 
   function setView(ctx, view) {
-    if (!ctx.chips.some((c) => c.key === view)) return;
+    if (!knownView(ctx.s, ctx.chips, view)) return;
     if (view === ctx.prefs.view && ctx.prefs.mode === 'list') return;
     ctx.prefs.view = view;
     BM.setParams(view === 'all' ? [] : [view]);
@@ -310,10 +366,9 @@
   function drawStatus(ctx) {
     const el = ctx.root.querySelector('[data-status]');
     if (!el) return;
-    const chip = ctx.chips.find((c) => c.key === ctx.prefs.view);
     const sort = (SORTS.find((x) => x[0] === ctx.prefs.sort) || SORTS[0])[1].toLowerCase();
     let text = fmt.plural(ctx.total, 'property', 'properties');
-    if (ctx.prefs.view !== 'all' && chip) text += ' · ' + chip.label;
+    if (ctx.prefs.view !== 'all') text += ' · ' + viewLabel(ctx, ctx.prefs.view);
     if (ctx.prefs.q) text += ' · matching “' + ctx.prefs.q + '”';
     if (ctx.prefs.mode === 'list') {
       text += ' · sorted ' + sort;

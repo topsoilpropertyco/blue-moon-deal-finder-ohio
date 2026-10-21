@@ -79,8 +79,12 @@
       <ul class="lines">
         <li>${per} owner-contact credits arrive each month. Unused ones expire.</li>
         <li>The plan picks the best possible owners the free sources could not reach.</li>
-        <li>Open Crexi, use the credit there, then record here what it showed.</li>
-      </ul>`;
+      </ul>
+      <ol class="cr-how" aria-label="How to spend one credit">
+        <li><b>Open in Crexi</b><span>Click it on the next owner in the plan below. The property opens on Crexi.</span></li>
+        <li><b>Use the credit in Crexi</b><span>Unlock the owner's contact info there (this app never logs in to Crexi).</span></li>
+        <li><b>Used a credit</b><span>Back here, click it and type the phone or email Crexi showed, or "nothing found".</span></li>
+      </ol>`;
   }
 
   function pageHtml(d) {

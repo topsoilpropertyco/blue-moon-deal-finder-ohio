@@ -107,9 +107,12 @@
     return panel('Keys', '<p class="note vw-tight">Keys live only in the .env file on the Mac Mini. This screen shows whether each one is set, never its value.</p>' +
       '<ul class="se-keys">' + rows + '</ul>' +
       '<details class="im-more"><summary>How to add a key</summary>' +
-      '<p class="note">1. Open the .env file (TextEdit opens):</p>' + H.command('cd ' + APP_FOLDER + ' && open -e .env') +
-      '<p class="note">2. Paste the key after the = sign, for example <code class="se-code">GOOGLE_MAPS_API_KEY=your-key-here</code>, and save.</p>' +
-      '<p class="note">3. Restart the app (see "How to change a setting" below).</p></details>');
+      '<p class="note">1. Copy the key. For Google: console.cloud.google.com, APIs &amp; Services, Credentials. Turn on these APIs for the project: Routes API, Street View Static API, Maps Static API and Geocoding API.</p>' +
+      '<p class="note">2. On the Mac Mini, run this and paste the key when it asks (nothing shows as you paste; that is normal):</p>' +
+      H.command('cd ' + APP_FOLDER + ' && uv run run.py key google') +
+      '<p class="note">For the others: <code class="se-code">key anthropic</code> or <code class="se-code">key census</code> instead of <code class="se-code">key google</code>.</p>' +
+      '<p class="note">3. Restart the dashboard:</p>' + H.command('launchctl kickstart -k gui/$(id -u)/' + SERVICE) +
+      '<p class="note">Never paste a key into a chat, an email or GitHub.</p></details>');
   }
 
   function photoPanel(cfg, health) {
@@ -182,52 +185,60 @@
       '<li><p>Reload this page. If the app does not come back, the error is in output/server.log.</p></li></ol>', 'vw-full');
   }
 
-  const PEOPLE_STATUS = {
-    active: ['g', 'Has access now'],
-    waiting: ['y', 'Added: gets in after sharing restarts'],
-    removed: ['r', 'Removed: still gets in until sharing restarts'],
-    listed: ['n', 'On the list (sharing is off)'],
-  };
+  function seenText(iso) {
+    const d = iso ? new Date(iso) : null;
+    if (!d || Number.isNaN(d.getTime())) return 'Signed in';
+    return 'Last here ' + d.toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) + ', ' +
+      d.toLocaleTimeString(undefined, {hour: 'numeric', minute: '2-digit'});
+  }
 
   function peopleList(sh) {
     const people = Array.isArray(sh.people_list) ? sh.people_list : [];
     if (!people.length) {
-      return '<p class="note vw-tight">Nobody is on the list yet, so the link asks for the dashboard password instead.</p>';
+      return '<p class="note vw-tight">Nobody is on the list yet, so anyone with the link and the team password gets in. ' +
+        'Add people so each person signs in with their own email.</p>';
     }
     const rows = people.map((p) => {
-      const [dot, label] = PEOPLE_STATUS[p.status] || ['n', p.status];
-      return '<li class="se-key"><div><b>' + esc(p.email) + '</b>' +
-        (p.email.startsWith('*@') ? '<div class="note">Everyone with an ' + esc(p.email.slice(1)) + ' address</div>' : '') +
+      let dot = 'n';
+      let label = "Hasn't signed in yet";
+      if (p.status === 'signed_in') { dot = 'g'; label = seenText(p.last_seen); }
+      if (p.status === 'everyone') { dot = 'g'; label = 'Everyone there, each with their own email'; }
+      const sub = p.status === 'everyone' ? 'Everyone with an ' + esc(p.email.slice(1)) + ' address'
+        : (p.via ? 'Through ' + esc(p.via) : '');
+      return '<li class="se-key"><div><b>' + esc(p.email) + '</b>' + (sub ? '<div class="note">' + sub + '</div>' : '') +
         '</div><span class="se-yn"><span class="dot ' + dot + '" aria-hidden="true"></span>' + esc(label) + '</span></li>';
     }).join('');
-    const restart = sh.needs_restart
-      ? '<p class="note vw-tight"><b>Restart sharing to apply the changes</b> (the link changes, so send the new one):</p>' +
-        H.command('launchctl kickstart -k gui/$(id -u)/com.bluemoon.share')
-      : '';
-    return '<p class="vw-tight"><b>People with access</b> · ' + num(people.filter((p) => p.status !== 'removed').length) + '</p>' +
-      '<ul class="se-keys">' + rows + '</ul>' + restart;
+    const listed = people.filter((p) => !p.via).length;
+    return '<p class="vw-tight"><b>People who can sign in</b> · ' + num(listed) + '</p><ul class="se-keys">' + rows + '</ul>';
   }
 
   function sharePanel(sh) {
     sh = sh || {};
-    const email = sh.mode === 'email';
-    const how = email
-      ? 'These people get in through Cloudflare: they open the link, type their email, and Cloudflare emails them a one-time code. Anyone not on the list never gets a code.'
-      : 'Everyone with the link types the dashboard password (APP_PASSWORD in .env).';
+    const team = sh.mode === 'team';
+    const how = team
+      ? 'Each person opens the link and types their own email plus the team password. Only emails on this list get in. Adding or removing someone works right away (no restart); a removed person is signed out on their next click.'
+      : 'Everyone with the link types the team password.';
+    const pw = sh.password_set === false
+      ? '<p><b>Make the team password first.</b> On the Mac Mini, run this, then send the password to your team with the link:</p>' +
+        H.command('cd ' + APP_FOLDER + ' && uv run run.py share password') +
+        '<p class="note vw-tight">Then restart the dashboard and the link:</p>' +
+        H.command('launchctl kickstart -k gui/$(id -u)/' + SERVICE + ' && launchctl kickstart -k gui/$(id -u)/com.bluemoon.share')
+      : '';
     const link = sh.on && sh.url
       ? '<p><b>Your team link</b></p>' + H.command(sh.url) +
-        '<p class="note vw-tight">The link changes whenever sharing restarts (for example after the Mac restarts); this card always shows the current one.</p>'
+        '<p class="note vw-tight">The link changes whenever sharing restarts (for example after the Mac restarts); this card always shows the current one. On the Mac itself no sign-in is needed.</p>'
       : '<p><b>Sharing is off.</b> ' + esc(sh.problem || 'Start it on the Mac Mini:') + '</p>' +
         (sh.cloudflared === false ? H.command('cd ' + APP_FOLDER + ' && scripts/install_cloudflared.sh') : '') +
-        H.command('cd ' + APP_FOLDER + ' && scripts/install_service.sh --share');
-    return panel('Team link (free)', link +
+        (sh.password_set === false ? '' : H.command('cd ' + APP_FOLDER + ' && scripts/install_service.sh --share'));
+    return panel('Team link (free)', pw + link +
       '<p class="note vw-tight">' + esc(how) + '</p>' + peopleList(sh) +
-      '<details class="im-more"><summary>Add or remove people</summary>' +
+      '<details class="im-more"><summary>Add or remove people, or see the team password</summary>' +
       '<p class="note">Add people (several at once is fine; *@yourcompany.com lets in everyone there):</p>' +
       H.command('cd ' + APP_FOLDER + ' && uv run run.py share add name@example.com') +
-      '<p class="note">Remove someone:</p>' + H.command('cd ' + APP_FOLDER + ' && uv run run.py share remove name@example.com') +
-      '<p class="note">Then restart sharing. The link changes, so send the new one from this card:</p>' +
-      H.command('launchctl kickstart -k gui/$(id -u)/com.bluemoon.share') + '</details>', 'vw-full');
+      '<p class="note">Remove someone (they are signed out on their next click):</p>' +
+      H.command('cd ' + APP_FOLDER + ' && uv run run.py share remove name@example.com') +
+      '<p class="note">See the team password (it is only ever shown on the Mac):</p>' +
+      H.command('cd ' + APP_FOLDER + ' && uv run run.py share password') + '</details>', 'vw-full');
   }
 
   /* ---------- page ---------- */

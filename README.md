@@ -38,13 +38,13 @@ Then install it:
 scripts/setup_mac.sh
 ```
 
-That installs the Python packages and creates `.env`, your private settings file. Open it and paste your Google Maps key after `GOOGLE_MAPS_API_KEY=`:
+That installs the Python packages and creates `.env`, your private settings file. Save your Google Maps key into it (paste the key when asked; nothing shows as you paste, and the key is never printed):
 
 ```bash
-open -e .env
+uv run run.py key google
 ```
 
-Without a Google key the app still works: drive times are free straight-line estimates and photos are off. In Google Cloud Console, turn on the **Routes API**, **Geocoding API**, **Street View Static API** and **Maps Static API** for the key.
+Without a Google key the app still works: drive times are free straight-line estimates and photos are off. In Google Cloud Console (APIs & Services > Credentials for the key), turn on the **Routes API**, **Geocoding API**, **Street View Static API** and **Maps Static API**. `key anthropic` and `key census` work the same way. Never paste a key into a chat, an email or GitHub.
 
 ## 2. Start the dashboard
 
@@ -60,15 +60,18 @@ scripts/install_service.sh
 
 So it also comes back after a power cut or update restart, turn on automatic login: System Settings > Users & Groups > Automatically log in as > your name. If FileVault is on, macOS hides that option, so after a restart log in once at the Mac.
 
-**Share it with your team (free):** Cloudflare's free link puts the dashboard on the internet as `https://<random-words>.trycloudflare.com`, with no account, no domain and nothing to install for your team. Your data stays on the Mac Mini. Install Cloudflare's connector once, add the people who may get in, and start sharing in the background:
+**Share it with your team (free):** Cloudflare's free link puts the dashboard on the internet as `https://<random-words>.trycloudflare.com`, with no account, no domain and nothing to install for your team. Your data stays on the Mac Mini. Install Cloudflare's connector once, make the team password, add the people who may get in, and start sharing in the background:
 
 ```bash
 scripts/install_cloudflared.sh
+uv run run.py share password
 uv run run.py share add pat@example.com
 scripts/install_service.sh --share
 ```
 
-Each person opens the link, types their email and gets a one-time code (`*@yourcompany.com` lets in everyone at that company). With nobody on the list, the link asks for the dashboard password (`APP_PASSWORD` in `.env`, four or more random words) instead. Without either it refuses to start. The current link is on the **Settings** screen and in `uv run run.py share list`. It changes whenever sharing restarts (for example after the Mac restarts), so send the new one when that happens. To add or remove someone: `uv run run.py share add name@example.com` or `share remove name@example.com`, then restart sharing with `launchctl kickstart -k gui/$(id -u)/com.bluemoon.share` (the link changes). If someone sees a plain "Forbidden" page right after entering their code, the email they typed isn't on the list exactly as written (Cloudflare sends a code to any address; the Mac checks the list). Add that exact address and restart sharing. The dashboard itself only listens on this computer; outside visitors reach it only through the link, and only with the email code or password.
+`share password` makes a team password like `bluemoon-k7q4-92xf-h3td`, saves it in `.env` (`APP_PASSWORD`) and shows it; run it again any time to see it, or with `--new` to replace it (everyone signs in again). Send each person the link and the password. They open the link and type **their own email** and the team password; only emails on the list get in (`*@yourcompany.com` lets in everyone at that company), and the app knows who is who. With nobody on the list, the password alone gets people in. Without a password the link refuses to start. Adding or removing someone works right away, no restart: `uv run run.py share add name@example.com` or `share remove name@example.com` (a removed person is signed out on their next click; if they know the password, `share password --new` when convenient). **Settings** and `uv run run.py share list` show the current link, the people and when each last signed in. On the Mac itself (http://localhost:8765) no sign-in is needed.
+
+The link changes whenever sharing restarts (for example after the Mac restarts), so send the new one when that happens. Cloudflare's own email-code gate (`cloudflared --allowed-mail`) isn't used: its sign-in runs out a few seconds after the code is accepted, so every screen said "Can't reach the Blue Moon server" ([cloudflared issue #1752](https://github.com/cloudflare/cloudflared/issues/1752)). The dashboard itself only listens on this computer; outside visitors reach it only through the link, and only with the team password.
 
 To restart the background service after a settings change:
 
@@ -87,7 +90,7 @@ Re-importing is safe: matching properties are updated, nothing is deleted or dup
 
 ## 4. Run the steps (Run screen or Terminal)
 
-The **Run** screen has a card per step with **Run**, **Test on 5** and **Estimate**. Paid steps over 50 properties stop with **Waiting for your OK** and show the calls and cost; press **Yes, spend it** to go ahead. **Run everything** runs all the free steps and stops before each big paid step. You can leave the screen while a job runs.
+The **Run** screen lists every step top to bottom, from importing a Crexi list to spending Crexi credits, each marked **Done**, **To do**, **Waiting** (on a step above) or **Blocked** (something to set up, like the Google key). **Do this next** at the top names the first things to do. Machine steps have **Run**, **Test on 5** and **Estimate**; the steps you do yourself (Photo review, Crexi credits) have a button to their screen. Paid steps over 50 properties stop with **Waiting for your OK** and show the calls and cost; press **Yes, spend it** to go ahead. **Run everything** runs all the free steps and stops before each big paid step. You can leave the screen while a job runs.
 
 The same from the Terminal (`--market` can be left out for apartments; `self-storage`, `warehouses` and so on pick another market):
 
@@ -116,9 +119,9 @@ Running drive, rent, photos or classify on its own updates the buy box, scores a
 
 ## 5. Work it in the dashboard
 
-- **Deals:** the ranked list. Work from the top. Tap a property for its panel: the score explained, photos, rent, owner, the DRILL timeline and every original Crexi column. **Drive-time rings** shows the same list as a map of drive time.
+- **Deals:** the ranked list. Work from the top. The three contact levels sit at the top with how many buy-box owners are at each; click one to see those properties. Under the numbers, **Why?** shows where the rest of the list went: each reason properties were set aside (too far, wrong size, too old, skipped county), how many for that reason alone, and how many are close calls on an estimated drive time that real Google drive times may bring back. Set-aside properties are never deleted (**Excluded** and **Everything** show them). Tap a property for its panel: the score explained, photos, rent, owner, the DRILL timeline and every original Crexi column. **Drive-time rings** shows the same list as a map of drive time.
 - **DRILL:** start with **Reach out** (owners with a phone or email to test; "Talked to owner, confirmed" moves them to level 3), then **Work this** on the first stage with owners waiting. One owner at a time, links already filled in. Keys: F found, N nothing, R matches records (County auditor), X not applicable (saved; the owner moves to the next stage), J or S pass for now (nothing saved), K previous, O open the first link. The board counts buy-box owners; switch to **Everyone** to include set-aside properties. Do-not-contact is permanent: it covers the owner's other properties (same owner name or portfolio) and the same phone, email or mailing address everywhere, and only **Allow contact again** takes a contact off the list. A stage that keeps working for an owner type moves up for that owner type once it has 10 results (`learn_order` in `config/drill.yaml`).
-- **Credits:** one plan for the whole Crexi account (credits are shared by every market), with how many of the 500 are left and the daily pace to spend them all. Owners rank by score x Crexi's hit rate for their owner type; owners with an untested phone wait in Reach out first. If the possible owners can't use every credit, the rest go to buy-box owners with no name yet, then the best owners just outside the buy box (`crexi: plan_fallbacks`). Use one in Crexi, then press **Used a credit** and record what Crexi showed.
+- **Credits:** one plan for the whole Crexi account (credits are shared by every market), with how many of the 500 are left and the daily pace to spend them all. Owners rank by score x Crexi's hit rate for their owner type; owners with an untested phone wait in Reach out first. If the possible owners can't use every credit, the rest go to buy-box owners with no name yet, then the best owners just outside the buy box (`crexi: plan_fallbacks`). How to spend one: **Open in Crexi** on the next owner in the plan, unlock the owner's contact info in Crexi (the app never logs in to Crexi), then **Used a credit** and record what Crexi showed.
 - **Photo review:** the photos the AI was unsure about. Press 1-5 to answer, S to skip. **Scorecard** shows whether the AI passes the 90% check.
 - **Funnel, Analytics, The score:** how the list narrows, what's in the data, and how the Blue Moon score works. Mark how deals ended ("How did it end?" in the property panel) and the score tunes itself.
 - **Exports:** `ranked_list.xlsx` for Brad (Google Sheets: File > Import > Upload), plus the CSVs. The ranked list explains each score ("Why this score") and the photo check ("Photo reasons"). `mailing_list.csv` holds buy-box owners whose mailing address is untested plus any owner whose next step is a letter, never a do-not-contact or wrong address. Getting `crm_handoff.csv` from the Exports screen marks those owners as handed off (a plain link to the file changes nothing).
@@ -155,8 +158,9 @@ cd ~/blue-moon-deal-finder-ohio
 git pull
 uv sync
 launchctl kickstart -k gui/$(id -u)/com.bluemoon.dealfinder
+launchctl kickstart -k gui/$(id -u)/com.bluemoon.share
 ```
-(The last line restarts the background service; if you run `uv run run.py serve` by hand instead, stop it with Control-C and start it again.)
+(The last two lines restart the dashboard and the team link; skip the last one if you don't share. If you run `uv run run.py serve` by hand instead, stop it with Control-C and start it again.)
 
 ## Back it up
 
@@ -166,7 +170,10 @@ Your data lives in the app folder: `data/` (the database and Crexi files), `imag
 
 | Problem | Fix |
 |---|---|
-| Drive times show "~" and photos are off | No Google key yet: add `GOOGLE_MAPS_API_KEY` to `.env` and restart. |
+| Drive times show "~" and photos are off | No Google key yet: `uv run run.py key google`, then restart the dashboard. |
+| Google says "We couldn't verify it's you" when you copy the key | Sign in to console.cloud.google.com on a computer or phone you've used with that Google account before, finish any check Google asks for, then copy the key there. It can take a day after a new sign-in. |
+| The team link says "Can't reach the Blue Moon server" | Update the app (below) and restart both services; the link then asks for your email and the team password. If the Mac restarted sharing, the link changed: the new one is on Settings. |
+| The team link says "isn't on the team list" | Add that exact email: `uv run run.py share add name@example.com` (works right away). |
 | Google refuses the key | Turn on Routes, Geocoding, Street View Static and Maps Static APIs for that key in Google Cloud Console. |
 | Photo check says Claude Code isn't signed in | Run `claude` in Terminal once and sign in. |
 | A run says "Waiting for your OK" | It's over 50 properties. Read the estimate, then press **Yes, spend it** (or add `--yes`). |

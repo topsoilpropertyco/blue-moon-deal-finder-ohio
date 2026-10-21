@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import re
 import sqlite3
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -44,6 +45,7 @@ WEB_DEFAULTS: dict[str, Any] = {
     "max_page_size": 500,
     "upload_max_mb": 50,
     "rescore_delay_seconds": 3,      # re-score this long after the last photo review or outcome
+    "drive_close_call_minutes": 15,  # set aside only for an estimated drive this close to the limit = "close call"
 }
 
 KEY_NAMES = {"google": "GOOGLE_MAPS_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "hud": "HUD_API_TOKEN",
@@ -599,6 +601,7 @@ def summary(conn: sqlite3.Connection, slug: str, settings: Settings | None = Non
         "statuses": {"active": c["st_active"], "confirmed": c["st_confirmed"], "exhausted": c["st_exhausted"],
                      "dnc": c["st_dnc"]},
         "credits": credit_status(conn, settings=mc.settings),
+        "set_aside": set_aside(conn, mc),
         "last_import": last_import(conn, mc.id),
         "layers": _layers(conn, mc, c),
         "views": [{"key": k, "label": v} for k, v in view_labels(mc.ac, mc.web).items()],
@@ -723,6 +726,54 @@ def _reason_label(reason: str, mc: MarketCtx) -> str:
 
 
 FUNNEL_ORDER = ("state", "skip_county", "drive_time", "property_type", "year", "size")
+
+
+def _set_aside_label(reason: str, mc: MarketCtx) -> str:
+    """Why a property is out of the buy box, in plain English (the opposite of _reason_label)."""
+    ac = mc.ac
+    lo, hi = ac.size.ok
+    unit = METRIC_UNITS.get(ac.size.metric, ac.size.metric)
+    return {
+        "drive_time": f"More than {mc.market.get('max_drive_minutes')} min drive",
+        "year": f"Built before {ac.year_built_min}" if ac.year_built_min else EXCLUSION_LABELS["year"],
+        "size": f"Outside {lo:,.0f}-{hi:,.0f} {unit}",
+        "property_type": f"Not listed as {ac.label.lower()}",
+    }.get(reason, EXCLUSION_LABELS.get(reason, reason))
+
+
+def set_aside(conn: sqlite3.Connection, mc: MarketCtx) -> dict:
+    """Why properties are out of the buy box (they are never deleted): each reason with how many it covers
+    (one property can have several reasons) and how many have only that reason. Drive times that are
+    straight-line estimates are counted, and so are "close calls": set aside only for an estimated drive
+    within web.drive_close_call_minutes of the limit, which may come back once Google measures real drives."""
+    found = rows(conn, "SELECT s.exclusion_reasons AS reasons, dt.method AS method, dt.minutes AS minutes "
+                       "FROM properties p JOIN scores s ON s.property_id = p.id "
+                       "LEFT JOIN drive_times dt ON dt.property_id = p.id "
+                       "WHERE p.market_id = ? AND s.in_buybox = 0", (mc.id,))
+    max_minutes = mc.market.get("max_drive_minutes")
+    close_window = float(mc.web.get("drive_close_call_minutes") or 0)
+    count: Counter[str] = Counter()
+    only: Counter[str] = Counter()
+    several = estimated = close = 0
+    for r in found:
+        reasons = set(loads(r.get("reasons"), []) or [])
+        count.update(reasons)
+        if len(reasons) == 1:
+            only.update(reasons)
+        elif len(reasons) > 1:
+            several += 1
+        if "drive_time" in reasons and r.get("method") == "estimate":
+            estimated += 1
+            minutes = r.get("minutes")
+            if reasons == {"drive_time"} and max_minutes and minutes is not None \
+                    and float(minutes) <= float(max_minutes) + close_window:
+                close += 1
+    order = sorted((k for k in count if count[k]), key=lambda k: (-count[k], k))
+    return {"total": len(found), "several": several,
+            "reasons": [{"key": k, "label": _set_aside_label(k, mc), "count": count[k], "only": only[k]}
+                        for k in order],
+            "drive_estimated": estimated, "drive_close_calls": close,
+            "close_call_minutes": close_window, "max_drive_minutes": max_minutes}
 
 
 def filter_funnel(base: list[dict], mc: MarketCtx) -> list[dict]:

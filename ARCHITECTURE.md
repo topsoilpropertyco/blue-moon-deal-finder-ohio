@@ -198,19 +198,29 @@ Every function that writes commits its own transaction.
 
 ## Team link (`bluemoon/share.py`)
 
-`run.py share` runs Cloudflare's free Quick Tunnel (`cloudflared tunnel --url http://localhost:<port>`), with one
-`--allowed-mail` per person on the list in `data/share_emails.txt` (Cloudflare emails each visitor a one-time
-code), or no email list and the dashboard password. The live link is saved to `data/share.json` (with the pid) and
-shown by `/api/settings` / `/api/health` (`share`), the Settings screen and `run.py status`. The web app refuses
-requests from any non-local host name unless `APP_PASSWORD` is set or an email-code share is running; login
-throttling uses `CF-Connecting-IP` only when the direct peer is this computer. `scripts/install_service.sh --share`
-runs it as a second LaunchAgent (`com.bluemoon.share`).
+`run.py share` runs Cloudflare's free Quick Tunnel as a plain tunnel (`cloudflared tunnel --no-autoupdate --url
+http://localhost:<port>`); it refuses to start without `APP_PASSWORD`. The dashboard does the sign-in itself
+(`bluemoon/web/auth.py`): each visitor types their email and the team password, and the email must be on the
+list in `data/share_emails.txt` (exact, or `*@company.com`). Cloudflare's `--allowed-mail` gate is not used: its
+session cookie runs out seconds after login, so API calls get a cross-origin redirect to Cloudflare's login and
+fetch() fails (cloudflared issue #1752). List changes apply at once (the cookie names the person and is checked
+against the list on every request); last sign-ins are in `data/share_seen.json`. `run.py share password` makes and
+saves the team password (`bluemoon-xxxx-xxxx-xxxx`); `run.py key google|anthropic|census` saves a key into `.env`
+from a hidden prompt (`config.save_secret`). The live link is saved to `data/share.json` (with the pid) and shown by
+`/api/settings` / `/api/health` (`share`), the Settings screen and `run.py status`. The web app refuses requests
+from any non-local host name unless `APP_PASSWORD` is set. On the Mac itself (direct peer 127.0.0.1/::1, a
+localhost Host and no `CF-Connecting-IP`/`CF-Ray`) no sign-in is needed (`share.on_this_computer`). Login throttling
+uses `CF-Connecting-IP` only when the direct peer is this computer. `scripts/install_service.sh --share` runs it as
+a second LaunchAgent (`com.bluemoon.share`).
 
 ## Web API (`bluemoon/web/app.py`, JSON)
 
 All market routes are under `/api/m/{slug}`. Errors: `{"detail": "..."}` with 4xx.
-Optional password: if `APP_PASSWORD` is set, every request needs cookie `bm_auth` (POST `/api/login {password}`;
-5 wrong passwords per device, then 429 with a growing wait). Every request must use an allowed Host (IP address,
+Optional password: if `APP_PASSWORD` is set, every request (except on the Mac itself) needs cookie `bm_auth`
+(POST `/api/login {email, password}`; the email is required and must be on the team list when the list has
+people; 5 wrong passwords per device, then 429 with a growing wait). Without it: 401 `{detail, login, email}`
+(`email` = the sign-in box should ask for an email). The web app fetches with `redirect: 'manual'` and shows
+"Please sign in again" when a request is bounced to another site's sign-in page. Every request must use an allowed Host (IP address,
 localhost, this computer's name, `*.ts.net`, `app.allowed_hosts`; else 400), writes with another website's Origin
 get 403, and request bodies sent without a size (Transfer-Encoding) get 411. Every response carries a
 Content-Security-Policy (`app.py CSP`): scripts only from this server's files (no inline scripts, so the login
@@ -219,9 +229,9 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 
 | Method | Path | Returns |
 |---|---|---|
-| GET | `/api/health` | `{ok, version, keys:{google:bool, anthropic:bool, hud:bool, census:bool}, vision_backend, claude_cli:bool}` |
+| GET | `/api/health` | `{ok, version, keys:{google:bool, anthropic:bool, hud:bool, census:bool}, vision_backend, claude_cli:bool, auth_required, authenticated, signed_in_as, login_email, share}` |
 | GET | `/api/markets` | `[{slug, name, asset_class, asset_label, geography, properties, in_buybox, confirmed}]` |
-| GET | `/api/m/{slug}/summary` | `{market:{slug,name,geography,origin_label,origin_lat,origin_lng,max_drive_minutes}, asset_class:{key,label,size_metric,visual_enabled,rent_enabled,visual_question,target_word}, properties, in_buybox, blue_moon_10, needs_review, penetration, levels, credits, last_import, layers:[{key,label,done,total}], drill_waiting, drill_waiting_detail:{total,validate,stages,basis}}` (drill_waiting = buy-box owners whose next step is reach-out or a hands-on stage) |
+| GET | `/api/m/{slug}/summary` | `{market:{slug,name,geography,origin_label,origin_lat,origin_lng,max_drive_minutes}, asset_class:{key,label,size_metric,visual_enabled,rent_enabled,visual_question,target_word}, properties, in_buybox, blue_moon_10, needs_review, penetration, levels, levels_in_buybox, credits, set_aside:{total, several, reasons:[{key,label,count,only}], drive_estimated, drive_close_calls, close_call_minutes, max_drive_minutes}, last_import, layers:[{key,label,done,total}], drill_waiting, drill_waiting_detail:{total,validate,stages,basis}}` (drill_waiting = buy-box owners whose next step is reach-out or a hands-on stage) |
 | GET | `/api/m/{slug}/properties?view=&q=&sort=&limit=&offset=&include_excluded=` | `{total, items:[PropertyRow]}` |
 | GET | `/api/m/{slug}/properties/{id}` | `PropertyDetail` |
 | POST | `/api/m/{slug}/properties/{id}/attempt` | body `{stage_key, outcome, detail?, person?, person_role?, contacts?}` |

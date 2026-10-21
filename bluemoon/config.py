@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -147,6 +148,32 @@ def secret(name: str) -> str | None:
 
 def has_secret(name: str) -> bool:
     return secret(name) is not None
+
+
+def save_secret(name: str, value: str, settings: "Settings | None" = None) -> Path:
+    """Write NAME=value into .env (replacing the old line, or adding one) and use it in this process too.
+    The file stays private (owner-only). Never log the value."""
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name) or "\n" in value or "\r" in value:
+        raise ValueError("That name or value can't go in .env.")
+    path = (settings or get_settings()).root / ".env"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    out, done = [], False
+    for line in lines:
+        if re.match(rf"^\s*(export\s+)?{name}\s*=", line):
+            if not done:
+                out.append(f"{name}={value}")
+                done = True
+            continue
+        out.append(line)
+    if not done:
+        out.append(f"{name}={value}")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    os.environ[name] = value
+    return path
 
 
 @lru_cache(maxsize=1)

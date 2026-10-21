@@ -762,7 +762,7 @@ def test_password_mode(client, monkeypatch, settings):
     for path in ("/api/markets", f"/api/m/{MARKET}/summary", "/images/1/sv_0.jpg", "/api/openapi.json"):
         r = client.get(path)
         assert r.status_code == 401, path
-        assert r.json() == {"detail": "Please log in.", "login": "/login"}
+        assert r.json() == {"detail": "Please sign in.", "login": "/login", "email": False}
     health = api(client, "/api/health")
     assert health["auth_required"] is True and health["authenticated"] is False
     r = client.get("/", follow_redirects=False)
@@ -818,7 +818,7 @@ def test_other_websites_cannot_write_or_rebind(client, sample_csv):
     for host in ("127.0.0.1:8765", f"{socket.gethostname()}:8765", "localhost:8765", "[::1]:8765"):
         assert client.get(f"/api/m/{MARKET}/summary", headers={"Host": host}).status_code == 200, host
     # Other devices (Tailscale, a LAN address, the free Cloudflare link) are allowed names, but with no
-    # password and no email-code share they are refused rather than let in.
+    # team password they are refused rather than let in.
     for host in ("100.101.102.103:8765", f"{socket.gethostname()}.tail1234.ts.net", "a-b-c.trycloudflare.com"):
         r = client.get(f"/api/m/{MARKET}/summary", headers={"Host": host})
         assert r.status_code == 403 and "other devices" in r.json()["detail"], host

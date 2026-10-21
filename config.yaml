@@ -25,6 +25,7 @@ web:
   max_page_size: 500
   upload_max_mb: 50              # biggest Crexi file the Import screen accepts
   rescore_delay_seconds: 3       # re-score this long after the last photo answer or deal outcome
+  drive_close_call_minutes: 15   # Deals: set aside only for an estimated drive this close to the limit = "close call"
 
 paths:
   db: data/bluemoon.sqlite

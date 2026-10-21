@@ -319,22 +319,24 @@
   const levelName = (n) => (S.overview && S.overview.level_names && S.overview.level_names[n]) ||
     { 1: 'No owner data', 2: 'Possible owner', 3: 'Confirmed owner' }[n];
 
-  function boardHead() {
+  function boardHead(ov) {
+    const inBox = ov && ov.scope === 'buybox' && ov.levels_in_buybox;
+    const levels = (ov && (inBox ? ov.levels_in_buybox : ov.levels)) || {};
     return `
       <div class="eyebrow">Owner contact · the DRILL</div>
       <h1>Drill until every owner is confirmed</h1>
       <ul class="lines">
         <li>Others blast a list and hope. We drill, and drill again, until we have talked to every owner.</li>
-        <li><b>Level 1</b> ${esc(levelName(1))} · <b>Level 2</b> ${esc(levelName(2))} · <b>Level 3</b> ${esc(levelName(3))}.</li>
         <li>Only a real conversation confirms an owner. Then it goes to the CRM.</li>
-      </ul>`;
+      </ul>
+      ${ov ? BM.ui.levelLadder(levels, { label: inBox ? 'Contact levels in the buy box' : 'Contact levels' }) : ''}`;
   }
 
   function boardHtml(ov) {
     if (!ov.totals || !(ov.totals.all_properties ?? ov.totals.properties)) {
-      return boardHead() + W.emptyMarket('Every owner then gets a contact level and a next step here.');
+      return boardHead(ov) + W.emptyMarket('Every owner then gets a contact level and a next step here.');
     }
-    return boardHead() + nextBar(ov) + scopeSwitch(ov) + statsStrip(ov) + reachCard(ov) +
+    return boardHead(ov) + nextBar(ov) + scopeSwitch(ov) + statsStrip(ov) + reachCard(ov) +
       `<div class="grid2 dr-grid">${penetrationPanel(ov)}${creditsPanel(ov.credits || {})}</div>` +
       pipelinePanel(ov) + learnPanel();
   }

@@ -84,7 +84,10 @@
 
   async function api(path, opts) {
     const o = opts || {};
-    const init = {method: o.method || 'GET', headers: {Accept: 'application/json'}, credentials: 'same-origin'};
+    // redirect: 'manual' so a bounce to a sign-in page on another site (an expired Cloudflare session)
+    // shows up as an 'opaqueredirect' answer instead of a confusing network error.
+    const init = {method: o.method || 'GET', headers: {Accept: 'application/json'}, credentials: 'same-origin',
+      redirect: 'manual'};
     if (o.form) {
       init.body = o.form;
       if (init.method === 'GET') init.method = 'POST';
@@ -96,7 +99,11 @@
     try {
       res = await fetch(path, init);
     } catch (e) {
-      throw new Error("Can't reach the Blue Moon server. Check that it is still running on the Mac Mini, then try again.");
+      throw new Error(unreachableText());
+    }
+    if (res.type === 'opaqueredirect') {
+      showExpired();
+      throw new Error('Your sign-in ran out. Reload the page to sign in again.');
     }
     const type = res.headers.get('content-type') || '';
     let data = null;
@@ -105,7 +112,7 @@
     } else if (res.status !== 204) {
       try { data = await res.text(); } catch (e) { data = null; }
     }
-    if (res.status === 401 && !String(path).startsWith('/api/login')) showLogin();
+    if (res.status === 401 && !String(path).startsWith('/api/login')) showLogin(data && typeof data === 'object' ? data : null);
     if (!res.ok) {
       const err = new Error(detailText(data && typeof data === 'object' ? data : null, res));
       err.status = res.status;
@@ -115,37 +122,67 @@
     return data;
   }
 
+  function unreachableText() {
+    if (navigator.onLine === false) return "You're offline. Check your internet connection, then try again.";
+    if (/\.trycloudflare\.com$/i.test(window.location.hostname)) {
+      return "Can't reach the Blue Moon server through the team link. If the Mac Mini restarted sharing, the link " +
+        'changed: ask Seth for the new one (it is on his Settings screen). Otherwise reload the page.';
+    }
+    return "Can't reach the Blue Moon server. Check that it is still running on the Mac Mini, then try again.";
+  }
+
+  let expiredShown = false;
+  function showExpired() {
+    if (expiredShown || loginShown) return;
+    expiredShown = true;
+    const box = document.createElement('div');
+    box.className = 'login';
+    box.innerHTML =
+      '<div class="panel" role="alertdialog" aria-labelledby="expiredTitle">' +
+      '<h2 id="expiredTitle">Please sign in again</h2>' +
+      '<p class="note" style="margin:0">Your sign-in ran out. Reload the page to sign in again; nothing you saved is lost.</p>' +
+      '<button class="btn primary" type="button">Reload</button></div>';
+    document.body.appendChild(box);
+    const btn = box.querySelector('button');
+    btn.addEventListener('click', () => window.location.reload());
+    btn.focus();
+  }
+
   function marketPath(path) {
     return '/api/m/' + encodeURIComponent(state.market || '') + (path || '');
   }
 
   /* ---------- login (only when APP_PASSWORD is set) ---------- */
 
-  function showLogin() {
+  function showLogin(info) {
     if (loginShown) return;
     loginShown = true;
+    const askEmail = !!(info && info.email);
     const box = document.createElement('div');
     box.className = 'login';
     box.innerHTML =
       '<form class="panel" novalidate>' +
       '<div class="brand"><svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="10" fill="var(--accent)"/>' +
       '<circle cx="15" cy="8" r="9" fill="var(--surface)"/></svg><b>Blue Moon</b></div>' +
-      '<h2>This dashboard is locked</h2>' +
-      '<p class="note" style="margin:0">Type the dashboard password (APP_PASSWORD in the .env file on the Mac Mini).</p>' +
-      '<label class="field">Password<input type="password" name="password" autocomplete="current-password" required></label>' +
+      '<h2>Sign in</h2>' +
+      '<p class="note" style="margin:0">' + (askEmail ? 'Type your email and the team password.' : 'Type the team password.') + '</p>' +
+      (askEmail ? '<label class="field">Your email<input type="email" name="email" autocomplete="email" required></label>' : '') +
+      '<label class="field">Team password<input type="password" name="password" autocomplete="current-password" required></label>' +
       '<p class="err" hidden></p>' +
-      '<button class="btn primary" type="submit">Unlock</button></form>';
+      '<button class="btn primary" type="submit">Sign in</button></form>';
     document.body.appendChild(box);
     const form = box.querySelector('form');
     const err = box.querySelector('.err');
-    form.password.focus();
+    (form.email || form.password).focus();
     form.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       err.hidden = true;
       const btn = form.querySelector('button');
       btn.disabled = true;
       try {
-        await api('/api/login', {method: 'POST', body: {password: form.password.value}});
+        const body = {password: form.password.value};
+        if (form.email) body.email = form.email.value.trim();
+        await api('/api/login', {method: 'POST', body});
         window.location.reload();
       } catch (e) {
         err.textContent = e.message;
@@ -268,6 +305,34 @@
     const label = o.label === false ? '' : '<span class="lvn">' + esc(name) + '</span>' + extra;
     return '<span class="lv l' + lv + (dnc ? ' dnc' : '') + '" title="' + esc(title) + '">' +
       '<span class="pips" aria-hidden="true"><i></i><i></i><i></i></span>' + label + '</span>';
+  }
+
+  /* The three contact levels as a left-to-right ladder with counts. levels = {1: n, 2: n, 3: n}.
+     Each step links to the Deals list filtered to that level. */
+  const LEVEL_NEXT = {
+    1: "Next: find the owner's name (county auditor, recorder, Secretary of State).",
+    2: 'Next: find a phone or email (free sources first, then a Crexi credit) and reach out.',
+    3: 'Talked to them. Hand off to the CRM.',
+  };
+  const LEVEL_VIEW = {1: 'level1', 2: 'level2', 3: 'confirmed'};
+
+  function levelLadder(levels, opts) {
+    const o = opts || {};
+    const at = (n) => Number(levels && (levels[n] ?? levels[String(n)])) || 0;
+    const total = at(1) + at(2) + at(3);
+    const steps = [1, 2, 3].map((n) => {
+      const share = total ? Math.round((100 * at(n)) / total) : 0;
+      return '<a class="rung l' + n + '" href="#deals/' + LEVEL_VIEW[n] + '" title="Show the ' +
+        esc(LEVEL_NAMES[n].toLowerCase()) + ' properties">' +
+        '<span class="rung-top"><span class="lv l' + n + '"><span class="pips" aria-hidden="true"><i></i><i></i><i></i></span></span>' +
+        '<span class="rung-lv">Level ' + n + '</span><span class="rung-n num">' + fmt.num(at(n)) + '</span></span>' +
+        '<span class="rung-name">' + esc(LEVEL_NAMES[n]) + '</span>' +
+        '<span class="rung-bar" aria-hidden="true"><i style="width:' + share + '%"></i></span>' +
+        '<span class="rung-next">' + esc(LEVEL_NEXT[n]) + '</span></a>';
+    });
+    const arrow = '<span class="rung-arrow" aria-hidden="true">→</span>';
+    return '<nav class="lvl-ladder" aria-label="' + esc(o.label || 'Contact levels') + '">' + steps.join(arrow) + '</nav>' +
+      (o.note ? '<p class="note lvl-ladder-note">' + esc(o.note) + '</p>' : '');
   }
 
   function channelBadges(channels) {
@@ -733,7 +798,7 @@
     }
     if (h && h.keys && h.keys.google === false) {
       notes.push({key: 'google-key', text: 'Drive times are estimates and photos are off until you add your Google key.',
-        more: 'Put GOOGLE_MAPS_API_KEY in the .env file on the Mac Mini, then restart the app.'});
+        more: 'On the Mac Mini, run: uv run run.py key google (paste the key; it stays hidden), then restart the dashboard.'});
     }
     if (h && h.vision_backend === 'claude_cli' && h.claude_cli === false) {
       notes.push({key: 'claude-cli', text: "Claude Code isn't set up on this computer, so the photo check can't run yet.",
@@ -851,7 +916,7 @@
     rerender,
     esc,
     fmt,
-    ui: {moon, levelPips, channelBadges, bars, stat, empty, loading, error: errorBox, emptyMarket, dot, coverage},
+    ui: {moon, levelPips, levelLadder, channelBadges, bars, stat, empty, loading, error: errorBox, emptyMarket, dot, coverage},
     /* extras */
     m: marketPath,
     setMarket,

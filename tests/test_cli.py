@@ -326,3 +326,43 @@ def test_real_subprocess(tmp_root, sample_csv):
                           capture_output=True, text=True, timeout=120, check=False)
     assert done.returncode == 0 and "11 properties" in done.stdout
     assert (tmp_root / "data" / "bluemoon.sqlite").is_file()
+
+
+def test_share_password_and_people_commands(cli, settings, monkeypatch):
+    """`share password` makes the team password once, then shows it; add/remove need no restart."""
+    from bluemoon import share
+    monkeypatch.setenv("APP_PASSWORD", "")      # blank = not set; restored after the test
+    env = share.env_file()
+    env.write_text("GOOGLE_MAPS_API_KEY=\nAPP_PASSWORD=\n")
+    code, text = cli("share", "password")
+    assert code == 0 and "Team password: bluemoon-" in text and "kickstart" in text
+    made = text.split("Team password: ", 1)[1].split()[0]
+    assert f"APP_PASSWORD={made}" in env.read_text()
+    code, text = cli("share", "password")                       # shows the same one again
+    assert code == 0 and made in text and "--new" in text
+    code, text = cli("share", "password", "--new")
+    assert code == 0 and made not in text and "sign in again" in text
+    code, text = cli("share", "add", "pat@example.com")
+    assert code == 0 and "right away" in text and "kickstart" not in text
+    code, text = cli("share", "list")
+    assert code == 0 and "pat@example.com  (hasn't signed in yet)" in text and "Team password: set" in text
+    code, text = cli("share", "remove", "pat@example.com")
+    assert code == 0 and "signed out on their next click" in text
+
+
+def test_key_command_saves_hidden_and_never_prints(cli, settings, monkeypatch):
+    import getpass
+    from bluemoon import share
+    fake = "AIza" + "x" * 35
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "")                    # restored after the test
+    share.env_file().write_text("GOOGLE_MAPS_API_KEY=\nAPP_PASSWORD=\n")
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": fake)
+    code, text = cli("key", "google")
+    assert code == 0 and "Saved GOOGLE_MAPS_API_KEY" in text and fake not in text
+    env = share.env_file().read_text()
+    assert f"GOOGLE_MAPS_API_KEY={fake}\n" in env and env.count("GOOGLE_MAPS_API_KEY=") == 1
+    assert share.env_file().stat().st_mode & 0o077 == 0
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "not a key, two words")
+    code, text = cli("key", "google")
+    assert code != 0 and "Nothing saved" in text
+    assert f"GOOGLE_MAPS_API_KEY={fake}\n" in share.env_file().read_text()     # the good key is kept

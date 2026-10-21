@@ -1,33 +1,40 @@
 """Share the dashboard with your team for free, through a Cloudflare Quick Tunnel.
 
 `uv run run.py share` starts Cloudflare's free tunnel (no account, no domain) and prints a public
-https://<words>.trycloudflare.com link to the dashboard on this computer. Two ways in:
+https://<words>.trycloudflare.com link to the dashboard on this computer. The dashboard itself guards the
+door: every visitor signs in with the team password (APP_PASSWORD in .env). When the people list has
+emails, they also type their email, and only emails on the list get in, so the app knows who is who.
+Adding or removing someone works at once (no restart); a removed person is signed out on their next click.
 
-- Email codes (when the people list has emails): Cloudflare asks each visitor for their email and sends
-  them a one-time code. Only the emails on the list get in. Strangers never reach this computer.
-- One password (when the list is empty): everyone with the link types APP_PASSWORD from .env.
+Cloudflare's own email-code gate (`cloudflared --allowed-mail`) is not used: its sign-in runs out a few
+seconds after the code is accepted, so the dashboard's requests bounce to Cloudflare's login page and fail
+(cloudflare/cloudflared issue #1752, open as of October 2026).
 
 The link changes whenever the tunnel restarts (for example after the Mac restarts). The current link is
 saved to data/share.json and shown on the Settings screen and by `run.py status`.
 
-The people list lives in data/share_emails.txt (private, never in git). Change it with
-`run.py share add/remove/list`, then restart sharing.
+The people list lives in data/share_emails.txt and the last sign-in times in data/share_seen.json
+(private, never in git). Change the list with `run.py share add/remove/list`; make the team password with
+`run.py share password`.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .config import Settings, get_settings, has_secret
+from .config import Settings, get_settings, has_secret, save_secret
 
 URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 EMAIL_RE = re.compile(r"^(\*|[A-Za-z0-9._%+'-]+)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
@@ -55,6 +62,10 @@ def emails_file(settings: Settings | None = None) -> Path:
 
 def state_file(settings: Settings | None = None) -> Path:
     return _data_dir(settings) / "share.json"
+
+
+def seen_file(settings: Settings | None = None) -> Path:
+    return _data_dir(settings) / "share_seen.json"
 
 
 def normalize_email(value: str) -> str:
@@ -104,6 +115,70 @@ def remove_emails(values: list[str], settings: Settings | None = None) -> list[s
     return current
 
 
+def allows(email: str | None, emails: list[str] | None = None) -> bool:
+    """Is this email on the people list (exactly, or through a *@company.com entry)?"""
+    e = (email or "").strip().lower()
+    if not e or "@" not in e or e.startswith("*"):
+        return False
+    listed = list_emails() if emails is None else emails
+    return e in listed or f"*@{e.rsplit('@', 1)[1]}" in listed
+
+
+# --- who signed in, and when ----------------------------------------------------------------------
+
+_seen_lock = threading.Lock()
+_seen_written: dict[str, float] = {}     # email -> when this process last wrote it (to write rarely)
+SEEN_EVERY_SECONDS = 300
+
+
+def last_seen(settings: Settings | None = None) -> dict[str, str]:
+    try:
+        data = json.loads(seen_file(settings).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def record_seen(email: str, settings: Settings | None = None, force: bool = False) -> None:
+    """Note that this person used the dashboard now (at most every few minutes per person)."""
+    e = (email or "").strip().lower()
+    if not e:
+        return
+    now = time.monotonic()
+    with _seen_lock:
+        if not force and now - _seen_written.get(e, -1e9) < SEEN_EVERY_SECONDS:
+            return
+        _seen_written[e] = now
+        data = last_seen(settings)
+        data[e] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        path = seen_file(settings)
+        try:
+            path.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+
+# --- the team password ----------------------------------------------------------------------------
+
+PASSWORD_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"     # no 0/o, 1/l/i: easy to read out or text
+
+
+def make_password() -> str:
+    """A random team password that is easy to text: bluemoon-xxxx-xxxx-xxxx (about 59 bits)."""
+    groups = ["".join(secrets.choice(PASSWORD_ALPHABET) for _ in range(4)) for _ in range(3)]
+    return "bluemoon-" + "-".join(groups)
+
+
+def env_file(settings: Settings | None = None) -> Path:
+    return (settings or get_settings()).root / ".env"
+
+
+def save_password(value: str, settings: Settings | None = None) -> Path:
+    """Write APP_PASSWORD=value into .env (replacing the old line or adding one). Private file."""
+    return save_secret("APP_PASSWORD", value, settings)
+
+
 # --- running state --------------------------------------------------------------------------------
 
 def _pid_alive(pid: int | None) -> bool:
@@ -150,21 +225,22 @@ def _clear_state(settings: Settings | None = None) -> None:
 
 
 def people_status(settings: Settings | None = None) -> list[dict]:
-    """Everyone on the list or let in by the running link, with where they stand:
-    active   = on the list and the running link lets them in
-    waiting  = added, gets in after sharing restarts
-    removed  = taken off the list, still gets in until sharing restarts
-    listed   = on the list, sharing is off"""
+    """Everyone on the list, with when they last used the dashboard:
+    signed_in = has signed in (last_seen says when)
+    not_yet   = on the list, hasn't signed in yet
+    everyone  = a *@company.com entry (each person there signs in with their own email)
+    People who signed in through a *@company.com entry are listed too, after it."""
     listed = list_emails(settings)
-    live = current(settings)
-    active = [e.lower() for e in ((live or {}).get("emails") or [])] if live and live.get("mode") == "email" else []
+    seen = last_seen(settings)
     out = []
     for e in listed:
-        status = "listed" if not live else ("active" if e in active else "waiting")
-        out.append({"email": e, "status": status})
-    for e in active:
-        if e not in listed:
-            out.append({"email": e, "status": "removed"})
+        if e.startswith("*@"):
+            out.append({"email": e, "status": "everyone", "last_seen": None})
+            domain = e[2:]
+            for who in sorted(x for x in seen if x.endswith("@" + domain) and x not in listed):
+                out.append({"email": who, "status": "signed_in", "last_seen": seen[who], "via": e})
+        else:
+            out.append({"email": e, "status": "signed_in" if e in seen else "not_yet", "last_seen": seen.get(e)})
     return out
 
 
@@ -187,14 +263,21 @@ def is_local_host(host_header: str) -> bool:
     return h in (me, bare, f"{bare}.local")
 
 
-def outside_access_ok(host_header: str, has_password: bool, settings: Settings | None = None) -> bool:
+def outside_access_ok(host_header: str, has_password: bool) -> bool:
     """A request that came from outside this computer (any name but localhost) needs a lock on the door:
-    the dashboard password, or a running email-code share (Cloudflare checks the code before the request
-    gets here). Without either, outside visitors are refused."""
-    if is_local_host(host_header) or has_password:
-        return True
-    live = current(settings)
-    return bool(live and live.get("mode") == "email" and host_name(host_header).endswith(".trycloudflare.com"))
+    the team password. Without it, outside visitors are refused."""
+    return is_local_host(host_header) or has_password
+
+
+def on_this_computer(peer: str | None, host_header: str, headers) -> bool:
+    """Opened on the Mac itself (http://localhost:8765): the direct peer is this computer, the address is
+    localhost, and the request did not come through Cloudflare (which adds CF-Connecting-IP / CF-Ray and
+    keeps the trycloudflare.com name). No sign-in is needed there."""
+    if (peer or "") not in ("127.0.0.1", "::1"):
+        return False
+    if headers.get("cf-connecting-ip") or headers.get("cf-ray"):
+        return False
+    return is_local_host(host_header)
 
 
 def client_ip(peer: str | None, headers) -> str:
@@ -220,26 +303,23 @@ def find_cloudflared() -> str | None:
     return None
 
 
-def build_command(binary: str, port: int, emails: list[str]) -> list[str]:
-    cmd = [binary, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{int(port)}"]
-    for e in emails:
-        cmd += ["--allowed-mail", e]
-    return cmd
+def build_command(binary: str, port: int) -> list[str]:
+    return [binary, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{int(port)}"]
 
 
 def plan(settings: Settings | None = None) -> dict:
-    """What `share` would do right now: mode, people, and a plain-English problem if it can't start."""
+    """What `share` would do right now: mode, people, and a plain-English problem if it can't start.
+    mode "team" = each person types their email and the team password; "password" = just the password."""
     s = settings or get_settings()
     emails = list_emails(s)
-    mode = "email" if emails else "password"
+    mode = "team" if emails else "password"
     problem = None
     if not find_cloudflared():
         problem = ("Cloudflare's free connector (cloudflared) isn't installed. "
                    "Install it with: scripts/install_cloudflared.sh")
-    elif mode == "password" and not has_secret("APP_PASSWORD"):
-        problem = ("Nobody is on the people list and there is no dashboard password, so the link would be open "
-                   "to anyone. Add people with: uv run run.py share add name@example.com "
-                   "(or put a password after APP_PASSWORD= in .env).")
+    elif not has_secret("APP_PASSWORD"):
+        problem = ("There is no team password yet, so the link would be open to anyone. "
+                   "Make one with: uv run run.py share password")
     return {"mode": mode, "emails": emails, "problem": problem, "port": int(s.app.get("port", 8765))}
 
 
@@ -250,7 +330,7 @@ def run(settings: Settings | None = None, on_url: Callable[[str], None] | None =
     p = plan(s)
     if p["problem"]:
         raise ShareError(p["problem"])
-    cmd = build_command(find_cloudflared(), p["port"], p["emails"])
+    cmd = build_command(find_cloudflared(), p["port"])
     echo = echo or (lambda line: None)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 

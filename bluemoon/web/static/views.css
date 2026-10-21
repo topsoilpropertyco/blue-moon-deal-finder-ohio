@@ -175,3 +175,57 @@ details.im-more[open] > summary{margin-bottom:6px}
   details.im-more > summary,details.so-how > summary{min-height:40px}
   .ru-boxhead .x{width:40px;height:40px}
 }
+
+/* Deals: why only some properties are in the buy box */
+.why{display:block;margin:14px 0 4px;padding:14px 18px}
+.why summary{cursor:pointer;list-style:none;font-size:15px;color:var(--muted)}
+.why summary::-webkit-details-marker{display:none}
+.why summary b{color:var(--ink)}
+.why-toggle{color:var(--accent);font-weight:600;margin-left:4px}
+.why[open] .why-toggle{display:none}
+.why-list{list-style:none;padding:0;margin:14px 0 8px;display:grid;gap:8px}
+.why-list li{display:grid;grid-template-columns:minmax(150px,220px) 1fr 64px minmax(150px,200px);align-items:center;gap:12px}
+.why-l{font-weight:600}
+.why-bar{height:8px;border-radius:6px;background:var(--sunk);overflow:hidden}
+.why-bar i{display:block;height:100%;background:var(--na)}
+.why-n{text-align:right;font-weight:600}
+.why .note{margin:6px 0 0}
+.why-acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+@media (max-width:760px){.why-list li{grid-template-columns:1fr auto}.why-bar{grid-column:1 / -1;order:3}.why-only{grid-column:1 / -1;order:4}}
+
+/* Credits: how to spend one credit */
+.cr-how{list-style:none;counter-reset:crhow;padding:0;margin:16px 0 4px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.cr-how li{counter-increment:crhow;display:flex;flex-direction:column;gap:4px;padding:12px 14px 12px 46px;position:relative;border:1px solid var(--line);border-radius:12px;background:var(--surface);font-size:13.5px;color:var(--muted)}
+.cr-how li::before{content:counter(crhow);position:absolute;left:14px;top:12px;width:22px;height:22px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-weight:700;font-size:12.5px;display:grid;place-items:center}
+.cr-how b{color:var(--ink);font-size:14px}
+@media (max-width:760px){.cr-how{grid-template-columns:1fr}}
+
+/* Run: "Do this next" and the numbered list of steps, top to bottom */
+.ru-next{margin:20px 0 4px;border-color:var(--accent);gap:10px}
+.ru-next h2{margin:0;font-size:17px}
+.ru-next ol{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:10px}
+.ru-next li{padding-left:4px}
+.ru-next li>span{margin-right:10px;line-height:1.5}
+.ru-next.done{border-color:var(--good)}
+.ru-list{list-style:none;margin:22px 0 0;padding:0;display:flex;flex-direction:column}
+.ru-row{display:grid;grid-template-columns:34px minmax(0,1fr);gap:14px;position:relative;padding:0 0 14px}
+.ru-row::before{content:"";position:absolute;left:16px;top:34px;bottom:0;width:2px;background:var(--line)}
+.ru-row:last-child::before{display:none}
+.ru-row.is-done::before{background:var(--good)}
+.ru-mark{position:relative;z-index:1;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:14px;border:2px solid var(--line);background:var(--bg);color:var(--muted)}
+.ru-row.is-done .ru-mark{background:var(--good);border-color:var(--good);color:var(--surface)}
+.ru-row.is-next .ru-mark{border-color:var(--accent);color:var(--accent)}
+.ru-row.is-blocked .ru-mark{border-color:var(--warn);color:var(--warn)}
+.ru-row.first .ru-mark{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.ru-body{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 18px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.ru-row.first .ru-body{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.ru-row.is-done .ru-body,.ru-row.is-wait .ru-body,.ru-row.is-off .ru-body{background:transparent}
+.ru-row.is-wait .ru-body,.ru-row.is-off .ru-body{opacity:.72}
+.ru-row .ru-top h2{font-size:16px;margin:0}
+.ru-status{margin:0;font-size:13.5px;color:var(--muted)}
+.ru-status b{font-weight:700}
+.ru-status.done b{color:var(--good)}
+.ru-status.next b{color:var(--accent)}
+.ru-status.blocked b,.ru-status.warn{color:var(--warn-ink)}
+.ru-status.warn b{color:var(--good)}
+.ru-wide{margin-top:4px}

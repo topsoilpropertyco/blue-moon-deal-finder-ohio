@@ -1,5 +1,6 @@
-/* Run (Setup): one card per pipeline step with what it does, whether it costs money and how far its layer
- * has got. "Estimate" shows calls, Google's free calls left and dollars without calling anything. "Run"
+/* Run (Setup): every step from import to spending Crexi credits, as one numbered list top to bottom. Each row
+ * says what the step does, whether it costs money, and where it stands (done, do next, waiting on another
+ * step, or blocked until something is set up); "Do this next" at the top names the first things to do. "Estimate" shows calls, Google's free calls left and dollars without calling anything. "Run"
  * starts a background job; "Test on 5" runs it on 5 properties first. A paid run that is too big stops and
  * waits: the card shows the estimate and a "Yes, spend it" button that starts it again with confirm.
  * Jobs are polled every 1.5 s while this screen is open; they keep running if you leave it.
@@ -21,8 +22,11 @@
   const RECENT_N = 10;
   const ACTIVE = ['queued', 'running'];
 
-  /* The steps, in the order the pipeline runs them. `layers`: keys in summary.layers. */
+  /* The steps, top to bottom in the order to do them. `layers`: keys in summary.layers. `go`: a screen where a
+     person does the step (no Run button). Run everything runs the machine steps in its own order. */
   const STEPS = [
+    {key: 'import', title: 'Import a Crexi list', layers: [], go: 'import', goLabel: 'Import a file',
+      what: () => 'Export a list from Crexi (CSV or Excel) and drop it on the Import screen. Duplicates merge; the free steps below run by themselves.'},
     {key: 'owners', title: 'Owners', layers: ['owners'], limit: false,
       what: () => 'Owner type (individual, trust, LLC, portfolio...), years owned, loan status and whether the owner lives far away.'},
     {key: 'drive', title: 'Drive times', layers: ['drive'], limit: true,
@@ -30,21 +34,26 @@
         '. With no Google key yet, these are free straight-line estimates.')},
     {key: 'rent', title: 'Rent', layers: ['rent'], limit: true, needs: 'rent_enabled',
       what: () => 'HUD area rents (free HUD map service) compared with the rent scale.'},
+    {key: 'score', title: 'Score', layers: ['score'], limit: false,
+      what: () => 'Buy box, colors, Blue Moon score and rank. Properties that fail a filter are set aside, never deleted.'},
     {key: 'photos', title: 'Photos', layers: ['photos'], limit: true, needs: 'visual_enabled',
       what: () => '3 Street View photos and 1 satellite photo of each buy-box property. The first paid step.'},
     {key: 'classify', title: 'Photo check', layers: ['photo_check', 'visual'], limit: true, needs: 'visual_enabled',
-      what: (c) => 'Claude looks at the photos' + (c.question ? ': "' + esc(c.question) + '"' : '') + '. Unsure answers go to Photo review.'},
-    {key: 'score', title: 'Score', layers: ['score'], limit: false,
-      what: () => 'Buy box, colors, Blue Moon score and rank. Properties that fail a filter are set aside, never deleted.'},
-    {key: 'drill', title: 'DRILL auto-stages', layers: ['drill'], limit: false,
-      what: () => 'Records baseline and portfolio match, then every owner\'s contact level.'},
+      what: (c) => 'Claude looks at the photos' + (c.question ? ': "' + esc(c.question) + '"' : '') + '. Unsure answers go to Photo review. Scores update by themselves.'},
+    {key: 'review', title: 'Photo review (you)', layers: [], needs: 'visual_enabled', go: 'review', goLabel: 'Open Photo review',
+      what: () => 'You answer the photos Claude was unsure about. Your answers become its examples.'},
     {key: 'calibrate', title: 'Calibrate the photo check', layers: [], limit: false, needs: 'visual_enabled', noEstimate: true,
       what: () => 'Claude checks again every property you answered in Photo review, using your answers as examples, ' +
-        'then updates the Scorecard (the 90% check).'},
+        'then updates the Scorecard (the 90% check). Optional; worth it after 20 or more answers.'},
+    {key: 'drill', title: 'DRILL auto-stages', layers: ['drill'], limit: false,
+      what: () => 'Records baseline and portfolio match, then every owner\'s contact level.'},
+    {key: 'credits', title: 'Spend Crexi credits (you)', layers: [], go: 'credits', goLabel: 'Open Credits',
+      what: () => 'The Credits screen lists the best possible owners in order. Open each in Crexi, use a credit there, and record what it showed. Credits don\'t roll over.'},
     {key: 'all', title: 'Run everything', layers: [], limit: true, wide: true,
-      what: () => 'Every step in order: owners, drive, rent, score, photos, photo check, score, DRILL. ' +
+      what: () => 'Every machine step in order: owners, drive, rent, score, photos, photo check, score, DRILL. ' +
         'Free steps run first. Big paid steps stop and wait for your OK.'},
   ];
+  const LIST = STEPS.filter((st) => st.key !== 'all');
 
   const S = {
     root: null, market: null, ctx: null,
@@ -96,7 +105,7 @@
   }
 
   function stepNote(step, c) {
-    if (step.key === 'photos' && !c.google) return 'Needs GOOGLE_MAPS_API_KEY in .env first (see Settings).';
+    if (step.key === 'photos' && !c.google) return 'Needs the Google key first. On the Mac Mini: uv run run.py key google (Settings has the steps).';
     const vision = step.key === 'classify' || step.key === 'calibrate';
     if (vision && c.backend === 'claude_cli' && !c.claudeCli) {
       return 'Claude Code isn\'t set up on this computer yet. Install it and sign in once (type claude, then /login).';
@@ -137,6 +146,116 @@
     const text = total ? num(done) + ' of ' + num(total) + ' done' : 'Nothing to do yet';
     return '<div class="ru-layer">' + progressBar(total ? done / total : 0, step.title + ' progress', true) +
       '<span class="note">' + text + (l.note ? ' · ' + esc(l.note) : '') + '</span></div>';
+  }
+
+  /* ---------- where each step stands ---------- */
+
+  function layerNums(key, c) {
+    const step = stepByKey(key);
+    const l = step ? layerOf(step, c) : null;
+    return l ? {done: toNum(l.done) || 0, total: toNum(l.total) || 0, note: l.note || ''} : null;
+  }
+
+  function estToDo(key) {
+    const line = S.est && (S.est.steps || []).find((l) => l.step === key);
+    return line ? toNum(line.to_do) : null;
+  }
+
+  /** {state, text}: done | next (do it now) | wait (another step first) | blocked (set something up) | optional | off. */
+  function stepState(step, c) {
+    const s = c.summary || {};
+    if (isOff(step, c)) return {state: 'off', text: 'Not used for ' + (c.ac.label || 'this asset class')};
+    const L = layerNums(step.key, c);
+    const complete = !!(L && L.total && L.done >= L.total);
+    const left = L ? Math.max(0, L.total - L.done) : 0;
+    switch (step.key) {
+      case 'import': {
+        const li = s.last_import;
+        return s.properties ? {state: 'done', text: plural(s.properties, 'property', 'properties') +
+          (li && li.filename ? ' · last file ' + li.filename : '')} : {state: 'next', text: 'No properties yet'};
+      }
+      case 'drive': {
+        if (L && !complete) return {state: 'next', text: plural(left, 'property', 'properties') + ' to do'};
+        if (!c.google) return {state: 'done', text: 'Free estimates for now. Real drive times come with the Google key.', warn: true};
+        const more = estToDo('drive');
+        if (more) return {state: 'next', text: plural(more, 'property', 'properties') + ' can get real Google drive times'};
+        return {state: 'done', text: ''};
+      }
+      case 'photos': {
+        if (!c.google) return {state: 'blocked', text: 'Needs the Google key'};
+        const more = estToDo('photos');
+        const todo = more === null ? left : more;
+        if (todo) return {state: 'next', text: plural(todo, 'property', 'properties') + ' to photograph'};
+        return {state: 'done', text: L && L.total ? '' : 'Nothing to photograph yet'};
+      }
+      case 'classify': {
+        const P = layerNums('photos', c);
+        if (!P || !P.done) return {state: 'wait', text: 'Waiting for photos'};
+        if (c.backend === 'claude_cli' && !c.claudeCli) return {state: 'blocked', text: 'Claude Code isn\'t set up on the Mac yet'};
+        return complete ? {state: 'done', text: ''} : {state: 'next', text: plural(left, 'property', 'properties') + ' to check'};
+      }
+      case 'review': {
+        const Q = layerNums('classify', c);
+        const need = toNum(s.needs_review) || 0;
+        if (need) return {state: 'next', text: plural(need, 'property', 'properties') + ' need your answer'};
+        if (!Q || !Q.done) return {state: 'wait', text: 'Waiting for the photo check'};
+        return {state: 'done', text: 'Nothing waiting for you'};
+      }
+      case 'calibrate': {
+        const answered = toNum((s.review_counts || {}).reviewed) || 0;
+        if (!answered) return {state: 'wait', text: 'Waiting for your photo answers'};
+        return {state: 'optional', text: plural(answered, 'answer') + ' to learn from'};
+      }
+      case 'credits': {
+        const cr = s.credits || {};
+        const n = toNum(cr.left);
+        if (n === null) return {state: 'optional', text: ''};
+        if (!n) return {state: 'done', text: 'All used this month'};
+        return {state: 'next', text: num(n) + ' left this month' + (toNum(cr.daily_pace) ? ' · about ' + num(cr.daily_pace) + ' a day' : '')};
+      }
+      default:
+        if (!L) return {state: 'optional', text: ''};
+        return complete ? {state: 'done', text: ''} : {state: 'next', text: plural(left, 'property', 'properties') + ' to do'};
+    }
+  }
+
+  const MARK = {done: '✓', blocked: '!', off: '–'};
+  const STATE_WORD = {done: 'Done', next: 'To do', wait: 'Waiting', blocked: 'Blocked', optional: 'Optional', off: 'Off'};
+
+  /** The first few things to do, in order: set-up blockers and steps that are ready. */
+  function nextItems(c) {
+    const out = [];
+    LIST.forEach((step) => {
+      const st = stepState(step, c);
+      if (st.state === 'blocked' && step.key === 'photos') {
+        out.push({key: 'google', html: '<b>Add your Google key.</b> It turns on photos, the photo check and real drive times ' +
+          '(some set-aside properties may come back). Google gives free calls each month.', go: 'settings', label: 'How to add it'});
+      } else if (st.state === 'blocked') {
+        out.push({key: step.key, html: '<b>' + esc(step.title) + ':</b> ' + esc(st.text) + '.', jump: step.key, label: 'Show'});
+      } else if (st.state === 'next') {
+        const how = step.go ? '' : step.limit ? ' Try <b>Test on ' + TEST_N + '</b> first.' : '';
+        out.push({key: step.key, html: '<b>' + esc(step.title) + ':</b> ' + esc(st.text) + '.' + how,
+          go: step.go, jump: step.go ? null : step.key, label: step.go ? step.goLabel : 'Go to step'});
+      }
+    });
+    return out.slice(0, 3);
+  }
+
+  function nextHtml(c) {
+    const items = nextItems(c);
+    if (!items.length) {
+      return '<section class="panel ru-next done"><h2>All caught up</h2><p class="note">Every step is done. Import a new list, or keep working the DRILL.</p></section>';
+    }
+    return '<section class="panel ru-next" aria-label="Do this next"><h2>Do this next</h2><ol>' + items.map((it) =>
+      '<li><span>' + it.html + '</span>' +
+      (it.go ? '<button type="button" class="btn small" data-ru="go" data-go="' + esc(it.go) + '">' + esc(it.label) + '</button>'
+        : '<button type="button" class="btn small quiet" data-ru="jump" data-step="' + esc(it.jump) + '">' + esc(it.label) + '</button>') +
+      '</li>').join('') + '</ol></section>';
+  }
+
+  function paintNext() {
+    const box = S.root && S.root.isConnected ? S.root.querySelector('[data-ru-next]') : null;
+    if (box && S.ctx) box.innerHTML = nextHtml(S.ctx);
   }
 
   /* ---------- estimates ---------- */
@@ -309,6 +428,10 @@
   /* ---------- cards ---------- */
 
   function buttonsHtml(step, c) {
+    if (step.go) {
+      return isOff(step, c) ? '' : '<div class="bar ru-actions"><button type="button" class="btn" data-ru="go" data-go="' +
+        esc(step.go) + '">' + esc(step.goLabel || 'Open') + '</button></div>';
+    }
     const busy = isActive(S.jobs[step.key]);
     const off = isOff(step, c) || busy ? ' disabled' : '';
     return '<div class="bar ru-actions">' +
@@ -320,19 +443,39 @@
         (isOff(step, c) ? ' disabled' : '') + '>Estimate</button>') + '</div>';
   }
 
+  function statusHtml(step, c) {
+    if (step.wide) return '';
+    const st = stepState(step, c);
+    return '<p class="ru-status ' + st.state + (st.warn ? ' warn' : '') + '"><b>' + STATE_WORD[st.state] + '</b>' +
+      (st.text ? ' · ' + esc(st.text) : '') + '</p>';
+  }
+
   function cardInner(step, c) {
     const off = isOff(step, c);
-    const note = off ? 'Not used for ' + esc(c.ac.label || 'this asset class') + '.' : stepNote(step, c);
-    return '<div class="ru-top"><h2>' + esc(step.title) + '</h2>' + costChip(step, c) + '</div>' +
+    const st = step.wide ? null : stepState(step, c);
+    const note = off ? '' : stepNote(step, c);
+    const showWork = !off && !(st && (st.state === 'wait' || (st.state === 'blocked' && step.key === 'photos')));
+    return '<div class="ru-top"><h2>' + esc(step.title) + '</h2>' + (step.go ? '<span class="pill">You</span>' : costChip(step, c)) + '</div>' +
+      statusHtml(step, c) +
       '<p class="note vw-tight">' + step.what(c) + '</p>' +
-      (off ? '' : layerHtml(step, c)) +
+      (off || step.go ? '' : layerHtml(step, c)) +
       (note ? '<p class="note vw-tight ru-note">' + esc(note) + '</p>' : '') +
-      buttonsHtml(step, c) + estimateHtml(step, c) + '<div data-ru-jobbox>' + jobHtml(step) + '</div>';
+      (showWork || isActive(S.jobs[step.key]) ? buttonsHtml(step, c) : '') +
+      estimateHtml(step, c) + '<div data-ru-jobbox>' + jobHtml(step) + '</div>';
   }
 
   function card(step, c) {
-    return '<article class="panel ru-card' + (step.wide ? ' ru-wide' : '') + (isOff(step, c) ? ' ru-off' : '') +
-      '" data-step="' + esc(step.key) + '">' + cardInner(step, c) + '</article>';
+    if (step.wide) {
+      return '<article class="panel ru-card ru-wide" data-step="' + esc(step.key) + '">' + cardInner(step, c) + '</article>';
+    }
+    return '<li class="ru-card ru-row is-' + stepState(step, c).state + '" data-step="' + esc(step.key) + '">' +
+      rowInner(step, c) + '</li>';
+  }
+
+  function rowInner(step, c) {
+    const n = LIST.indexOf(step) + 1;
+    return '<span class="ru-mark" aria-hidden="true">' + (MARK[stepState(step, c).state] || n) + '</span>' +
+      '<div class="ru-body"><span class="sr">Step ' + n + '. </span>' + cardInner(step, c) + '</div>';
   }
 
   function stepByKey(key) {
@@ -346,12 +489,31 @@
   function paintCard(key) {
     const el = cardEl(key);
     const step = stepByKey(key);
-    if (el && step && S.ctx) el.innerHTML = cardInner(step, S.ctx);
+    if (!el || !step || !S.ctx) return;
+    if (step.wide) {
+      el.innerHTML = cardInner(step, S.ctx);
+      return;
+    }
+    el.className = 'ru-card ru-row is-' + stepState(step, S.ctx).state;
+    el.innerHTML = rowInner(step, S.ctx);
   }
 
   function paintAll() {
     if (!S.root || !S.root.isConnected) return;
     STEPS.forEach((s) => paintCard(s.key));
+    markFirstNext();
+    paintNext();
+  }
+
+  /** Highlight the first step that is ready to do. */
+  function markFirstNext() {
+    if (!S.root || !S.root.querySelectorAll) return;
+    const rows = Array.from(S.root.querySelectorAll('.ru-row') || []);
+    const first = rows.find((el) => /\bis-(next|blocked)\b/.test(el.className || ''));
+    rows.forEach((el) => {
+      const cls = String(el.className || '').replace(/\s*\bfirst\b/g, '');
+      el.className = el === first ? cls + ' first' : cls;
+    });
   }
 
   /** While a job runs, move its bar and message in place (keeps keyboard focus on Cancel). */
@@ -538,6 +700,11 @@
     else if (act === 'test') start(key, {limit: TEST_N});
     else if (act === 'confirm') start(key, {confirm: true, limit: toNum(b.getAttribute('data-limit'))});
     else if (act === 'cancel') cancel(b.getAttribute('data-id'));
+    else if (act === 'go') BM.go(b.getAttribute('data-go'));
+    else if (act === 'jump') {
+      const row = cardEl(key);
+      if (row && row.scrollIntoView) row.scrollIntoView({behavior: 'smooth', block: 'center'});
+    }
     else if (act === 'dismiss') {
       delete S.jobs[key];
       paintCard(key);
@@ -561,18 +728,19 @@
 
   function heading(c) {
     const over = c ? num(c.confirmOver) : '50';
-    return H.head('Setup · Run', 'Run the pipeline', [
-      'Free steps first. Paid steps only on what survives the filters.',
-      'Paid runs over ' + over + ' properties stop and wait for your OK.',
-      'Try <b>Test on ' + TEST_N + '</b> before a full run. Every answer is saved, so re-runs don\'t pay twice.',
+    return H.head('Setup · Run', 'Run the pipeline, top to bottom', [
+      'Each step needs the ones above it. Free steps first; paid steps only on what survives the filters.',
+      'Paid runs over ' + over + ' properties stop and wait for your OK. Try <b>Test on ' + TEST_N + '</b> first.',
+      'Every answer is saved, so re-runs don\'t pay twice.',
     ]);
   }
 
   function page(c) {
-    return heading(c) +
+    return heading(c) + '<div data-ru-next>' + nextHtml(c) + '</div>' +
+      '<ol class="ru-list">' + LIST.map((s) => card(s, c)).join('') + '</ol>' +
       '<div class="bar ru-toolbar"><button type="button" class="btn" data-ru="estimate-all">Estimate everything</button>' +
       '<span class="note">Counts calls and dollars without calling anything.</span></div>' +
-      '<div class="ru-grid">' + STEPS.map((s) => card(s, c)).join('') + '</div>' +
+      card(stepByKey('all'), c) +
       '<section class="vw-sec"><h2 class="vw-sub">Recent jobs</h2><div data-ru-recent>' + recentHtml() + '</div></section>';
   }
 
@@ -597,8 +765,10 @@
       return;
     }
     root.innerHTML = page(c);
+    markFirstNext();
     root.addEventListener('click', onClick);
     if (Object.values(S.jobs).some(isActive)) startPolling();
+    loadEstimate(false);          // free dry run: tells which steps still have work (no calls are made)
     await loadRecent();
   }
 

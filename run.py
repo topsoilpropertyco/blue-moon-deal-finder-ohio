@@ -32,7 +32,7 @@ from pathlib import Path
 
 from bluemoon import pipeline
 from bluemoon import share as sharing
-from bluemoon.config import Settings, get_settings, has_secret, secret
+from bluemoon.config import Settings, get_settings, has_secret, save_secret, secret
 from bluemoon.db import connect, scalar
 from bluemoon.drill.credits import credit_status
 
@@ -108,9 +108,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=positive_int, help="default: app.port in config.yaml")
     add("status", "Where every market stands (keys are shown as yes/no, never their values).")
     sh = add("share", "Share the dashboard with your team through Cloudflare's free link (keeps running).")
-    sh.add_argument("action", nargs="?", default="start", choices=["start", "add", "remove", "list"],
-                    help="start (default), add or remove people by email, or list them")
+    sh.add_argument("action", nargs="?", default="start", choices=["start", "add", "remove", "list", "password"],
+                    help="start (default); add or remove people by email; list them; password shows the team "
+                         "password (making one if there is none)")
     sh.add_argument("emails", nargs="*", help="email addresses for add/remove (*@company.com = everyone there)")
+    sh.add_argument("--new", action="store_true", help="with password: replace it (signs everyone out)")
+    ky = add("key", "Save a key into .env without opening the file (you paste it hidden; it is never shown).")
+    ky.add_argument("which", choices=sorted(KEY_ENV), help="which key: google (Maps), anthropic or census")
     return parser
 
 
@@ -360,8 +364,9 @@ def cmd_status(args: argparse.Namespace, conn: sqlite3.Connection, markets: list
     say(f"Crexi credits: {credit_status(conn)['message']}")
     live = sharing.current()
     if live:
-        how = "email codes" if live.get("mode") == "email" else "the dashboard password"
-        say(f"Team link: {live['url']} (people get in with {how}).")
+        how = ("their email and the team password" if sharing.list_emails()
+               else "the team password")
+        say(f"Team link: {live['url']} (people sign in with {how}).")
     empty = []
     for slug in markets:
         status = pipeline.market_status(conn, slug)
@@ -418,8 +423,40 @@ def cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK
 
 
+KEY_ENV = {"google": ("GOOGLE_MAPS_API_KEY", "Google Maps"), "anthropic": ("ANTHROPIC_API_KEY", "Anthropic API"),
+           "census": ("CENSUS_API_KEY", "Census")}
+
+
+def cmd_key(args: argparse.Namespace, settings: Settings) -> int:
+    """Paste a key into .env without opening the file. The key is read hidden and never printed."""
+    import getpass
+    import re
+    name, label = KEY_ENV[args.which]
+    try:
+        value = getpass.getpass(f"Paste your {label} key, then press Return (it stays hidden as you paste): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        say("Nothing saved.")
+        return EXIT_ERROR
+    if not value:
+        say("Nothing was pasted, so nothing was saved.")
+        return EXIT_USAGE
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{20,200}", value):
+        say("That doesn't look like a key (keys are one long word of letters, numbers, - and _). Nothing saved. "
+            "Copy it again and paste only the key.")
+        return EXIT_ERROR
+    save_secret(name, value, settings)
+    say(f"Saved {name} in .env on this Mac. The key isn't shown here and never goes to GitHub.")
+    if args.which == "google" and not value.startswith("AIza"):
+        say("Note: Google Maps keys usually start with AIza. If Google turns it down, copy it again from "
+            "Google Cloud: APIs & Services > Credentials.")
+    say("Restart the dashboard so it uses the key: launchctl kickstart -k gui/$(id -u)/com.bluemoon.dealfinder")
+    if args.which == "google":
+        say("Then on the Run screen: Drive times > Test on 5, then Photos > Test on 5.")
+    return EXIT_OK
+
+
 def cmd_share(args: argparse.Namespace, settings: Settings) -> int:
-    """Manage the people list, or start the free Cloudflare link (runs until Ctrl+C)."""
+    """Manage the people list and team password, or start the free Cloudflare link (runs until Ctrl+C)."""
     if args.action in ("add", "remove"):
         if not args.emails:
             say(f"Say who to {args.action}, for example: uv run run.py share {args.action} pat@example.com")
@@ -429,28 +466,48 @@ def cmd_share(args: argparse.Namespace, settings: Settings) -> int:
         except sharing.ShareError as exc:
             say(str(exc))
             return EXIT_ERROR
-        say(f"People who can open the dashboard: {', '.join(people) if people else 'nobody yet'}.")
-        if sharing.current():
-            say("Restart sharing so the change takes effect (the link will change): "
-                "launchctl kickstart -k gui/$(id -u)/com.bluemoon.share")
+        say(f"People who can sign in: {', '.join(people) if people else 'nobody yet'}.")
+        say("This works right away, no restart needed." + (" Each person signs in with their email and the "
+            "team password (see it with: uv run run.py share password)." if args.action == "add" else
+            " Anyone removed is signed out on their next click."))
         return EXIT_OK
     if args.action == "list":
         people = sharing.people_status()
         if not people:
             say("Nobody is on the people list yet. Add someone with: uv run run.py share add name@example.com")
-        labels = {"active": "has access now", "waiting": "added; gets in after sharing restarts",
-                  "removed": "removed; still gets in until sharing restarts", "listed": "on the list (sharing is off)"}
         for p in people:
-            say(f"  {p['email']}  ({labels[p['status']]})")
+            if p["status"] == "everyone":
+                say(f"  {p['email']}  (everyone at {p['email'][2:]}, each with their own email)")
+            elif p["status"] == "signed_in":
+                say(f"  {p['email']}  (signed in; last seen {p['last_seen'][:16].replace('T', ' ')} UTC)")
+            else:
+                say(f"  {p['email']}  (hasn't signed in yet)")
+        say("Team password: " + ("set (show it with: uv run run.py share password)" if has_secret("APP_PASSWORD")
+                                 else "not set yet (make one with: uv run run.py share password)"))
         live = sharing.current()
         say(f"Sharing is on: {live['url']}" if live else "Sharing is off. Start it with: uv run run.py share")
+        return EXIT_OK
+    if args.action == "password":
+        current = secret("APP_PASSWORD")
+        if current and not args.new:
+            say(f"Team password: {current}")
+            say("Send it to your team with the link. To replace it (signs everyone out): "
+                "uv run run.py share password --new")
+            return EXIT_OK
+        value = sharing.make_password()
+        path = sharing.save_password(value, settings)
+        say(f"Team password: {value}")
+        say(f"Saved in {path.name} on this Mac (never in GitHub).")
+        say("Restart the dashboard so it takes effect: launchctl kickstart -k gui/$(id -u)/com.bluemoon.dealfinder")
+        if current:
+            say("Everyone who was signed in has to sign in again with the new password.")
         return EXIT_OK
     plan = sharing.plan(settings)
     if plan["problem"]:
         say(plan["problem"])
         return EXIT_ERROR
-    how = (f"Each person types their email and gets a one-time code ({len(plan['emails'])} on the list)."
-           if plan["mode"] == "email" else "Everyone types the dashboard password (APP_PASSWORD).")
+    how = (f"Each person types their email and the team password ({len(plan['emails'])} on the list)."
+           if plan["mode"] == "team" else "Everyone types the team password.")
     say("Starting Cloudflare's free link to the dashboard. Keep this window open (or use the background "
         "service). " + how)
 
@@ -481,6 +538,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_serve(args, settings)
         if args.command == "share":
             return cmd_share(args, settings)
+        if args.command == "key":
+            return cmd_key(args, settings)
         markets = ([resolve_market(args.market, settings)] if args.market or args.command != "status"
                    else [m.slug for m in settings.markets])
         conn = connect(settings=settings)

@@ -306,6 +306,7 @@ class JobIn(BaseModel):
 
 class LoginIn(BaseModel):
     password: str = Field(max_length=500)
+    email: str | None = Field(default=None, max_length=320)
 
 
 def _contacts(items: list[ContactItem] | None) -> list[dict] | None:
@@ -400,22 +401,22 @@ def health(request: Request) -> dict:
         backend, cli = "unknown", False
     return {"ok": ok, "version": __version__, "keys": queries.key_status(), "vision_backend": backend,
             "claude_cli": bool(cli), "auth_required": auth.enabled(), "authenticated": auth.is_authenticated(request),
-            "share": share_status()}
+            "signed_in_as": auth.signed_in_as(request), "login_email": auth.asks_for_email(), "share": share_status()}
 
 
 def share_status() -> dict:
-    """The team link (free Cloudflare tunnel): on/off, the link, email codes or password, how many people."""
+    """The team link (free Cloudflare tunnel): on/off, the link, how people sign in, and who has signed in."""
     try:
         live = sharing.current()
         p = sharing.plan()
+        people = sharing.people_status()
     except Exception:  # noqa: BLE001 - sharing problems must never break the dashboard
         log.debug("Could not read the share state", exc_info=True)
         return {"on": False}
-    people = sharing.people_status()
     return {"on": bool(live), "url": (live or {}).get("url"), "started_at": (live or {}).get("started_at"),
-            "mode": (live or {}).get("mode") or p["mode"], "people": len(p["emails"]), "people_list": people,
-            "needs_restart": any(x["status"] in ("waiting", "removed") for x in people),
-            "cloudflared": sharing.find_cloudflared() is not None, "problem": None if live else p["problem"]}
+            "mode": p["mode"], "people": len(p["emails"]), "people_list": people,
+            "password_set": auth.enabled(), "cloudflared": sharing.find_cloudflared() is not None,
+            "problem": None if live else p["problem"]}
 
 
 # Login guessing: each device (IP address) gets `app.login_max_failures` wrong passwords, then has to wait a
@@ -481,9 +482,21 @@ async def login(body: LoginIn, request: Request) -> Response:
         return JSONResponse({"detail": "That password isn't right."}, status_code=401)
     with _login_lock:
         _login_failures.pop(ip, None)
-    resp = JSONResponse({"ok": True, "auth_required": True, "message": "Logged in."})
+    email = (body.email or "").strip().lower() or None
+    team = sharing.list_emails()
+    if team and not email:
+        return JSONResponse({"detail": "Type your email too (the one Seth added to the team list).",
+                             "email": True}, status_code=400)
+    if email and team and not sharing.allows(email, team):
+        return JSONResponse({"detail": f"{email} isn't on the team list. Ask Seth to add it.", "email": True},
+                            status_code=403)
+    if email and not sharing.EMAIL_RE.match(email):
+        return JSONResponse({"detail": "That email doesn't look right.", "email": True}, status_code=400)
+    if email:
+        sharing.record_seen(email, force=True)
+    resp = JSONResponse({"ok": True, "auth_required": True, "message": "Signed in.", "email": email})
     auth.set_cookie(resp, secure=request.url.scheme == "https"
-                    or request.headers.get("x-forwarded-proto", "").lower() == "https")
+                    or request.headers.get("x-forwarded-proto", "").lower() == "https", email=email)
     return resp
 
 
@@ -822,7 +835,7 @@ def index(request: Request) -> Response:
 def login_page(request: Request) -> Response:
     if not auth.enabled() or auth.is_authenticated(request):
         return RedirectResponse("/", status_code=303)
-    return HTMLResponse(auth.LOGIN_PAGE, headers={"Cache-Control": "no-store"})
+    return HTMLResponse(auth.login_page(), headers={"Cache-Control": "no-store"})
 
 
 @router.get("/static/{path:path}", include_in_schema=False)
@@ -915,8 +928,13 @@ def host_allowed(host_header: str) -> bool:
 def install_middleware(app: FastAPI) -> None:
     @app.middleware("http")
     async def _login_required(request: Request, call_next: Callable) -> Response:
-        if auth.protects(request.url.path) and not auth.is_authenticated(request):
-            return JSONResponse({"detail": "Please log in.", "login": "/login"}, status_code=401)
+        if auth.protects(request.url.path):
+            who = auth.signed_in_as(request)
+            if who is None:
+                return JSONResponse({"detail": "Please sign in.", "login": "/login", "email": auth.asks_for_email()},
+                                    status_code=401)
+            if "@" in who:
+                sharing.record_seen(who)
         return await call_next(request)
 
     @app.middleware("http")                     # runs before the login check
@@ -928,9 +946,9 @@ def install_middleware(app: FastAPI) -> None:
             return JSONResponse({"detail": "This address isn't allowed. Add it to app.allowed_hosts in "
                                            "config.yaml."}, status_code=400)
         if not sharing.outside_access_ok(host, auth.enabled()):
-            return JSONResponse({"detail": "This dashboard isn't open to other devices. Add people with "
-                                           "'uv run run.py share add name@example.com' or set APP_PASSWORD "
-                                           "in .env, then restart sharing."}, status_code=403)
+            return JSONResponse({"detail": "This dashboard isn't open to other devices yet. On the Mac Mini, make "
+                                           "a team password with 'uv run run.py share password', then restart "
+                                           "the dashboard."}, status_code=403)
         origin = request.headers.get("origin")
         if request.method in WRITE_METHODS and origin is not None and \
                 urlsplit(origin).netloc.lower() != host.strip().lower():
