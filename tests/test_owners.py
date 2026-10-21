@@ -67,7 +67,7 @@ def spread(i: int) -> dict:
     ("SMITH JOHN ET AL", "individual"),
     ("JONES MARY LIFE ESTATE", "individual"),
     ("HILL JOHN", "individual"),            # place word as a surname
-    ("ROBBINS GLEN A", "individual"),       # place word as a first name, ends in an initial
+    ("WOODS KAREN A", "individual"),       # place word as a first name, ends in an initial
     ("HOLLOWAY FAMILY TRUST", "trust"),
     ("SMITH JOHN A TR", "trust"),
     ("SMITH JOHN A TRUSTEE", "trust"),
@@ -82,7 +82,7 @@ def spread(i: int) -> dict:
     ("ABC PROPERTIES, L.L.C.", "small_llc"),
     ("ABC PROPERTIES L L C", "small_llc"),
     ("GEM CITY PROPERTIES LP", "small_llc"),
-    ("FOX RUN DELAWARE L P", "small_llc"),
+    ("BIRCH HOLLOW MAPLE L P", "small_llc"),
     ("MAPLE COURT LTD", "small_llc"),
     ("SAMPLE ASSOCIATES LIMITED PARTNERSHIP", "small_llc"),
     ("ABC REAL ESTATE", "small_llc"),       # REAL ESTATE is not an estate
