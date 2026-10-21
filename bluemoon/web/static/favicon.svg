@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <style>
+    .moon{fill:#2C4BD3}
+    @media (prefers-color-scheme: dark){.moon{fill:#8CA2FF}}
+  </style>
+  <defs>
+    <mask id="cut">
+      <rect width="32" height="32" fill="#fff"/>
+      <circle cx="22" cy="11" r="12.5" fill="#000"/>
+    </mask>
+  </defs>
+  <circle class="moon" cx="16" cy="16" r="14.5" mask="url(#cut)"/>
+</svg>

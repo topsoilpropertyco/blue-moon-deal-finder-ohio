@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151922" media="(prefers-color-scheme: dark)">
+<meta name="referrer" content="no-referrer">
+<title>Blue Moon Deal Finder</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<!-- Fonts load without blocking the page; offline, the system fonts in styles.css take over. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" media="print" onload="this.media='all'"
+      href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="stylesheet" href="/static/drill.css">
+<link rel="stylesheet" href="/static/views.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top" id="top">
+  <div class="top-in gutter">
+    <a class="brand" href="#deals" aria-label="Blue Moon Deal Finder: Deals">
+      <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="10" fill="var(--accent)"/><circle cx="15" cy="8" r="9" fill="var(--surface)"/></svg>
+      <b>Blue Moon</b><small>Deal Finder</small>
+    </a>
+    <span class="spacer"></span>
+    <label class="market" title="Switch market">
+      <span class="sr">Market</span>
+      <select id="market" class="market-select" disabled><option>Loading markets…</option></select>
+    </label>
+  </div>
+  <nav class="nav gutter" id="nav" aria-label="Screens"></nav>
+</header>
+
+<div class="notices gutter" id="notices" aria-live="polite"></div>
+
+<main id="main" class="gutter" tabindex="-1">
+  <section class="view">
+    <div class="loading"><span class="spin" aria-hidden="true"></span>Loading Blue Moon…</div>
+  </section>
+</main>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden role="dialog" aria-modal="true" aria-labelledby="drawerTitle" tabindex="-1">
+  <div class="dtop"><span class="dtitle" id="drawerTitle">Property</span><button class="x" type="button" data-close-drawer aria-label="Close" title="Close (Esc)">✕</button></div>
+  <div class="dbody" id="drawerBody"></div>
+</aside>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<noscript><p class="gutter">Blue Moon Deal Finder needs JavaScript turned on in this browser.</p></noscript>
+
+<script src="/static/core.js"></script>
+<script src="/static/property.js"></script>
+<script src="/static/deals.js"></script>
+<script src="/static/drill.js"></script>
+<script src="/static/credits.js"></script>
+<script src="/static/review.js"></script>
+<script src="/static/funnel.js"></script>
+<script src="/static/analytics.js"></script>
+<script src="/static/score.js"></script>
+<script src="/static/sources.js"></script>
+<script src="/static/importer.js"></script>
+<script src="/static/run.js"></script>
+<script src="/static/exports.js"></script>
+<script src="/static/settings.js"></script>
+</body>
+</html>

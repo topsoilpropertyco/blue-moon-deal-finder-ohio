@@ -190,11 +190,11 @@ validate:
   tries_before_moving_on: 2     # unanswered tries on a contact before the drill also moves on to the next stage
   channels: [phone, text, email, social, vm, mail]
   outcomes:
-    no_answer: {label: No answer, effect: none}
-    left_message: {label: Left a message, effect: none}
-    replied_unconfirmed: {label: Replied, not confirmed yet, effect: none}
-    wrong_person: {label: Wrong person, effect: mark_wrong}
-    bounced: {label: Bounced or disconnected, effect: mark_wrong}
-    reached_confirmed: {label: Talked to owner, confirmed, effect: confirm}
-    reached_not_owner: {label: Reached someone who isn't the owner, effect: mark_wrong}
-    do_not_contact: {label: Asked us not to contact, effect: dnc}
+    no_answer: {label: "No answer", effect: none}
+    left_message: {label: "Left a message", effect: none}
+    replied_unconfirmed: {label: "Replied, not confirmed yet", effect: none}
+    wrong_person: {label: "Wrong person", effect: mark_wrong}
+    bounced: {label: "Bounced or disconnected", effect: mark_wrong}
+    reached_confirmed: {label: "Talked to owner, confirmed", effect: confirm}
+    reached_not_owner: {label: "Reached someone who isn't the owner", effect: mark_wrong}
+    do_not_contact: {label: "Asked us not to contact", effect: dnc}
