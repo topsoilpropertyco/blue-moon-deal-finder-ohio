@@ -8,11 +8,12 @@ Status: planning. Order and scope will change as DRILL documents arrive.
 
 | Level | Name | Means | The drill's next move |
 |---|---|---|---|
-| 0 | No owner data | No owner name at all | Find a name: county auditor, recorder, Secretary of State |
-| 1 | Possible owner | We have a name, but it may be stale, an LLC shell, a property manager or an attorney | Confirm it: two independent sources must agree |
-| 2 | Confirmed owner | Two sources agree this is the decision-maker | Find contact info: free sources first, then a Crexi credit |
-| 3 | Contact found | Phone, email or social account found, not yet tested | Test it |
+| 1 | No owner data | No owner name at all | Find a name: county auditor, recorder, Secretary of State |
+| 2 | Possible owner | We have a name, but it may be stale, an LLC shell, a property manager or an attorney | Confirm it: two independent sources must agree |
+| 3 | Confirmed owner | Two sources agree this is the decision-maker | Find and test contact info: free sources first, then a Crexi credit |
 | 4 | Verified contact | Confirmed it reaches the owner (their voicemail, a reply, a third party confirming) | **Hand off to the CRM.** The drill is done. |
+
+Contact info that is found but not yet tested is not its own level. It shows as a yellow channel badge on a Level 3 property.
 
 Side states: **Wrong info** (drops back a level and marks that source bad for this property), **Exhausted** (letters only), **Do not contact** (permanent).
 
