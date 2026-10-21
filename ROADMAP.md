@@ -9,15 +9,14 @@ Status: planning. Order and scope will change as DRILL documents arrive.
 | Level | Name | Means | The drill's next move |
 |---|---|---|---|
 | 1 | No owner data | No owner name at all | Find a name: county auditor, recorder, Secretary of State |
-| 2 | Possible owner | We have a name, but it may be stale, an LLC shell, a property manager or an attorney | Confirm it: two independent sources must agree |
-| 3 | Confirmed owner | Two sources agree this is the decision-maker | Find and test contact info: free sources first, then a Crexi credit |
-| 4 | Verified contact | Confirmed it reaches the owner (their voicemail, a reply, a third party confirming) | **Hand off to the CRM.** The drill is done. |
+| 2 | Possible owner | We have owner data from records, but haven't talked to them | Find a phone, email or social account (free sources first, then a Crexi credit) and reach out |
+| 3 | Confirmed owner | We made contact and they confirmed they own it | **Hand off to the CRM.** The drill is done. |
 
-Contact info that is found but not yet tested is not its own level. It shows as a yellow channel badge on a Level 3 property.
+Only talking to the owner confirms them; records alone never do. Contact info that is found but not yet tested shows as a yellow channel badge on a Level 2 property.
 
 Side states: **Wrong info** (drops back a level and marks that source bad for this property), **Exhausted** (letters only), **Do not contact** (permanent).
 
-Levels are tracked per channel: mail, phone, text, email, social, voicemail drop. The property's level is its best channel. **Penetration** = share of target properties at Level 4. Goal: 100%.
+Levels are tracked per channel: mail, phone, text, email, social, voicemail drop. The property's level is its best channel. **Penetration** = share of target properties at Level 3 (confirmed). Goal: 100%.
 
 ## Phases
 
@@ -29,9 +28,9 @@ Levels are tracked per channel: mail, phone, text, email, social, voicemail drop
 - Ranked list exported to Google Sheets.
 
 ### 2. DRILL and contact levels
-- Contact levels above, per property and per channel.
+- Contact levels above, per property, with channel badges.
 - Free sources first: Ohio Secretary of State, county auditor and recorder, web search.
-- Credit planner: credits don't roll over, so spend all 500 each month on the top-ranked properties still at Level 0–2 after free sources.
+- Credit planner: credits don't roll over, so spend all 500 each month on the top-ranked possible owners (Level 2) after free sources.
 - Penetration dashboard and drill timeline per property.
 - Do Not Call flags on phone numbers.
 
