@@ -1,6 +1,7 @@
 # CLAUDE.md: House Rules for Blue Moon Deal Finder
 
 Read `PRD.md` first. It is the source of truth. If something in a request conflicts with the PRD, ask.
+Then check `docs/BACKLOG.md` and ask Seth whether he wants any open items worked on ("These are still open: ... Want me to do one?").
 `ARCHITECTURE.md` describes the modules and the web API. `ROADMAP.md` lists what comes next.
 
 ## About me

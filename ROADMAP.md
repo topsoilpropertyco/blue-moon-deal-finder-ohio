@@ -4,6 +4,8 @@ The tool's job: **find the owner and confirm we can reach them.** It ranks prope
 
 Status (v1.0): phases 1-4 are built and tested on a real Crexi export. Phase 5 is next. Google has not been called live yet (no key in the build environment), and the Claude photo check has only run on a test image: first real runs should use **Test on 5**.
 
+Requested improvements waiting their turn are in [docs/BACKLOG.md](docs/BACKLOG.md).
+
 ## Contact levels
 
 | Level | Name | Means | The drill's next move |
