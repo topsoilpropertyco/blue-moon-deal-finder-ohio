@@ -82,7 +82,7 @@ COUNT_KEYS: dict[str, tuple[str, ...]] = {
                "satellite_images"),
     "classify": ("properties", "calls", "cached", "classified", "needs_review", "colors", "errors"),
     "calibrate": ("properties", "calls", "classified"),
-    "score": ("properties", "in_buybox", "excluded", "exclusion_counts"),
+    "score": ("properties", "in_buybox", "excluded", "exclusion_counts", "by_hand"),
     "drill": ("properties", "levels", "changed"),
 }
 KEY_NAMES: dict[str, str] = {
@@ -157,8 +157,8 @@ def _rescore_after(conn: sqlite3.Connection, slug: str, res: dict) -> None:
 
 
 def _scores_stale(conn: sqlite3.Connection, slug: str) -> bool:
-    """True when drive times or rent fits are newer than the scores, or some properties have no score yet
-    (for example a drive run that stopped before its re-score)."""
+    """True when drive times, rent fits or buy-box decisions made by hand are newer than the scores, or some
+    properties have no score yet (for example a drive run that stopped before its re-score)."""
     market_id = _market(conn, slug)["id"]
     r = one(conn, """
         SELECT (SELECT MIN(s.computed_at) FROM scores s JOIN properties p ON p.id = s.property_id
@@ -168,10 +168,13 @@ def _scores_stale(conn: sqlite3.Connection, slug: str) -> bool:
                (SELECT MAX(d.fetched_at) FROM drive_times d JOIN properties p ON p.id = d.property_id
                 WHERE p.market_id = ?) AS drive,
                (SELECT MAX(r.computed_at) FROM rent_fits r JOIN properties p ON p.id = r.property_id
-                WHERE p.market_id = ?) AS rent""", (market_id,) * 4) or {}
+                WHERE p.market_id = ?) AS rent,
+               (SELECT MAX(l.created_at) FROM buybox_override_log l JOIN properties p ON p.id = l.property_id
+                WHERE p.market_id = ?) AS decided""", (market_id,) * 5) or {}
     if not r.get("scored"):
         return bool(r.get("unscored"))
-    return bool(r.get("unscored")) or any(r.get(k) and str(r[k]) > str(r["scored"]) for k in ("drive", "rent"))
+    return bool(r.get("unscored")) or any(r.get(k) and str(r[k]) > str(r["scored"])
+                                          for k in ("drive", "rent", "decided"))
 
 
 def _fresh_scores(conn: sqlite3.Connection, slug: str) -> None:

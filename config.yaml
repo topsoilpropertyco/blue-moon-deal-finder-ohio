@@ -96,6 +96,14 @@ geography:
     IN: [FAYETTE, FRANKLIN, HENRY, JAY, DEARBORN]
   allowed_states: [OH, IN]
 
+# How the Deals "Why?" panel groups the properties that are set aside, so you can look at one group at a time
+# and add a whole group to the buy box (or keep it set aside). Size groups: config/asset_classes.yaml.
+set_aside:
+  drive_minutes: [75, 90, 120]   # drive groups over the market's limit: 61-75, 76-90, 91-120 and over 120 min
+  year_step: 10                  # year-built groups below the buy box's first year: one per decade...
+  year_steps: 3                  # ...for this many decades (1960s, 1950s, 1940s), then one group back to...
+  year_oldest: 1900              # ...this year (1900-1939), and one group for anything older
+
 drive:
   provider: google_routes        # google_routes | estimate
   # Used when there is no Google key, and for the free dry run.

@@ -14,7 +14,17 @@ from typing import Any, Iterable
 
 from .config import Settings, get_settings
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Columns added after a database was first made. CREATE TABLE IF NOT EXISTS never changes an old table, so
+# init_db adds each missing one with ALTER TABLE (safe to run again: it checks first). (table, column, type)
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("scores", "rule_reasons", "TEXT"),      # version 2: buy-box decisions by hand
+    ("scores", "aside_buckets", "TEXT"),
+)
+# meta key: markets whose scores were saved before version 2. The dashboard re-scores each one once, so the
+# set-aside groups (scores.aside_buckets) exist. JSON list of market ids.
+RESCORE_PENDING_KEY = "rescore_for_groups"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -113,8 +123,10 @@ CREATE TABLE IF NOT EXISTS owners (
 
 CREATE TABLE IF NOT EXISTS scores (
   property_id INTEGER PRIMARY KEY REFERENCES properties(id) ON DELETE CASCADE,
-  in_buybox INTEGER NOT NULL,      -- 1 = passes every filter
-  exclusion_reasons TEXT NOT NULL DEFAULT '[]',
+  in_buybox INTEGER NOT NULL,      -- 1 = in the buy box: the rules plus any decision made by hand
+  exclusion_reasons TEXT NOT NULL DEFAULT '[]',   -- why it is out now: rule reasons not waived, + 'manual'
+  rule_reasons TEXT,               -- JSON: what the rules alone say (NULL on rows scored before version 2)
+  aside_buckets TEXT,              -- JSON: set-aside groups, e.g. ["drive_time:76-90", "size:1-4"]
   size_value REAL, size_basis TEXT, size_color TEXT,
   visual_color TEXT, rent_color TEXT,
   score REAL,                      -- Blue Moon probability 0..1
@@ -199,6 +211,43 @@ CREATE TABLE IF NOT EXISTS outcomes (
   created_at TEXT NOT NULL
 );
 
+-- Buy-box decisions made by hand. reason '*' = the whole property, or one rule key (drive_time, year, size,
+-- state, skip_county, property_type). include = in the buy box anyway ('*') or ignore this rule for it (a
+-- rule key); exclude = set aside by hand ('*' only); keep = looked at it, the rule stands (a rule key only).
+-- "Follow the rules" deletes the row; buybox_override_log keeps the history.
+CREATE TABLE IF NOT EXISTS buybox_overrides (
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('include', 'exclude', 'keep')
+                                AND (decision <> 'exclude' OR reason = '*')
+                                AND (decision <> 'keep' OR reason <> '*')),
+  bucket TEXT,                     -- the set-aside group it was decided from, e.g. 'drive_time:76-90'
+  detail_at_decision TEXT,         -- what the rules said then, e.g. 'about 82 min drive; the limit is 60 min'
+  note TEXT,
+  batch_id TEXT,                   -- one click = one batch (undone together)
+  decided_by TEXT NOT NULL,        -- email | this Mac | team | open | cli
+  decided_at TEXT NOT NULL,
+  PRIMARY KEY (property_id, reason)
+);
+CREATE INDEX IF NOT EXISTS ix_overrides_batch ON buybox_overrides(batch_id);
+
+-- Every buy-box decision ever made or cleared (append-only; never deleted).
+CREATE TABLE IF NOT EXISTS buybox_override_log (
+  id INTEGER PRIMARY KEY,
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  property_key TEXT,               -- copy, in case a re-import ever splits the property
+  reason TEXT NOT NULL,
+  decision TEXT NOT NULL,          -- include | exclude | keep | cleared
+  previous TEXT,                   -- the decision before this one (NULL = the rules)
+  bucket TEXT, note TEXT, batch_id TEXT,
+  detail TEXT,                     -- what the rules said then (so an undo can put it back)
+  actor TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_override_log_property ON buybox_override_log(property_id);
+CREATE INDEX IF NOT EXISTS ix_override_log_batch ON buybox_override_log(batch_id);
+CREATE INDEX IF NOT EXISTS ix_override_log_created ON buybox_override_log(created_at);
+
 -- Cache of every external API response, so re-runs never re-pay.
 CREATE TABLE IF NOT EXISTS api_cache (
   key TEXT PRIMARY KEY,
@@ -260,9 +309,55 @@ def connect(path: Path | str | None = None, settings: Settings | None = None) ->
 def init_db(conn: sqlite3.Connection, settings: Settings | None = None) -> None:
     with _lock:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))
+        conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
+                     (str(SCHEMA_VERSION), SCHEMA_VERSION))
         conn.commit()
     sync_markets(conn, settings or get_settings())
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add the columns in MIGRATIONS that an older database is missing. Runs on every connect (under _lock),
+    so it only changes what is missing. When scores gains its set-aside columns on a database that already has
+    scores, those markets are noted in meta, so the dashboard re-scores them once (pending_rescore)."""
+    had_scores = False
+    for table, column, kind in MIGRATIONS:
+        if column in _columns(conn, table):
+            continue
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+        except sqlite3.OperationalError as exc:   # another program (the CLI, the dashboard) just added it
+            if "duplicate column" not in str(exc).lower():
+                raise
+            continue
+        if table == "scores":
+            had_scores = True
+    if had_scores:
+        ids = [r[0] for r in conn.execute("SELECT DISTINCT p.market_id FROM scores s "
+                                          "JOIN properties p ON p.id = s.property_id ORDER BY 1").fetchall()]
+        if ids:
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (RESCORE_PENDING_KEY, dumps(ids)))
+
+
+def pending_rescore(conn: sqlite3.Connection) -> set[int]:
+    """Markets scored before version 2 that still need one re-score for their set-aside groups."""
+    raw = scalar(conn, "SELECT value FROM meta WHERE key = ?", (RESCORE_PENDING_KEY,))
+    return {int(x) for x in (loads(raw, []) or []) if isinstance(x, int)}
+
+
+def rescore_done(conn: sqlite3.Connection, market_id: int) -> None:
+    """This market was re-scored: take it off the pending list."""
+    left = sorted(pending_rescore(conn) - {int(market_id)})
+    if left:
+        conn.execute("UPDATE meta SET value = ? WHERE key = ?", (dumps(left), RESCORE_PENDING_KEY))
+    else:
+        conn.execute("DELETE FROM meta WHERE key = ?", (RESCORE_PENDING_KEY,))
+    conn.commit()
 
 
 def sync_markets(conn: sqlite3.Connection, settings: Settings) -> None:

@@ -27,7 +27,7 @@ from typing import Any
 
 from ..config import Settings, get_settings
 from ..db import loads, market_by_slug, now_iso, one, rows, scalar
-from ..scoring.buybox import EXCLUSION_LABELS
+from ..scoring.buybox import EXCLUSION_LABELS, MANUAL_REASON
 from ..util import clean_str
 from . import engine as E
 from . import stats as S
@@ -209,12 +209,14 @@ DEFAULT_HARD_EXCLUSIONS = ["state", "skip_county", "property_type"]
 
 
 def _fallbacks(settings: Settings | None) -> tuple[list[str], set[str]]:
-    """(crexi.plan_fallbacks in order, crexi.plan_hard_exclusions) from config.yaml."""
+    """(crexi.plan_fallbacks in order, crexi.plan_hard_exclusions) from config.yaml. A property set aside by
+    hand ('manual') never gets a fallback credit, whatever config.yaml says."""
     c = (settings or get_settings()).section("crexi") or {}
     tiers = c.get("plan_fallbacks", DEFAULT_FALLBACKS)
     hard = c.get("plan_hard_exclusions", DEFAULT_HARD_EXCLUSIONS)
     tiers = [t for t in ([tiers] if isinstance(tiers, str) else (tiers or [])) if t in FALLBACK_TIERS]
-    return list(dict.fromkeys(tiers)), {str(h) for h in ([hard] if isinstance(hard, str) else (hard or []))}
+    hard_set = {str(h) for h in ([hard] if isinstance(hard, str) else (hard or []))} | {MANUAL_REASON}
+    return list(dict.fromkeys(tiers)), hard_set
 
 
 def _reasons(raw: Any) -> list[str]:

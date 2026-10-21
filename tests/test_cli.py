@@ -250,7 +250,7 @@ def test_all_waits_and_shows_the_full_estimate(cli, imported, fake_hud, settings
 
 def test_export_command(cli, imported, settings):
     code, text = cli("export")
-    assert code == 0 and "Saved 12 files to" in text and "ranked_list.xlsx" in text
+    assert code == 0 and "Saved 13 files to" in text and "ranked_list.xlsx" in text
     assert (settings.path("output") / "apartments-springfield-oh" / "run_summary.md").is_file()
     assert "handed off" not in text   # nobody is confirmed yet
 

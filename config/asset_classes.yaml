@@ -5,6 +5,8 @@
 # size.ideal / size.ok: [min, max]. ideal = green, ok = yellow, outside = red.
 # size.fallback: how to estimate the metric when it is missing
 #   (apartments: units from building sq ft / sqft_per_unit).
+# size.set_aside_below / set_aside_above: how the Why? panel groups properties set aside for their size.
+#   Apartments: [5] and [100, 200] give 1-4, 5-9 (under 10) and 81-100, 101-200, 201+ (over 80) units.
 # visual_check: what the Street View + satellite photo check decides.
 # signals: Blue Moon score multipliers (likelihood ratios). Missing data = skipped.
 
@@ -34,7 +36,8 @@ asset_classes:
   apartments:
     label: Apartments
     crexi_property_types: [multifamily, apartment, mixed use multifamily]
-    size: {metric: units, ideal: [20, 50], ok: [10, 80], fallback: building_sqft, sqft_per_unit: 850}
+    size: {metric: units, ideal: [20, 50], ok: [10, 80], fallback: building_sqft, sqft_per_unit: 850,
+           set_aside_below: [5], set_aside_above: [100, 200]}
     year_built_min: 1970
     max_stories_hint: 3
     rent:
@@ -70,7 +73,8 @@ asset_classes:
   self_storage:
     label: Self-storage
     crexi_property_types: [self storage, self-storage, mini storage, storage]
-    size: {metric: building_sqft, ideal: [30000, 90000], ok: [10000, 150000]}
+    size: {metric: building_sqft, ideal: [30000, 90000], ok: [10000, 150000],
+           set_aside_below: [5000], set_aside_above: [200000, 300000]}
     year_built_min: null
     rent: {enabled: false}
     visual_check:
@@ -93,7 +97,8 @@ asset_classes:
   warehouse:
     label: Warehouses
     crexi_property_types: [industrial, warehouse, flex, distribution, manufacturing]
-    size: {metric: building_sqft, ideal: [20000, 100000], ok: [5000, 250000]}
+    size: {metric: building_sqft, ideal: [20000, 100000], ok: [5000, 250000],
+           set_aside_below: [2500], set_aside_above: [400000, 1000000]}
     year_built_min: null
     rent: {enabled: false}
     visual_check:
@@ -117,7 +122,7 @@ asset_classes:
   campground_rv:
     label: Campgrounds & RV parks
     crexi_property_types: [rv park, campground, rv, recreational, camp]
-    size: {metric: lot_acres, ideal: [10, 60], ok: [3, 150]}
+    size: {metric: lot_acres, ideal: [10, 60], ok: [3, 150], set_aside_below: [1], set_aside_above: [300]}
     year_built_min: null
     rent: {enabled: false}
     visual_check:
@@ -140,7 +145,8 @@ asset_classes:
   mobile_home_park:
     label: Mobile home parks
     crexi_property_types: [mobile home, manufactured, mhp]
-    size: {metric: units, ideal: [30, 120], ok: [10, 250], fallback: lot_acres, acres_per_unit: 0.15}
+    size: {metric: units, ideal: [30, 120], ok: [10, 250], fallback: lot_acres, acres_per_unit: 0.15,
+           set_aside_below: [5], set_aside_above: [400]}
     year_built_min: null
     rent: {enabled: false}
     visual_check:
@@ -163,7 +169,7 @@ asset_classes:
   outdoor_storage:
     label: Outdoor storage
     crexi_property_types: [outdoor storage, ios, industrial outdoor storage, truck terminal, contractor yard, land]
-    size: {metric: lot_acres, ideal: [2, 10], ok: [1, 25]}
+    size: {metric: lot_acres, ideal: [2, 10], ok: [1, 25], set_aside_below: [0.5], set_aside_above: [50, 100]}
     year_built_min: null
     rent: {enabled: false}
     visual_check:
@@ -187,7 +193,7 @@ asset_classes:
   raw_land:
     label: Raw land
     crexi_property_types: [land, vacant land, agricultural, farm]
-    size: {metric: lot_acres, ideal: [5, 50], ok: [1, 200]}
+    size: {metric: lot_acres, ideal: [5, 50], ok: [1, 200], set_aside_below: [0.5], set_aside_above: [500]}
     year_built_min: null
     rent: {enabled: false}
     visual_check: {enabled: false}

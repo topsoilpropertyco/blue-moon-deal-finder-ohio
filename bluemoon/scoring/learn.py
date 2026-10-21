@@ -28,7 +28,7 @@ from datetime import date
 from ..config import AssetClass, Settings, get_settings
 from ..db import market_by_slug, now_iso, one, rows, upsert
 from .blue_moon import SIGNAL_LABELS, active_signal_keys, bucket_label, multipliers, signals_for
-from .buybox import ScoringConfig, evaluate, scoring_config
+from .buybox import ScoringConfig, apply_overrides, evaluate, scoring_config
 
 log = logging.getLogger(__name__)
 
@@ -105,12 +105,15 @@ def _outcome_rows(conn: sqlite3.Connection, market_ids: list[int]) -> list[dict]
 
 def _buckets_by_property(conn: sqlite3.Connection, markets: list[dict], ac: AssetClass, settings: Settings,
                          today: date | None) -> dict[int, tuple[bool, dict[str, str | None]]]:
-    """property id -> (in buy box, {signal: bucket}). Buckets don't depend on the weights."""
+    """property id -> (in buy box, {signal: bucket}). Buckets don't depend on the weights. The buy box is the
+    one Seth works: the rules plus his decisions by hand."""
+    from . import overrides
     from .rank import load_scoring_rows  # lazy: rank imports this module
     by_id = {m["id"]: m for m in markets}
+    decisions = overrides.load(conn, list(by_id))
     out: dict[int, tuple[bool, dict[str, str | None]]] = {}
     for prop, enrich in load_scoring_rows(conn, list(by_id)):
-        ev = evaluate(prop, enrich, ac, by_id[prop["market_id"]], settings)
+        ev = apply_overrides(evaluate(prop, enrich, ac, by_id[prop["market_id"]], settings), decisions.get(prop["id"]))
         sigs = signals_for(prop, enrich, ac, settings, today=today)
         out[prop["id"]] = (bool(ev["in_buybox"]), {s["key"]: s["bucket"] for s in sigs})
     return out

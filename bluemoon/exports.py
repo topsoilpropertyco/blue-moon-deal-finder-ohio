@@ -7,7 +7,9 @@
                      Bold frozen header, filters, colored green/yellow/red cells, clickable links.
                      Ranked and All properties also carry every original column.
 - ranked_list.csv    Every property, ranked ones first (opens in Google Sheets).
-- excluded_<reason>.csv  One file per filter with a plain-English reason. Rows are never deleted.
+- excluded_<reason>.csv  One file per filter with a plain-English reason, plus excluded_manual.csv (set aside
+                     by hand). Rows are never deleted. A property added to the buy box by hand is on the
+                     ranked list instead, with 'Buy box decision' and 'Rules said' telling why.
 - crm_handoff.csv    Confirmed owners for the CRM. Exporting it stamps them as handed off.
 - mailing_list.csv   Name and mailing address where letters are next, or a buy-box owner's address is untested.
 - drill_worklist.csv What to do next for each owner still being worked.
@@ -45,11 +47,14 @@ from .drill import engine, links, stats
 from .enrich.owners import OWNER_TYPE_LABELS
 from .scoring import (
     EXCLUSION_LABELS,
-    EXCLUSION_REASONS,
+    MANUAL_REASON,
+    SET_ASIDE_REASONS,
     SIZE_BASIS_LABELS,
+    apply_overrides,
     evaluate,
     load_scoring_rows,
 )
+from .scoring import buckets, overrides
 from .scoring.blue_moon import fmt_mult
 
 log = logging.getLogger(__name__)
@@ -58,7 +63,7 @@ Progress = Callable[[float, str], None] | None
 
 MAIN_FILES = ("ranked_list.xlsx", "ranked_list.csv", "crm_handoff.csv", "mailing_list.csv", "drill_worklist.csv",
               "run_summary.md")
-EXCLUDED_FILES = tuple(f"excluded_{r}.csv" for r in EXCLUSION_REASONS)
+EXCLUDED_FILES = tuple(f"excluded_{r}.csv" for r in SET_ASIDE_REASONS)
 EXPORT_FILES = MAIN_FILES[:2] + EXCLUDED_FILES + MAIN_FILES[2:]
 CSV_ENCODING = "utf-8-sig"          # with a BOM so Excel reads accents correctly; Google Sheets ignores it
 FILLS = {"green": "C6EFCE", "yellow": "FFEB9C", "red": "FFC7CE"}
@@ -103,6 +108,8 @@ def property_columns(ac: AssetClass) -> list[Col]:
         _col("rank", "Rank", "int"), _col("score_pct", "Blue Moon score %", "num"),
         _col("why_score", "Why this score"),
         _col("in_buybox", "In buy box"), _col("why_set_aside", "Why set aside"),
+        _col("decision", "Buy box decision"), _col("rules_said", "Rules said"), _col("decided_by", "Decided by"),
+        _col("decided_on", "Decided on"), _col("groups", "Set-aside groups"),
         _col("address", "Address"), _col("unit", "Unit"), _col("city", "City"), _col("state", "State"),
         _col("zip", "ZIP"), _col("county", "County"), _col("property_type", "Property type"),
         _col("units", "Units", "int"), _col("building_sqft", "Building sq ft", "int"),
@@ -199,9 +206,12 @@ def load_market(conn: sqlite3.Connection, market_slug: str) -> MarketData:
     scores = {r["property_id"]: r for r in rows(conn, "SELECT s.* FROM scores s JOIN properties p ON p.id = "
                                                        "s.property_id WHERE p.market_id = ?", (market["id"],))}
     summaries = engine.summaries(conn, market_slug)
+    decisions = overrides.load(conn, [market["id"]])
+    spec = buckets.group_spec(market, ac, settings)
     out, headers = [], {}
     for prop, enrich in load_scoring_rows(conn, [market["id"]]):
-        row = _property_row(prop, enrich, scores.get(prop["id"]), summaries.get(prop["id"]), ac, market, settings)
+        row = _property_row(prop, enrich, scores.get(prop["id"]), summaries.get(prop["id"]), ac, market, settings,
+                            decisions.get(prop["id"]) or {}, spec)
         headers.update(dict.fromkeys(row["_raw"]))
         out.append(row)
     out.sort(key=_list_order)
@@ -219,15 +229,22 @@ def _list_order(r: dict) -> tuple:
 
 
 def _property_row(prop: dict, enrich: dict, score: dict | None, summary: dict | None, ac: AssetClass,
-                  market: dict, settings: Settings) -> dict:
+                  market: dict, settings: Settings, found: dict | None = None,
+                  spec: buckets.GroupSpec | None = None) -> dict:
+    found = found or {}
     reasons = loads(score.get("exclusion_reasons"), []) if score else []
-    details = evaluate(prop, enrich, ac, market, settings).get("exclusion_details", {}) if reasons else {}
+    rule_reasons = loads(score.get("rule_reasons"), None) if score else []
+    rule_reasons = reasons if rule_reasons is None else (rule_reasons or [])
+    details: dict = {}
+    if reasons or rule_reasons or found:
+        details = apply_overrides(evaluate(prop, enrich, ac, market, settings), found).get("exclusion_details", {})
     row = {
         "property_id": prop["id"], "_score": (score or {}).get("score"), "_reasons": reasons, "_details": details,
-        "_raw": loads(prop.get("raw_json"), {}) or {}, "_prop": prop,
+        "_rule_reasons": rule_reasons, "_raw": loads(prop.get("raw_json"), {}) or {}, "_prop": prop,
         "rank": (score or {}).get("rank"), "score_pct": _pct((score or {}).get("score"), 2),
         "in_buybox": "Not scored yet" if score is None else _yes_no(score.get("in_buybox")),
         "why_set_aside": "; ".join(_reason_text(r, details) for r in reasons),
+        **_decision_fields(score, rule_reasons, found, prop, spec),
         **{k: prop.get(k) for k in ("address", "unit", "city", "state", "zip", "county", "property_type", "units",
                                     "building_sqft", "year_built", "lot_acres", "owner_name")},
         "flags": ", ".join(loads(prop.get("flags_json"), []) or []),
@@ -237,6 +254,39 @@ def _property_row(prop: dict, enrich: dict, score: dict | None, summary: dict | 
     row.update(_drill_fields(summary))
     row.update(_link_fields(prop))
     return row
+
+
+def _decision_fields(score: dict | None, rule_reasons: list[str], found: dict, prop: dict,
+                     spec: buckets.GroupSpec | None) -> dict:
+    """'Buy box decision', 'Rules said', 'Decided by', 'Decided on' and 'Set-aside groups'."""
+    if score is None:
+        return {}
+
+    def labels(keys: list[str]) -> str:
+        return ", ".join(EXCLUSION_LABELS.get(k, k).lower() for k in keys)
+
+    whole = (found.get("*") or {}).get("decision")
+    waived = [r for r in rule_reasons if (found.get(r) or {}).get("decision") == "include"]
+    kept = [r for r in rule_reasons if (found.get(r) or {}).get("decision") == "keep"]
+    if whole == "exclude":
+        decision = "Set aside by hand"
+    elif whole == "include":
+        decision = "Added by hand"
+    elif waived:
+        decision = "Rule waived: " + labels(waived)
+    elif kept:
+        decision = "Kept set aside: " + labels(kept)
+    else:
+        decision = "Rules"
+    latest = max(found.values(), key=lambda r: str(r.get("decided_at") or ""), default=None)
+    groups = loads(score.get("aside_buckets"), []) or []
+    group_text = "; ".join(f"{EXCLUSION_LABELS.get(g.split(':', 1)[0], g)}: "
+                           f"{buckets.label_for(g, spec, prop.get('property_type')) if spec else g}" for g in groups)
+    return {"decision": decision,
+            "rules_said": "; ".join(EXCLUSION_LABELS.get(r, r) for r in rule_reasons) or "Fits the buy box",
+            "decided_by": (latest or {}).get("decided_by"),
+            "decided_on": str((latest or {}).get("decided_at") or "")[:10] or None,
+            "groups": group_text or None}
 
 
 def _score_fields(score: dict | None) -> dict:
@@ -569,6 +619,8 @@ def summary_data(conn: sqlite3.Connection, data: MarketData) -> dict:
         "properties": len(data.properties), "in_buybox": len(in_box),
         "excluded": len(_excluded(data)), "not_scored": sum(1 for r in data.properties if r["_score"] is None),
         "exclusions": Counter(reason for r in data.properties for reason in r["_reasons"]),
+        "by_hand": {"added": sum(1 for r in in_box if r["_rule_reasons"]),
+                    "set_aside": sum(1 for r in data.properties if MANUAL_REASON in r["_reasons"])},
         "colors": _color_counts(in_box, data.asset),
         "layers": pipeline.layer_status(conn, data.slug),
         "steps": _step_counts(conn, market_id, data.asset),
@@ -685,10 +737,14 @@ def _md_list_section(s: dict) -> list[str]:
     if imp:
         out.append(f"- Last import: {imp['filename']} on {str(imp['created_at'])[:10]} ({imp['rows_total'] or 0:,} rows)")
     out.append(f"- In the buy box (ranked): {s['in_buybox']:,}")
-    out.append(f"- Set aside by a filter (kept, see excluded_*.csv): {s['excluded']:,}")
-    for reason in EXCLUSION_REASONS:
+    out.append(f"- Set aside by a filter or by hand (kept, see excluded_*.csv): {s['excluded']:,}")
+    for reason in SET_ASIDE_REASONS:
         if s["exclusions"].get(reason):
             out.append(f"  - {EXCLUSION_LABELS[reason]}: {s['exclusions'][reason]:,}")
+    hand = s.get("by_hand") or {}
+    if hand.get("added") or hand.get("set_aside"):
+        out.append(f"- Decided by hand: {hand.get('added', 0):,} added to the buy box, "
+                   f"{hand.get('set_aside', 0):,} set aside")
     if s["not_scored"]:
         out.append(f"- Not scored yet: {s['not_scored']:,} (run the score step)")
     return out + [""]
@@ -727,9 +783,12 @@ def summary_rows(s: dict) -> list[dict]:
     out: list[tuple[str, str, Any]] = [
         ("Market", "Name", s["name"]), ("Market", "Exported", s["generated_at"]),
         ("List", "Properties", s["properties"]), ("List", "In the buy box (ranked)", s["in_buybox"]),
-        ("List", "Set aside by a filter", s["excluded"]), ("List", "Not scored yet", s["not_scored"]),
+        ("List", "Set aside by a filter or by hand", s["excluded"]), ("List", "Not scored yet", s["not_scored"]),
     ]
-    out += [("Set aside", EXCLUSION_LABELS[r], s["exclusions"].get(r, 0)) for r in EXCLUSION_REASONS]
+    out += [("Set aside", EXCLUSION_LABELS[r], s["exclusions"].get(r, 0)) for r in SET_ASIDE_REASONS]
+    hand = s.get("by_hand") or {}
+    out += [("By hand", "Added to the buy box", hand.get("added", 0)),
+            ("By hand", "Set aside", hand.get("set_aside", 0))]
     for label, counts in s["colors"].items():
         out += [(f"Colors in buy box: {label}", k, n) for k, n in sorted(counts.items())]
     out += [("Layers", x["label"], f"{x['done']:,} of {x['total']:,}") for x in s["layers"]]
@@ -762,7 +821,7 @@ def export_market(conn: sqlite3.Connection, market_slug: str, out_dir: str | Pat
     columns = data.columns()
     if "ranked_list.csv" in wanted:
         files["ranked_list.csv"] = write_csv(folder / "ranked_list.csv", columns, data.properties)
-    for reason in EXCLUSION_REASONS:
+    for reason in SET_ASIDE_REASONS:
         if f"excluded_{reason}.csv" in wanted:
             files[f"excluded_{reason}.csv"] = write_excluded(data, folder, reason)
     if "drill_worklist.csv" in wanted:

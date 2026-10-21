@@ -257,14 +257,19 @@ def _visual_enabled(ac: AssetClass) -> bool:
 
 
 def _buybox_from_evaluate(prop: dict, drive: dict | None, ac: AssetClass, market: dict,
-                          settings: Settings) -> bool:
-    """Ask the buy box (scoring) when the property hasn't been scored yet. Missing data never excludes."""
+                          settings: Settings, conn: sqlite3.Connection | None = None) -> bool:
+    """Ask the buy box (scoring) when the property hasn't been scored yet, with any decision made by hand.
+    Missing data never excludes."""
     try:
-        from ..scoring.buybox import evaluate
+        from ..scoring.buybox import apply_overrides, evaluate
+        from ..scoring.overrides import for_property
     except ImportError:
         return True
     try:
         res = evaluate(prop, {"drive": drive, "rent": None, "visual": None, "owner": None}, ac, market, settings)
+        found = for_property(conn, int(prop["id"])) if conn is not None else {}
+        if found:
+            res = apply_overrides(res, found)
     except Exception:  # the buy box is another module; a bug there must not block photos
         log.debug("buy-box check failed for property %s", prop.get("id"), exc_info=True)
         return True
@@ -338,7 +343,7 @@ def _plan(conn: sqlite3.Connection, market_slug: str, cfg: ImageryConfig, settin
             continue
         in_box = r["s_in_buybox"]
         if in_box is None:
-            in_box = _buybox_from_evaluate(r, _drive_row(r), ac, market, settings)
+            in_box = _buybox_from_evaluate(r, _drive_row(r), ac, market, settings, conn)
         if not in_box and not include_excluded:
             plan.excluded += 1
             continue
