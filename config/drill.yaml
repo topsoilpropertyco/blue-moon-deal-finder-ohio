@@ -1,0 +1,195 @@
+# The DRILL: Data Resolution through Incremental List Liquidation.
+# Every property runs down these stages in order. Only unresolved records move on.
+# No record is abandoned until every stage has been tried.
+#
+# Contact levels (per property):
+#   1 = No owner data   2 = Possible owner   3 = Confirmed owner (we talked, they confirmed)
+# Level 3 hands the property to the CRM. Records alone never confirm an owner.
+#
+# goal:       identify (get an owner name) | unmask (find the person behind an entity)
+#             | reach (find a phone, email or social account) | validate (test it with the owner)
+# automation: auto (the app does it) | assisted (the app opens the right pages, you record what you find)
+#             | manual (you do it outside the app and check it off)
+# cost:       free | credit (Crexi owner-contact credit) | paid (off until you turn it on)
+# applies_to: owner types (individual, trust, estate, small_llc, corporation, portfolio,
+#             institutional, government, nonprofit, unknown) or [all]
+# hit_rate:   starting guess; replaced by your real results as you work
+
+levels:
+  1: {name: No owner data, help: No owner name on record yet.}
+  2: {name: Possible owner, help: We have owner data from records but have not talked to them.}
+  3: {name: Confirmed owner, help: We reached them and they confirmed they own it. Hand off to the CRM.}
+
+stages:
+  - key: records_baseline
+    name: Records baseline
+    goal: identify
+    automation: auto
+    cost: free
+    applies_to: [all]
+    sources: [crexi_export]
+    method: Owner name and mailing address from the Crexi export.
+    hit_rate: 0.95
+    learn: Separates records with an owner name from the ones invisible to commodity data.
+
+  - key: portfolio_match
+    name: Portfolio match
+    goal: unmask
+    automation: auto
+    cost: free
+    applies_to: [all]
+    sources: [internal_portfolio]
+    method: Groups properties that share an owner name or mailing address. A contact or confirmation on one property carries to its siblings.
+    hit_rate: 0.10
+    learn: One owner often holds several properties under different LLCs at the same mailing address.
+
+  - key: county_auditor
+    name: County auditor
+    goal: identify
+    automation: assisted
+    cost: free
+    applies_to: [all]
+    sources: [county_auditor]
+    method: Open the parcel page by parcel number. Confirm the current owner, the tax mailing address and the last transfer date.
+    hit_rate: 0.85
+    learn: Tax records give the legal owner of record and catch recent sales Crexi missed.
+
+  - key: rental_registration
+    name: Rental registration
+    goal: reach
+    automation: assisted
+    cost: free
+    applies_to: [all]
+    asset_classes: [apartments, mobile_home_park]
+    states: [OH]
+    sources: [rental_registration]
+    method: Ohio law (ORC 5323.02) makes residential rental owners register with the county auditor, including a phone number for the owner or, for an LLC, its agent or a member. Look the parcel up in the county's rental registration.
+    hit_rate: 0.35
+    learn: Often the only free source of an owner's phone number.
+
+  - key: entity_unmask
+    name: LLC and trust lookup
+    goal: unmask
+    automation: assisted
+    cost: free
+    applies_to: [small_llc, corporation, portfolio, trust, estate, institutional, unknown]
+    sources: [ohio_sos, indiana_inbiz, opencorporates]
+    method: Search the entity at the Secretary of State. Record the statutory agent, organizer or incorporator, and any officers named in filings.
+    hit_rate: 0.15
+    learn: Separates owners hidden behind an entity from owners who are truly unreachable.
+
+  - key: recorder_documents
+    name: Recorder documents
+    goal: unmask
+    automation: assisted
+    cost: free
+    applies_to: [small_llc, corporation, portfolio, trust, estate, unknown]
+    sources: [county_recorder]
+    method: Open the deed and mortgage at the county recorder. The person who signed for the LLC or trust is usually the decision-maker.
+    hit_rate: 0.30
+    learn: Signatures on deeds and mortgages name the real people behind entities.
+
+  - key: property_contacts
+    name: On-site and manager contacts
+    goal: reach
+    automation: assisted
+    cost: free
+    applies_to: [all]
+    asset_classes: [apartments, self_storage, campground_rv, mobile_home_park]
+    sources: [google_maps_listing, apartment_listings, state_licenses]
+    method: Find the leasing office, manager or park office listing and its phone. Ask them to pass a message to the owner or share the owner's contact.
+    hit_rate: 0.30
+    learn: Operating properties have a front desk; managers know the owner.
+
+  - key: web_footprint
+    name: Web and social search
+    goal: reach
+    automation: assisted
+    cost: free
+    applies_to: [all]
+    sources: [google_search, linkedin, facebook, free_people_search]
+    method: Search the best-guess person with the city. Check LinkedIn, Facebook and business websites. Free people-search sites can show phones and relatives; use them by hand only.
+    hit_rate: 0.20
+    learn: Younger owners and active landlords are more findable here.
+
+  - key: crexi_credit
+    name: Crexi owner-contact credit
+    goal: reach
+    automation: manual
+    cost: credit
+    applies_to: [all]
+    sources: [crexi_contact]
+    method: Use one of the 500 monthly Crexi credits on this owner. The credit plan picks the highest-ranked owners the free stages could not reach. Credits do not roll over, so the plan spends them all each month.
+    hit_rate: 0.69
+    learn: Paid-in-advance data; best spent where free sources failed.
+
+  - key: court_records
+    name: Court and probate records
+    goal: unmask
+    automation: assisted
+    cost: free
+    applies_to: [all]
+    sources: [probate_court, clerk_of_courts]
+    method: Search probate (estates, guardianships), civil cases (evictions name the owner and its attorney), liens and foreclosures tied to the owner or property.
+    hit_rate: 0.25
+    learn: Properties in legal limbo have paper trails, and change how we approach the owner.
+
+  - key: letters
+    name: Letters
+    goal: reach
+    automation: manual
+    cost: free
+    applies_to: [all]
+    sources: [mail]
+    method: Mail a letter to the owner's mailing address, the statutory agent's address, and "Owner" at the property. Ask them to call or text.
+    hit_rate: 0.05
+    learn: Always available; slow but reaches owners who avoid phones.
+
+  - key: neighbor_network
+    name: Neighbors and local network
+    goal: reach
+    automation: manual
+    cost: free
+    applies_to: [all]
+    sources: [neighbors, local_brokers]
+    method: Ask adjacent owners, local brokers, property managers and contractors who own or manage the property.
+    hit_rate: 0.20
+    learn: High-touch, low-tech. Works on high-value targets.
+
+  - key: paid_skip_trace
+    name: Paid skip trace
+    goal: reach
+    automation: manual
+    cost: paid
+    enabled: false              # turn on only after you decide to pay for a vendor
+    applies_to: [all]
+    sources: [skip_trace_vendors]
+    method: Run the remaining unresolved owners through a paid skip-trace vendor (for example BatchSkipTracing, PropStream, REISkip). Off by default.
+    hit_rate: 0.20
+    learn: Vendor diversity matters; no single database has everything.
+
+  - key: deep_research
+    name: Deep research
+    goal: reach
+    automation: manual
+    cost: free
+    applies_to: [all]
+    sources: [all_sources]
+    method: One person exhausts every angle on this record. What remains after this is truly unreachable, and we know why.
+    hit_rate: 0.50
+    learn: Final filter.
+
+# Testing contact info is not a stage in the list: whenever a property has
+# untested contact info, its next step is to reach out on it.
+validate:
+  name: Reach out and confirm
+  channels: [phone, text, email, social, vm, mail]
+  outcomes:
+    no_answer: {label: No answer, effect: none}
+    left_message: {label: Left a message, effect: none}
+    replied_unconfirmed: {label: Replied, not confirmed yet, effect: none}
+    wrong_person: {label: Wrong person, effect: mark_wrong}
+    bounced: {label: Bounced or disconnected, effect: mark_wrong}
+    reached_confirmed: {label: Talked to owner, confirmed, effect: confirm}
+    reached_not_owner: {label: Reached someone who isn't the owner, effect: mark_wrong}
+    do_not_contact: {label: Asked us not to contact, effect: dnc}

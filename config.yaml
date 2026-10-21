@@ -1,0 +1,125 @@
+# Blue Moon Deal Finder settings.
+# Thresholds, weights, origin and rent settings live here, never in code.
+# Asset-class buy boxes and score weights: config/asset_classes.yaml
+# DRILL stages: config/drill.yaml
+# Free data sources and county links: config/sources.yaml
+
+app:
+  name: Blue Moon Deal Finder
+  host: 127.0.0.1        # use 0.0.0.0 to reach it from your phone over Tailscale
+  port: 8765
+
+paths:
+  db: data/bluemoon.sqlite
+  crexi_dir: data/crexi
+  hud_dir: data/hud
+  images: images
+  labels: labels
+  output: output
+
+# A market is one portal in the app: an asset class + a geography.
+# Every market gets the same screens. Add more markets here.
+markets:
+  - slug: apartments-springfield-oh
+    asset_class: apartments
+    geography: Springfield, OH
+    origin: {label: Downtown Springfield, OH, lat: 39.9242, lng: -83.8088}
+    max_drive_minutes: 60
+  - slug: self-storage-springfield-oh
+    asset_class: self_storage
+    geography: Springfield, OH
+    origin: {label: Downtown Springfield, OH, lat: 39.9242, lng: -83.8088}
+    max_drive_minutes: 60
+  - slug: warehouses-springfield-oh
+    asset_class: warehouse
+    geography: Springfield, OH
+    origin: {label: Downtown Springfield, OH, lat: 39.9242, lng: -83.8088}
+    max_drive_minutes: 60
+  - slug: rv-parks-springfield-oh
+    asset_class: campground_rv
+    geography: Springfield, OH
+    origin: {label: Downtown Springfield, OH, lat: 39.9242, lng: -83.8088}
+    max_drive_minutes: 60
+  - slug: mobile-home-parks-springfield-oh
+    asset_class: mobile_home_park
+    geography: Springfield, OH
+    origin: {label: Downtown Springfield, OH, lat: 39.9242, lng: -83.8088}
+    max_drive_minutes: 60
+  - slug: outdoor-storage-springfield-oh
+    asset_class: outdoor_storage
+    geography: Springfield, OH
+    origin: {label: Downtown Springfield, OH, lat: 39.9242, lng: -83.8088}
+    max_drive_minutes: 60
+  - slug: land-springfield-oh
+    asset_class: raw_land
+    geography: Springfield, OH
+    origin: {label: Downtown Springfield, OH, lat: 39.9242, lng: -83.8088}
+    max_drive_minutes: 60
+
+crexi:
+  credits_per_month: 500          # owner-contact credits; they do not roll over
+  # Force a column mapping when auto-mapping guesses wrong.
+  # Key = our field name, value = exact Crexi column header.
+  column_overrides: {}
+
+# Counties the drive-time filter should never keep, whatever the minutes.
+geography:
+  skip_counties:
+    OH: [CLERMONT, FAIRFIELD, LICKING, MERCER, MORROW]
+    IN: [FAYETTE, FRANKLIN, HENRY, JAY, DEARBORN]
+  allowed_states: [OH, IN]
+
+drive:
+  provider: google_routes        # google_routes | estimate
+  # Used when there is no Google key, and for the free dry run.
+  # Road miles ~ straight-line miles x road_factor; minutes at avg_mph.
+  estimate: {road_factor: 1.25, avg_mph: 48}
+  batch_size: 25                 # destinations per Routes API request
+
+google:
+  concurrency: 5
+  street_view: {fov: 80, pitch: 5, size: 640x640, side_offsets_deg: [-35, 35], radius_m: 50}
+  satellite: {zoom: 19, size: 640x640, maptype: satellite}
+  # Hard caps per run. A run stops when it hits one.
+  max_street_view_images_per_run: 3000
+  max_satellite_images_per_run: 1000
+  # USD per 1,000 calls after the monthly free calls, and free calls per month.
+  # Check https://mapsplatform.google.com/pricing/ ; edit if Google changes them.
+  prices:
+    geocoding: {per_1000: 5.00, free_per_month: 10000}
+    route_matrix_element: {per_1000: 5.00, free_per_month: 10000}
+    street_view_static: {per_1000: 7.00, free_per_month: 10000}
+    street_view_metadata: {per_1000: 0.00, free_per_month: 0}
+    static_maps: {per_1000: 2.00, free_per_month: 10000}
+
+vision:
+  # claude_cli  = your Claude plan via Claude Code on the Mac Mini (no per-call bill)
+  # anthropic_api = pay-per-use API (needs ANTHROPIC_API_KEY)
+  # mock = offline test mode
+  backend: claude_cli
+  claude_cli:
+    command: claude
+    model: sonnet
+    timeout_seconds: 240
+    pause_seconds: 2             # gap between calls, to be gentle on plan limits
+  anthropic_api:
+    model: claude-sonnet-5-5
+    max_tokens: 800
+    est_cost_per_call_usd: 0.03
+  max_calls_per_run: 400
+  examples_per_call: 6           # labeled examples from your reviews sent with each call
+  weight_vision: 0.8             # final = 80% photo verdict, 20% rules prior
+
+rent:
+  # hud_arcgis = HUD's free public map service (no key)
+  # hud_file   = a HUD FMR spreadsheet you downloaded into data/hud/
+  # hud_api    = HUD USER API (needs HUD_API_TOKEN)
+  source: hud_arcgis
+  hud_arcgis_url: https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Fair_Market_Rents/FeatureServer/0/query
+
+safety:
+  confirm_over_properties: 50    # paid runs bigger than this need an explicit OK
+
+scoring:
+  base_rate: 0.015               # Blue Moon odds before any evidence
+  learn_prior_strength: 30       # pseudo-observations behind each starting weight

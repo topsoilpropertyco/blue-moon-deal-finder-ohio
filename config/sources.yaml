@@ -1,0 +1,176 @@
+# Free (and a few paid, switched-off) data sources the DRILL uses.
+# priority: 1 = try first. cost: free | credit | paid.
+# kind: link (the app builds a link you open) | county (link comes from the county table below)
+#       | auto (the app does it itself) | manual (outside the app)
+#
+# Link templates can use these placeholders. Values are URL-encoded where the name ends in _q.
+#   {apn} {apn_q} {apn_digits} {address} {address_q} {city} {city_q} {state} {zip} {county}
+#   {owner} {owner_q} {person} {person_q} {person_or_owner_q} {lat} {lng} {crexi_url} {full_address_q}
+#
+# The county table is filled from research (docs/DATA_SOURCES.md). A county link with no
+# deep-link template falls back to the county's search page.
+
+sources:
+  crexi_export:
+    name: Crexi export
+    kind: auto
+    cost: free
+    priority: 1
+    finds: Owner name, mailing address, sale and loan history.
+  internal_portfolio:
+    name: Your own list (portfolio match)
+    kind: auto
+    cost: free
+    priority: 1
+    finds: Other properties with the same owner name or mailing address.
+  county_auditor:
+    name: County auditor parcel page
+    kind: county
+    cost: free
+    priority: 1
+    finds: Current owner of record, tax mailing address, last transfer.
+  rental_registration:
+    name: County rental registration (Ohio ORC 5323.02)
+    kind: county
+    cost: free
+    priority: 1
+    finds: Owner or agent name, address and phone for residential rentals.
+  ohio_sos:
+    name: Ohio Secretary of State business search
+    kind: link
+    cost: free
+    priority: 2
+    url: https://businesssearch.ohiosos.gov/
+    template: https://businesssearch.ohiosos.gov/
+    finds: Statutory agent, incorporator or organizer, filing history.
+    how: Search the entity name exactly as in "Owner on record". Open the filings for signer names.
+  indiana_inbiz:
+    name: Indiana INBiz business search
+    kind: link
+    cost: free
+    priority: 2
+    url: https://bsd.sos.in.gov/publicbusinesssearch
+    template: https://bsd.sos.in.gov/publicbusinesssearch
+    states: [IN]
+    finds: Registered agent and principals for Indiana entities.
+  opencorporates:
+    name: OpenCorporates
+    kind: link
+    cost: free
+    priority: 3
+    template: https://opencorporates.com/companies?q={owner_q}&jurisdiction_code=us_{state_lower}
+    finds: Officers, agents and related companies across states.
+  county_recorder:
+    name: County recorder (deeds and mortgages)
+    kind: county
+    cost: free
+    priority: 2
+    finds: Who signed the deed or mortgage for an LLC or trust.
+  google_maps_listing:
+    name: Google Maps listing
+    kind: link
+    cost: free
+    priority: 2
+    template: https://www.google.com/maps/search/?api=1&query={full_address_q}
+    finds: Leasing office or business phone at the property.
+  apartment_listings:
+    name: Apartment listing sites
+    kind: link
+    cost: free
+    priority: 3
+    template: https://www.google.com/search?q={full_address_q}+apartments+leasing+office
+    finds: Property manager and leasing phone.
+  state_licenses:
+    name: State operating licenses
+    kind: link
+    cost: free
+    priority: 2
+    template: https://www.google.com/search?q={owner_q}+{city_q}+Ohio+license
+    finds: Licensed operator name and contact (campgrounds, mobile home parks).
+  google_search:
+    name: Google search
+    kind: link
+    cost: free
+    priority: 2
+    template: https://www.google.com/search?q=%22{person_or_owner_q}%22+{city_q}+{state}
+    finds: Business sites, news, obituaries, related companies.
+  linkedin:
+    name: LinkedIn
+    kind: link
+    cost: free
+    priority: 3
+    template: https://www.linkedin.com/search/results/people/?keywords={person_q}
+    finds: Current job and messaging for the person.
+  facebook:
+    name: Facebook
+    kind: link
+    cost: free
+    priority: 3
+    template: https://www.facebook.com/search/people/?q={person_q}
+    finds: Profile and Messenger for the person.
+  free_people_search:
+    name: Free people-search sites (by hand)
+    kind: link
+    cost: free
+    priority: 3
+    template: https://www.truepeoplesearch.com/results?name={person_q}&citystatezip={city_q}%2C%20{state}
+    finds: Phones, emails, relatives. Use by hand only; do not automate.
+  crexi_contact:
+    name: Crexi owner-contact credit
+    kind: link
+    cost: credit
+    priority: 4
+    template: "{crexi_url}"
+    finds: Owner phone and email from Crexi.
+  probate_court:
+    name: County probate court
+    kind: county
+    cost: free
+    priority: 4
+    finds: Estates, heirs, executors.
+  clerk_of_courts:
+    name: County clerk of courts
+    kind: county
+    cost: free
+    priority: 4
+    finds: Evictions (owner and attorney), liens, foreclosures.
+  mail:
+    name: Letters
+    kind: manual
+    cost: free
+    priority: 5
+    finds: Owners who avoid phones.
+  neighbors:
+    name: Neighbors
+    kind: link
+    cost: free
+    priority: 5
+    template: https://www.google.com/maps/search/?api=1&query={lat},{lng}
+    finds: Adjacent owners who know the owner.
+  local_brokers:
+    name: Local brokers and managers
+    kind: manual
+    cost: free
+    priority: 5
+    finds: Who owns or manages the property.
+  skip_trace_vendors:
+    name: Paid skip trace (off)
+    kind: manual
+    cost: paid
+    priority: 9
+    finds: Phones and emails from a paid vendor. Off until you decide to pay.
+  all_sources:
+    name: Every source
+    kind: manual
+    cost: free
+    priority: 9
+    finds: Whatever is left.
+  street_view:
+    name: Street View
+    kind: link
+    cost: free
+    priority: 9
+    template: https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}
+    finds: A look at the property.
+
+counties: {}
