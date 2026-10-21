@@ -6,6 +6,8 @@
 
 - Free: owners, rent (HUD), score, drill, and drive without a Google key (straight-line estimate).
 - Paid: drive with a Google key (Routes), photos (Street View + satellite), classify (Claude).
+- research (AI web research on the owners, your Claude plan) runs on its own, never inside `all`. It has no
+  per-call bill but takes plan usage and time, so it asks for the same OK as a paid step.
   A paid step bigger than `safety.confirm_over_properties` stops before spending when `confirm` is
   False. Its result then has `needs_confirm=True` and the `estimate`, and nothing was charged.
 
@@ -28,6 +30,7 @@ from typing import Any
 from .config import get_settings, has_secret
 from .db import market_by_slug, now_iso, one, rows, scalar, upsert
 from .drill import engine
+from .drill import research as drill_research
 from .enrich import drive, geo, owners, rent
 from .imagery import calibrate as imagery_calibrate
 from .imagery import (
@@ -46,12 +49,13 @@ Progress = Callable[[float, str], None] | None
 PathArg = str | Path | Iterable[str | Path] | None
 
 # The steps Seth can run, in the order the dashboard lists them.
-STEPS: list[str] = ["import", "owners", "drive", "rent", "photos", "classify", "score", "drill", "all"]
+STEPS: list[str] = ["import", "owners", "drive", "rent", "photos", "classify", "score", "drill", "research", "all"]
 # Also runnable (CLI commands and background jobs), but not part of `all`.
 EXTRA_STEPS: list[str] = ["calibrate", "export", "estimate", "after_import"]
 STEP_LABELS: dict[str, str] = {
     "import": "Import", "owners": "Owners", "drive": "Drive times", "rent": "Rent check", "photos": "Photos",
-    "classify": "Photo check", "score": "Scores", "drill": "DRILL automatic stages", "all": "Everything",
+    "classify": "Photo check", "score": "Scores", "drill": "DRILL automatic stages", "research": "AI research",
+    "all": "Everything",
     "calibrate": "Calibrate the photo check", "export": "Export files", "estimate": "Cost estimate",
     "after_import": "Rank the new import",
 }
@@ -59,8 +63,10 @@ STEP_LABELS: dict[str, str] = {
 STEP_ALIASES: dict[str, str] = {
     "visual_fetch": "photos", "imagery": "photos", "visual_classify": "classify", "vision": "classify",
     "drive_times": "drive", "scores": "score", "rank": "score", "auto": "drill", "everything": "all",
+    "ai_research": "research", "web_research": "research",
 }
-PAID_STEPS: frozenset[str] = frozenset({"drive", "photos", "classify", "calibrate"})
+# Steps that stop for an OK on big runs. research has no per-call bill, but it uses your Claude plan for hours.
+PAID_STEPS: frozenset[str] = frozenset({"drive", "photos", "classify", "calibrate", "research"})
 # Run on their own, these steps change what the buy box, colors and rank are made from, so the scores are
 # brought up to date right after (free, about a second). `all` and after_import already have score steps.
 RESCORE_AFTER: frozenset[str] = frozenset({"drive", "rent", "photos", "classify", "calibrate"})
@@ -84,6 +90,8 @@ COUNT_KEYS: dict[str, tuple[str, ...]] = {
     "calibrate": ("properties", "calls", "classified"),
     "score": ("properties", "in_buybox", "excluded", "exclusion_counts"),
     "drill": ("properties", "levels", "changed"),
+    "research": ("owners", "properties", "calls", "cached", "researched", "found", "nothing", "contacts_added",
+                 "people_added", "leads", "blocked_dropped", "skipped_dnc", "errors"),
 }
 KEY_NAMES: dict[str, str] = {
     "google": "GOOGLE_MAPS_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "hud": "HUD_API_TOKEN",
@@ -93,6 +101,7 @@ SKU_LABELS: dict[str, str] = {
     "route_matrix_element": "Google Routes (drive times)", "geocoding": "Google Geocoding",
     "street_view_static": "Street View photos", "static_maps": "Satellite photos",
     "street_view_metadata": "Street View lookups (free)",
+    "vision_claude_cli": "Photo checks (your Claude plan)", "research_claude_cli": "AI research (your Claude plan)",
 }
 
 
@@ -225,16 +234,19 @@ def estimate(conn: sqlite3.Connection, market_slug: str, limit: int | None = Non
         _estimate_or_note("classify", lambda: _estimate_classify(conn, market_slug, limit, photos)),
         _estimate_local(conn, market, "score"),
         _estimate_local(conn, market, "drill"),
+        _estimate_or_note("research", lambda: _estimate_research(conn, market_slug, limit)),
     ]
     skus = [c for line in lines for c in line["skus"]]
     total = round(sum(line["usd"] for line in lines), 2)
     waiting = [line["step"] for line in lines if line["needs_confirm"]]
     classify = _line(lines, "classify")
+    research = _line(lines, "research")
     result = {
         "market": market_slug, "name": market["name"], "limit": limit,
         "properties": _property_count(conn, market["id"]),
         "steps": lines, "google": skus, "total_usd": total,
         "claude_plan_calls": classify.get("plan_calls", 0), "claude_api_usd": classify.get("api_usd", 0.0),
+        "research_plan_calls": research.get("plan_calls", 0), "research_minutes": research.get("minutes", 0),
         "needs_confirm": bool(waiting), "needs_confirm_steps": waiting,
         "confirm_over": _confirm_over(), "has_google_key": has_secret(KEY_NAMES["google"]),
     }
@@ -510,6 +522,12 @@ def _run_drill(run: StepRun) -> dict:
     return _from_module("drill", raw)
 
 
+def _run_research(run: StepRun) -> dict:
+    raw = drill_research.research_owners(run.conn, run.market, limit=run.limit, dry_run=run.dry_run,
+                                         progress=run.progress, confirm=run.confirm)
+    return _from_module("research", raw)
+
+
 def _run_export(run: StepRun) -> dict:
     from . import exports  # imported here: exports itself uses pipeline helpers
     market = _market(run.conn, run.market)
@@ -579,7 +597,8 @@ def _is_failure(result: dict) -> bool:
 RUNNERS: dict[str, Callable[[StepRun], dict]] = {
     "import": _run_import, "owners": _run_owners, "drive": _run_drive, "drive_estimate": _run_drive_estimate,
     "rent": _run_rent, "photos": _run_photos, "classify": _run_classify, "score": _run_score,
-    "drill": _run_drill, "all": _run_all_steps, "calibrate": _run_calibrate, "export": _run_export,
+    "drill": _run_drill, "research": _run_research, "all": _run_all_steps, "calibrate": _run_calibrate,
+    "export": _run_export,
     "estimate": _run_estimate, "after_import": _run_after_import,
 }
 
@@ -696,12 +715,29 @@ def _estimate_classify(conn: sqlite3.Connection, slug: str, limit: int | None, p
                           plan_calls=calls + later if on_plan else 0, api_usd=api_usd, ready=est.get("ready", True))
 
 
+def _estimate_research(conn: sqlite3.Connection, slug: str, limit: int | None) -> dict:
+    """AI research: owners still to research, properties covered and minutes of your Claude plan (no bill)."""
+    est = drill_research.research_owners(conn, slug, limit=limit, dry_run=True)
+    if not est.get("enabled"):
+        return _estimate_line("research", paid=False, message=est["message"], enabled=False)
+    on_plan = est.get("backend") == "claude_cli"
+    # paid=False: no money is spent (the line shows no dollars); needs_confirm still asks before a big run.
+    return _estimate_line("research", paid=False, properties=est.get("properties", 0), to_do=est.get("owners", 0),
+                          needs_confirm=bool(est.get("needs_confirm")), message=est["message"], enabled=True,
+                          backend=est.get("backend"), owners=est.get("owners", 0), calls=est.get("calls", 0),
+                          cached=est.get("cached", 0), plan_calls=est.get("calls", 0) if on_plan else 0,
+                          minutes=est.get("est_minutes", 0), ready=est.get("ready", True))
+
+
 def _estimate_summary(est: dict) -> str:
     parts = [f"About ${est['total_usd']:,.2f} in charges after Google's free monthly calls"]
     if est["claude_api_usd"]:
         parts[0] += f" (including about ${est['claude_api_usd']:,.2f} on the pay-per-use Anthropic API)"
     if est["claude_plan_calls"]:
         parts.append(f"plus up to {est['claude_plan_calls']:,} photo checks on your Claude plan (no per-call bill)")
+    if est.get("research_plan_calls"):
+        parts.append(f"and AI research on up to {est['research_plan_calls']:,} owners (your Claude plan, about "
+                     f"{est.get('research_minutes', 0):,} min; run it on its own)")
     text = ", ".join(parts) + "."
     if est["needs_confirm_steps"]:
         names = ", ".join(step_label(s).lower() for s in est["needs_confirm_steps"])

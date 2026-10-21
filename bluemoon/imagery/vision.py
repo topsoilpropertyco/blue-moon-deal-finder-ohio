@@ -549,10 +549,18 @@ def find_claude(command: str, which: Callable[[str], str | None] = shutil.which)
 
 
 class ClaudeCLIBackend(VisionBackend):
-    """Claude Code in print mode on this computer, billed to your Claude plan."""
+    """Claude Code in print mode on this computer, billed to your Claude plan.
+
+    The AI research (bluemoon/drill/research.py) reuses this machinery with its own command: it changes the
+    words below, the working folder and build_command, and asks with ask() (no photos)."""
     name = "claude_cli"
     provider = "claude_cli"
     sku = "vision_claude_cli"
+    task_label = "photo check"                          # what the messages call this job
+    item_word = "property"                              # what one call is about
+    model_setting = "vision.claude_cli.model in config.yaml"
+    pending_text = "Properties not checked yet stay pending"
+    workdir_name = "bluemoon-vision"                    # the neutral folder `claude` runs in
 
     def __init__(self, cfg: ClaudeCLIConfig | None = None, *, runner: Callable[..., Any] = subprocess.run,
                  sleep: Callable[[float], None] = time.sleep, which: Callable[[str], str | None] = shutil.which,
@@ -561,6 +569,7 @@ class ClaudeCLIBackend(VisionBackend):
         self.runner, self.sleep, self.which, self.clock = runner, sleep, which, clock
         self.dropped_flags: set[str] = set()
         self._last_end: float | None = None
+        self.last_result: CLIResult | None = None       # the latest reply (turns used, for the caller's notes)
 
     @property
     def model(self) -> str:
@@ -572,9 +581,9 @@ class ClaudeCLIBackend(VisionBackend):
     def check(self) -> None:
         if not self.executable():
             raise VisionFatalError(
-                "Claude Code isn't installed on this computer (the `claude` command wasn't found), so the photo "
-                "check can't run. Install it from https://claude.com/claude-code and sign in, or set "
-                "vision.claude_cli.command in config.yaml to its full path.")
+                f"Claude Code isn't installed on this computer (the `claude` command wasn't found), so the "
+                f"{self.task_label} can't run. Install it from https://claude.com/claude-code and sign in, or set "
+                f"vision.claude_cli.command in config.yaml to its full path.")
 
     # building the command
 
@@ -621,7 +630,7 @@ class ClaudeCLIBackend(VisionBackend):
 
     def workdir(self) -> str:
         """A neutral folder, so the project's own CLAUDE.md and settings don't get loaded."""
-        d = Path(self.cfg.workdir).expanduser() if self.cfg.workdir else Path(tempfile.gettempdir()) / "bluemoon-vision"
+        d = Path(self.cfg.workdir).expanduser() if self.cfg.workdir else Path(tempfile.gettempdir()) / self.workdir_name
         d.mkdir(parents=True, exist_ok=True)
         return str(d)
 
@@ -643,10 +652,14 @@ class ClaudeCLIBackend(VisionBackend):
             raise VisionFatalError("Claude Code couldn't be started. Check vision.claude_cli.command in "
                                    "config.yaml.") from None
         except subprocess.TimeoutExpired:
-            raise VisionCallError(f"Claude took longer than {self.cfg.timeout_seconds:.0f} seconds on this property; "
-                                  f"it will be tried again next run.", calls=1) from None
+            raise VisionCallError(f"Claude took longer than {self.cfg.timeout_seconds:.0f} seconds on this "
+                                  f"{self.item_word}; it will be tried again next run.", calls=1) from None
         finally:
             self._last_end = self.clock()
+
+    def ask(self, prompt: str, *, schema: dict | None = None) -> str:
+        """One question with no photos (the AI research builds its own command for it)."""
+        return self.classify([], prompt, schema=schema)
 
     def classify(self, image_paths: list[Path], prompt: str, *, schema: dict | None = None) -> str:
         missing = [str(p) for p in image_paths if not Path(p).is_file()]
@@ -656,6 +669,7 @@ class ClaudeCLIBackend(VisionBackend):
         for _ in range(8):  # a few rounds: dropping flags this version doesn't know, one rate-limit wait
             proc = self._run(self.build_command(image_paths, prompt, schema))
             res = parse_cli_output(proc.stdout or "")
+            self.last_result = res
             if res is None:
                 text = f"{proc.stderr or ''} {proc.stdout or ''}"
                 flag = self._unknown_flag(text, schema)
@@ -663,6 +677,7 @@ class ClaudeCLIBackend(VisionBackend):
                     log.info("This Claude Code version doesn't know %s; running without it.", flag)
                     self.dropped_flags.add(flag)
                     continue
+                self._check_required_flags(text)
                 kind = classify_cli_error(text)
                 if kind == "rate" and rate_retries:
                     rate_retries -= 1
@@ -683,7 +698,7 @@ class ClaudeCLIBackend(VisionBackend):
             if "{" not in text and _USAGE.search(text):  # some versions report the plan limit as a normal reply
                 self._raise_for("usage", text, proc.returncode, calls=1)
             return text
-        raise VisionCallError("Claude Code kept failing on this property; it will be tried again next run.")
+        raise VisionCallError(f"Claude Code kept failing on this {self.item_word}; it will be tried again next run.")
 
     def _unknown_flag(self, text: str, schema: dict | None) -> str | None:
         m = _UNKNOWN_OPTION.search(text or "")
@@ -693,26 +708,33 @@ class ClaudeCLIBackend(VisionBackend):
         known = {g[0] for g in self.optional_flags(schema)}
         return flag if flag in known else None
 
+    def _check_required_flags(self, text: str) -> None:
+        """Claude Code turned down a flag that can't be left out. The photo check has none it must keep (it
+        tries the property again next run); the AI research stops here instead (it never runs without its
+        safety flags)."""
+
     def _raise_for(self, kind: str, text: str, returncode: int | None, calls: int = 0) -> NoReturn:
         said = _short(text)
+        job, item = self.task_label, self.item_word
         if kind == "rate":
             raise VisionFatalError(f"Claude is busy or limiting how fast we can ask right now (rate limit), so the "
-                                   f"photo check stopped. The rest stay pending; run it again later. "
+                                   f"{job} stopped. The rest stay pending; run it again later. "
                                    f"(Claude said: {said})", calls=calls)
         if kind == "usage":
-            raise VisionFatalError(f"Your Claude plan's usage limit was reached, so the photo check stopped. "
-                                   f"Properties not checked yet stay pending; run it again after the limit resets. "
+            raise VisionFatalError(f"Your Claude plan's usage limit was reached, so the {job} stopped. "
+                                   f"{self.pending_text}; run it again after the limit resets. "
                                    f"(Claude said: {said})", calls=calls)
         if kind == "auth":
-            raise VisionFatalError("Claude Code isn't signed in on this computer, so the photo check can't run. Open "
-                                   "Terminal, type `claude`, sign in (type /login), then run the photo check again.",
+            raise VisionFatalError(f"Claude Code isn't signed in on this computer, so the {job} can't run. Open "
+                                   f"Terminal, type `claude`, sign in (type /login), then run the {job} again.",
                                    calls=calls)
         if kind == "model":
             raise VisionFatalError(f"Claude Code doesn't accept the model '{self.cfg.model}'. Change "
-                                   f"vision.claude_cli.model in config.yaml (for example: sonnet). "
+                                   f"{self.model_setting} (for example: sonnet). "
                                    f"(Claude said: {said})", calls=calls)
         detail = said or f"exit code {returncode}"
-        raise VisionCallError(f"Claude Code couldn't check this property ({detail}). It will be tried again next run.",
+        verb = "check" if job == "photo check" else "research"
+        raise VisionCallError(f"Claude Code couldn't {verb} this {item} ({detail}). It will be tried again next run.",
                               calls=calls)
 
 

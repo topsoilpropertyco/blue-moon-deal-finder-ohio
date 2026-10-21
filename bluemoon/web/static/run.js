@@ -47,6 +47,10 @@
         'then updates the Scorecard (the 90% check). Optional; worth it after 20 or more answers.'},
     {key: 'drill', title: 'DRILL auto-stages', layers: ['drill'], limit: false,
       what: () => 'Records baseline and portfolio match, then every owner\'s contact level.'},
+    {key: 'research', title: 'AI research (owners)', layers: [], limit: true,
+      what: () => 'Claude searches the web for each buy-box owner\'s business: LLC filing, officers and agent, website, ' +
+        'business phone and email, and social pages, with the link where it found each. It never uses people-search ' +
+        'sites or Crexi. Everything it finds stays "not tested yet" until you reach out. One owner takes a few minutes.'},
     {key: 'credits', title: 'Spend Crexi credits (you)', layers: [], go: 'credits', goLabel: 'Open Credits',
       what: () => 'The Credits screen lists the best possible owners in order. Open each in Crexi, use a credit there, and record what it showed. Credits don\'t roll over.'},
     {key: 'all', title: 'Run everything', layers: [], limit: true, wide: true,
@@ -99,6 +103,7 @@
         if (c.backend === 'anthropic_api') return chip('warn', 'Costs money: Anthropic API');
         if (c.backend === 'mock') return chip('', 'Test mode');
         return chip('hot', 'Your Claude plan');
+      case 'research': return chip('hot', 'Your Claude plan');
       case 'all': return chip('warn', 'Paid steps ask first');
       default: return chip('', 'Free');
     }
@@ -205,6 +210,15 @@
         const answered = toNum((s.review_counts || {}).reviewed) || 0;
         if (!answered) return {state: 'wait', text: 'Waiting for your photo answers'};
         return {state: 'optional', text: plural(answered, 'answer') + ' to learn from'};
+      }
+      case 'research': {
+        const line = S.est && (S.est.steps || []).find((l) => l.step === 'research');
+        if (line && line.enabled === false) return {state: 'off', text: line.message || 'Switched off'};
+        if (!c.claudeCli && !(line && line.backend === 'mock')) return {state: 'blocked', text: 'Claude Code isn\'t set up on the Mac yet'};
+        const owners = estToDo('research');
+        if (owners === null) return {state: 'optional', text: ''};
+        if (!owners) return {state: 'done', text: 'Every owner in the buy box has been researched'};
+        return {state: 'next', text: plural(owners, 'owner') + ' not researched yet'};
       }
       case 'credits': {
         const cr = s.credits || {};

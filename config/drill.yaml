@@ -11,6 +11,9 @@
 # automation: auto (the app does it) | assisted (the app opens the right pages, you record what you find)
 #             | manual (you do it outside the app and check it off)
 # cost:       free | credit (Crexi owner-contact credit) | paid (off until you turn it on)
+#             | plan (your Claude plan through Claude Code; no per-call bill)
+# background: true = runs as its own job from the Run screen. It never holds up the hands-on stages: it only
+#             becomes an owner's next step when nothing else is left to try.
 # applies_to: owner types (individual, trust, estate, small_llc, corporation, portfolio,
 #             institutional, government, nonprofit, unknown) or [all]
 # hit_rate:   starting guess; replaced by your real results as you work
@@ -53,6 +56,18 @@ stages:
     method: Open the parcel page by parcel number. Confirm the current owner, the tax mailing address and the last transfer date.
     hit_rate: 0.85
     learn: Tax records give the legal owner of record and catch recent sales Crexi missed.
+
+  - key: ai_research
+    name: AI web research
+    goal: reach
+    automation: auto
+    background: true            # its own job (Run screen, AI research); never blocks the stages you work by hand
+    cost: plan                  # your Claude plan through Claude Code; no per-call bill
+    applies_to: [individual, trust, estate, small_llc, corporation, portfolio, nonprofit, unknown]
+    sources: [ai_web_research]
+    method: Claude searches the web for the owner's business filing, officers and statutory agent, company website, public business phone and email, and business social pages, with the link where it saw each. It never uses people-search sites. Everything it finds stays "not tested yet" until you reach out.
+    hit_rate: 0.30
+    learn: One search per owner covers every property they own. Public filings and business pages often show a phone or email no other free source has.
 
   - key: rental_registration
     name: Rental registration
@@ -215,3 +230,54 @@ validate:
     reached_confirmed: {label: "Talked to owner, confirmed", effect: confirm}
     do_not_contact: {label: "Asked us not to contact", effect: dnc}
     # Reached a manager or relative who will pass the message on? Log "Left a message": the number stays usable.
+
+# AI web research (the ai_research stage above). Claude Code on this computer, on your Claude plan: one call per
+# owner, buy-box owners first. Run it from the Run screen ("AI research (owners)") or
+# `uv run run.py research --limit 5`. Runs that cover more than safety.confirm_over_properties properties
+# (config.yaml) wait for your OK. Everything it finds is saved "not tested yet", with the link where it was seen.
+ai_research:
+  backend: claude_cli            # claude_cli = your Claude plan | mock = offline test answers
+  model: sonnet
+  timeout_seconds: 420           # one owner's search may take a few minutes
+  max_turns: 20                  # searches and page reads Claude may make for one owner
+  pause_seconds: 5               # gap between owners, to be gentle on plan limits
+  max_calls_per_run: 100         # owners asked per run; run it again for the rest
+  max_consecutive_errors: 3      # stop a run after this many owners in a row fail
+  min_confidence: medium         # findings below this are kept only as leads (not added as contacts)
+  scope: buybox                  # buybox = owners of buy-box properties | all = every owner
+  refresh_after_days: 180        # an owner's saved answer is reused this long, then asked again
+  est_seconds_per_owner: 120     # for the time shown in the estimate
+  max_people: 6                  # at most this many people and contacts are taken from one answer
+  max_contacts: 8
+  # Never used, and every finding that cites one is dropped: people-search, background-check and data-broker
+  # sites, plus Crexi. A site's subdomains are blocked too (www.spokeo.com is spokeo.com).
+  blocked_domains: [
+    whitepages.com, 411.com, anywho.com, addresses.com, spokeo.com, truepeoplesearch.com, truepeoplesearch.net,
+    fastpeoplesearch.com, fastbackgroundcheck.com, beenverified.com, peoplelooker.com, peoplesmart.com,
+    ownerly.com, numberguru.com, intelius.com, peopleconnect.us, instantcheckmate.com, truthfinder.com,
+    ussearch.com, zabasearch.com, peoplefinders.com, peoplefinder.com, publicrecordsnow.com, radaris.com,
+    mylife.com, usphonebook.com, unitedstatesphonebook.com, thatsthem.com, nuwber.com, clustrmaps.com,
+    searchpeoplefree.com, peoplesearchnow.com, cyberbackgroundchecks.com, advancedbackgroundchecks.com,
+    smartbackgroundchecks.com, peoplebackgroundcheck.com, familytreenow.com, peekyou.com, pipl.com,
+    checkpeople.com, infotracer.com, privateeye.com, privaterecords.net, publicdatacheck.com,
+    publicdatausa.com, usa-people-search.com, peoplebyname.com, freepeopledirectory.com, searchquarry.com,
+    spyfly.com, veripages.com, unmask.com, socialcatfish.com, searchbug.com, voterrecords.com, voteref.com,
+    rehold.com, homemetry.com, neighbor.report, neighborwho.com, idcrawl.com, peoplewhiz.com, cocofinder.com,
+    golookup.com, information.com, spydialer.com, sync.me, callersmart.com, numlookup.com,
+    reversephonelookup.com, truecaller.com, locatefamily.com, dataveria.com, publicinfoservices.com,
+    recordsfinder.com, staterecords.org, arrests.org, arrestfacts.com, backgroundcheck.run, sortedbyname.com,
+    peoplesearchexpert.com, quickpeopletrace.com, propeoplesearch.com, verecor.com, vericora.com,
+    veriforia.com, persopo.com, officialusa.com, 411locate.com, 411.info, addresssearch.com,
+    backgroundalert.com, checkthem.com, findpeoplesearch.com, gladiknow.com, kwold.com, locatepeople.org,
+    newenglandfacts.com, publicrecords.directory, revealname.com, truthrecord.org, usinfosearch.com,
+    searchusapeople.com, spytox.com, idtrue.com, propertyrecs.com, webmii.com, blockshopper.com, zoominfo.com,
+    rocketreach.co, contactout.com, signalhire.com, lusha.com, apollo.io, seamless.ai, peopledatalabs.com,
+    crexi.com]
+  # Companies paid to be the statutory agent for many LLCs. Their phone and email reach the agent company, not
+  # the owner, so they are never saved as contacts (the agent is still noted, as an agent).
+  registered_agent_services: [
+    CT Corporation, C T Corporation System, Corporation Service Company, CSC, Northwest Registered Agent,
+    Registered Agents Inc, Registered Agent Solutions, InCorp Services, Cogency Global,
+    National Registered Agents, Harbor Compliance, LegalZoom, ZenBusiness, Statutory Agent Corp,
+    United States Corporation Agents, Incfile, Bizfilings, Wolters Kluwer, Swyft Filings, Rocket Corporate Services,
+    Business Filings Incorporated, URS Agents, Capitol Corporate Services]

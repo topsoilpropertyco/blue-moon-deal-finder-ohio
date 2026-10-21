@@ -6,6 +6,7 @@
     uv run run.py all --limit 5
     uv run run.py estimate
     uv run run.py photos --limit 5 --dry-run
+    uv run run.py research --limit 5 --dry-run
     uv run run.py export
     uv run run.py serve
 
@@ -50,6 +51,9 @@ STEP_HELP = {
     "drill": "DRILL automatic stages and contact levels (free).",
     "all": "Every step in order: owners, drive, rent, score, photos, classify, score, drill.",
     "calibrate": "Re-check the photos you reviewed and report the photo check's accuracy.",
+    "research": "AI research: Claude searches the web for each buy-box owner's business filing, officers and agent, "
+                "website, business phone and email, and social pages (your Claude plan; never people-search sites "
+                "or Crexi). Everything it finds stays 'not tested yet'. Try --limit 5 first.",
 }
 
 log = logging.getLogger("bluemoon.cli")

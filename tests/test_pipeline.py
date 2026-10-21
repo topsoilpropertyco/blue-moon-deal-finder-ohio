@@ -287,7 +287,10 @@ def test_all_dry_run_is_the_estimate(loaded, market_slug):
 
 def test_estimate_lists_every_step_with_costs(ranked, market_slug, google_key):
     est = pipeline.estimate(ranked, market_slug)
-    assert [s["step"] for s in est["steps"]] == ["owners", "drive", "rent", "photos", "classify", "score", "drill"]
+    assert [s["step"] for s in est["steps"]] == ["owners", "drive", "rent", "photos", "classify", "score", "drill",
+                                                 "research"]
+    research = next(s for s in est["steps"] if s["step"] == "research")
+    assert research["usd"] == 0 and research["skus"] == [] and "Claude plan" in research["message"]
     assert est["total_usd"] == round(sum(s["usd"] for s in est["steps"]), 2)
     photos = next(s for s in est["steps"] if s["step"] == "photos")
     assert photos["paid"] and {s["sku"] for s in photos["skus"]} == {"street_view_static", "static_maps"}

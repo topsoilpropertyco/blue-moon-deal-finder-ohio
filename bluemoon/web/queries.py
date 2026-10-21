@@ -917,7 +917,7 @@ def api_usage(conn: sqlite3.Connection, settings: Settings) -> list[dict]:
                         usd=round(billable * float(price.get("per_1000") or 0) / 1000.0, 2))
         elif r["sku"] == "vision_anthropic_api":
             item.update(billable=units, usd=round(units * per_call, 2), note="Estimated from config.yaml")
-        elif r["sku"] == "vision_claude_cli":
+        elif r["sku"] in ("vision_claude_cli", "research_claude_cli"):
             item.update(note="Runs on your Claude plan (no per-call bill)")
         out.append(item)
     return out

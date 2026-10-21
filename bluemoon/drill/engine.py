@@ -74,7 +74,11 @@ PERSON_TIERS: tuple[tuple[str, ...], ...] = (
 )
 CARRY_ROLES = ("member", "officer", "trustee", "deed_signer", "heir")
 # People who are never the owner: recording one does not make a property "Possible owner" (level 2).
-NOT_OWNER_ROLES = ("manager", "agent")
+# 'rejected' is a person an AI research finding named who was then marked wrong.
+NOT_OWNER_ROLES = ("manager", "agent", "rejected")
+# Contacts and people the AI research step found. It writes them to every property of the owner itself, so
+# the portfolio match never copies them (the copy would lose the source link).
+AI_SOURCE = "ai_research"
 # Roles that name the owner itself: when the export had no owner name, the owner type is read from them.
 OWNER_NAME_ROLES = ("owner_of_record", "possible_owner", "confirmed_owner")
 # Owner types whose owner-of-record name can be read as a person ("DOE JOHN" -> "John Doe").
@@ -113,6 +117,8 @@ class Stage(BaseModel):
     learn: str | None = None
     enabled: bool = True
     person_role: str | None = None
+    # Runs as its own job (the AI research): never takes an owner's 'next' slot while a hands-on stage is open.
+    background: bool = False
 
     @field_validator("applies_to", "sources", mode="before")
     @classmethod
@@ -125,7 +131,7 @@ class Stage(BaseModel):
         return {"key": self.key, "name": self.name, "goal": self.goal, "automation": self.automation,
                 "cost": self.cost, "method": self.method, "hit_rate": self.hit_rate, "learn": self.learn,
                 "enabled": self.enabled, "applies_to": list(self.applies_to), "sources": list(self.sources),
-                "asset_classes": self.asset_classes, "states": self.states}
+                "asset_classes": self.asset_classes, "states": self.states, "background": self.background}
 
     def applies(self, owner_type: str | None, asset_class: str | None, state: str | None) -> bool:
         who = {x.lower() for x in self.applies_to}
@@ -721,12 +727,25 @@ def _first_sentence(text: str | None) -> str:
     return m.group(1) if m else t
 
 
+def owner_search_name(ctx: Ctx) -> str | None:
+    """The owner name a web search can start from: the owner of record, else the newest owner name the DRILL
+    recorded (a possible or confirmed owner). None when there is no name to search for yet."""
+    name = _clean_owner(ctx.prop.get("owner_name"))
+    if name:
+        return name
+    for p in reversed(ctx.people):
+        if p.get("role") in OWNER_NAME_ROLES and _clean_owner(p.get("name")):
+            return clean_str(p.get("name"))
+    return None
+
+
 def _stage_rows(ctx: Ctx, cfg: DrillConfig) -> list[dict]:
     latest = current_latest(ctx.attempts)
     by_stage: dict[str, list[dict]] = defaultdict(list)
     for a in ctx.attempts:
         by_stage[a["stage_key"]].append(a)
     out, next_marked = [], False
+    held: list[int] = []   # untried background stages: 'next' only when nothing else is open
     applicable = {st.key for st in _applicable(cfg, ctx.prop, ctx.owner_type, ctx.asset_class)}
     home = {st.key: i for i, st in enumerate(cfg.stages)}
     for i, st in enumerate(_ordered(cfg.stages, ctx.stage_order)):
@@ -737,11 +756,18 @@ def _stage_rows(ctx: Ctx, cfg: DrillConfig) -> list[dict]:
             status = status or "skipped"  # checked off earlier, before the owner type changed
         elif not st.enabled:
             status = "disabled"
+        elif status is None and st.background:
+            status = "pending"
+            # With no owner name there is nothing to search for: the owner can still run out of stages.
+            if owner_search_name(ctx):
+                held.append(len(out))
         elif status is None:
             status = "pending" if next_marked else "next"
             next_marked = True
         out.append({**st.public(), "status": status, "attempts": list(reversed(by_stage.get(st.key, []))),
                     "moved": i != home[st.key], "moved_up": i < home[st.key]})
+    if not next_marked and held:
+        out[held[0]]["status"] = "next"
     return out
 
 
@@ -777,6 +803,9 @@ def _next_step(ctx: Ctx, status: str, level: int, stages: list[dict], to_validat
     for st in stages:
         if st["status"] == "next":
             text = f"{st['name']}: {_first_sentence(st['method'])}".strip().rstrip(":")
+            if st.get("background"):
+                text = (f"{st['name']}: it hasn't run for this owner yet. Run it from the Run screen "
+                        f"(AI research), or check it off here.")
             if st.get("moved_up"):
                 text += " (moved up by your results)"
             return {"kind": "stage", "stage_key": st["key"], "text": text}
@@ -1015,10 +1044,13 @@ DNC_PERMANENT = ("This contact is marked do not contact, and that is permanent. 
 
 
 def set_contact_status(conn: sqlite3.Connection, contact_id: int, status: str, *, allow_contact: bool = False,
-                       settings: Settings | None = None) -> dict:
+                       actor: str | None = None, settings: Settings | None = None) -> dict:
     """Mark a contact untested | verified | wrong | dnc. Do-not-contact also applies to the same phone number,
     email or mailing address on every other property, and it is permanent: taking it back needs
-    allow_contact=True ('Allow contact again'), which takes it off every property at once."""
+    allow_contact=True ('Allow contact again'), which takes it off every property at once.
+
+    A contact the AI research found also updates its finding (who marked it, `actor`); marked wrong, the same
+    finding is marked wrong on the owner's other properties that research wrote it to."""
     cfg = drill_config(settings)
     st = (clean_str(status) or "").lower()
     if st not in CONTACT_STATUSES:
@@ -1038,6 +1070,9 @@ def set_contact_status(conn: sqlite3.Connection, contact_id: int, status: str, *
             conn.execute("UPDATE contact_points SET status=?, last_tested_at=? WHERE id=?", (st, tested, contact_id))
         if st == "dnc":
             touched |= _spread_dnc(conn, c["channel"], c["value"])
+        if c.get("source") == AI_SOURCE:
+            from . import research   # research imports this module, so import it here
+            touched |= research.contact_marked(conn, c, st, actor)
         for pid in touched:
             _refresh(conn, pid, cfg)
     if st == "verified":
@@ -1049,6 +1084,9 @@ def set_contact_status(conn: sqlite3.Connection, contact_id: int, status: str, *
         msg = f"Allowed contact again on {c['value']}: it is off the do-not-contact list. {msg}"
     if len(touched) > 1 and (st == "dnc" or allowing):
         msg += f" ({len(touched) - 1} other propert{'ies' if len(touched) > 2 else 'y'} had it too.)"
+    elif len(touched) > 1 and st == "wrong":
+        msg += (f" Also marked wrong on {len(touched) - 1} other propert{'ies' if len(touched) > 2 else 'y'} of this "
+                f"owner (the AI research found it for all of them).")
     return _result(conn, int(c["property_id"]), msg, settings, contact=contact)
 
 
@@ -1411,12 +1449,12 @@ def _carry_sources(conn: sqlite3.Connection) -> CarrySource:
     people: dict[int, list[dict]] = defaultdict(list)
     confirmed: dict[int, str] = {}
     for c in rows(conn, "SELECT * FROM contact_points WHERE status IN ('verified','untested') AND channel!='mail' "
-                        "AND COALESCE(source,'')!=? ORDER BY id", (PORTFOLIO_STAGE,)):
+                        "AND COALESCE(source,'') NOT IN (?, ?) ORDER BY id", (PORTFOLIO_STAGE, AI_SOURCE)):
         contacts[c["property_id"]].append(c)
     roles = CARRY_ROLES + ("statutory_agent", "confirmed_owner")
     marks = ",".join("?" for _ in roles)
-    for p in rows(conn, f"SELECT * FROM people WHERE role IN ({marks}) AND COALESCE(source,'')!=? ORDER BY id",
-                  (*roles, PORTFOLIO_STAGE)):
+    for p in rows(conn, f"SELECT * FROM people WHERE role IN ({marks}) AND COALESCE(source,'') NOT IN (?, ?) "
+                        f"ORDER BY id", (*roles, PORTFOLIO_STAGE, AI_SOURCE)):
         people[p["property_id"]].append(p)
     for r in rows(conn, "SELECT property_id, confirmed_person FROM drill_state WHERE confirmed_at IS NOT NULL "
                         "AND confirmed_person IS NOT NULL"):
@@ -1712,6 +1750,8 @@ def property_drill(conn: sqlite3.Connection, property_id: int, *, settings: Sett
         with _tx(conn):
             _save_state(conn, ctx, ev)
     view = _drill_view(ctx, ev, cfg, settings, with_links)
+    from . import research   # research imports this module, so import it here
+    view["research"] = research.property_research(conn, property_id)
     if with_links:   # the owner's other properties, which do-not-contact would also cover
         sibs = owner_sibling_ids(conn, property_id)
         view["siblings"] = len(sibs)
@@ -1726,7 +1766,7 @@ def _drill_view(ctx: Ctx, ev: Evaluation, cfg: DrillConfig, settings: Settings |
     stages = []
     for st in ev.stages:
         item = {k: st[k] for k in ("key", "name", "goal", "automation", "cost", "method", "hit_rate", "status",
-                                   "attempts", "enabled", "moved", "moved_up")}
+                                   "attempts", "enabled", "moved", "moved_up", "background")}
         item["links"] = (L.links_for(ctx.prop, st["key"], ev.best_guess, settings=settings, parse_owner=False)
                          if with_links and st["status"] != "disabled" else [])
         stages.append(item)
@@ -1939,7 +1979,8 @@ def _pipeline(ctxs: list[tuple[Ctx, Evaluation]], cfg: DrillConfig) -> list[dict
                 if latest["outcome"] == "skipped":
                     skipped += 1
         rows_out.append({"stage_key": st.key, "name": st.name, "goal": st.goal, "automation": st.automation,
-                         "cost": st.cost, "enabled": st.enabled, "input": reached, "resolved": resolved,
+                         "cost": st.cost, "enabled": st.enabled, "background": st.background,
+                         "input": reached, "resolved": resolved,
                          "unresolved": reached - resolved, "tried": tried, "skipped": skipped, "queue": queue,
                          "hit_rate_actual": round(resolved / tried, 4) if tried else None,
                          "hit_rate_hypothesis": st.hit_rate})

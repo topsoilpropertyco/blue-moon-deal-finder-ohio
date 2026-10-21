@@ -23,6 +23,12 @@ sources:
     cost: free
     priority: 1
     finds: Other properties with the same owner name or mailing address.
+  ai_web_research:
+    name: AI web research (your Claude plan)
+    kind: auto
+    cost: free
+    priority: 2
+    finds: The owner's business filing, officers and statutory agent, website, public business phone and email, and business social pages, each with the link where it was seen. Never people-search sites. Run it from the Run screen (AI research).
   county_auditor:
     name: County auditor parcel page
     kind: county

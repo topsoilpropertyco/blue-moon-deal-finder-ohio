@@ -19,7 +19,12 @@
   const ROLES = [['', 'Role (optional)'], ['possible_owner', 'Owner'], ['member', 'LLC member'], ['officer', 'Officer'], ['trustee', 'Trustee'], ['deed_signer', 'Deed signer'], ['heir', 'Heir'], ['manager', 'Property manager'], ['agent', 'Agent'], ['other', 'Other']];
   const ATTEMPT = {found: 'Found', nothing: 'Nothing found', skipped: 'Skipped'};
   const ATTEMPT_CLASS = {found: 'hit', nothing: 'miss', skipped: 'skip'};
-  const COST = {free: 'Free', credit: 'Uses a Crexi credit', paid: 'Paid'};
+  const COST = {free: 'Free', credit: 'Uses a Crexi credit', paid: 'Paid', plan: 'Your Claude plan (no per-call bill)'};
+  const ACTOR = {auto: 'automatic', ai: 'AI research'};
+  const AI_SOURCE = 'ai_research';
+  const CONFIDENCE = {high: 'sure', medium: 'fairly sure', low: 'unsure'};
+  const FINDING_KIND = {entity: 'Business filing', person: 'Person', website: 'Website', phone: 'Phone', email: 'Email', social: 'Social page'};
+  const RUN_OUTCOME = {found: 'Found something', nothing: 'Nothing new', error: 'Could not finish'};
   const ABSENTEE = {local: 'Local (same city)', instate: 'Elsewhere in the state', outofstate: 'Out of state', unknown: 'Unknown'};
   const DEBT = {free_and_clear: 'Likely free and clear', maturing_soon: 'Loan maturing soon', active: 'Active loan', unknown: 'Unknown'};
   const LABEL_TEXT = {EXTERIOR_CORRIDOR: 'Exterior corridor', DIRECT_ENTRY: 'Direct entry', INTERIOR_CORRIDOR: 'Interior corridor', MIXED: 'Mixed', UNKNOWN: "Can't see the building"};
@@ -216,7 +221,7 @@
       whoHtml(d, dr, level) +
       '<p class="note" style="margin:0">Green = works · yellow = found, not tested · red = wrong · dashed = none found.</p>' +
       '<h3 style="margin-top:6px">Drill so far</h3>' + timelineHtml(dr) +
-      nextHtml(d, dr, status) + contactsHtml(d, dr, status) + actionsHtml(d, dr, level, status) +
+      nextHtml(d, dr, status) + contactsHtml(d, dr, status) + researchHtml(dr) + actionsHtml(d, dr, level, status) +
       (dr.notes ? '<h3>Notes</h3><pre class="p-notes">' + esc(dr.notes) + '</pre>' : '') + '</section>';
   }
 
@@ -256,7 +261,7 @@
     (dr.stages || []).forEach((st) => (st.attempts || []).forEach((a) => events.push({
       at: a.created_at || '', id: Number(a.id) || 0, order: 0, cls: ATTEMPT_CLASS[a.outcome] || '',
       src: st.name || st.key, res: (ATTEMPT[a.outcome] || a.outcome || '') + (a.detail ? ': ' + a.detail : ''),
-      who: a.actor === 'auto' ? 'automatic' : '',
+      who: ACTOR[a.actor] || '',
     })));
     (dr.outreach || []).forEach((o) => {
       const eff = effects[o.outcome];
@@ -368,6 +373,7 @@
     const meta = [st ? st[1] : c.status, c.tries ? 'tried ' + c.tries + '×' : '', c.last_outcome ? 'last: ' + outcomeLabel(dr, c.last_outcome) : '']
       .filter(Boolean).join(' · ');
     const who = [c.person_name, c.source ? 'from ' + sourceName(dr, c.source) : ''].filter(Boolean).join(' · ');
+    const ai = c.source === AI_SOURCE;
     const canReach = c.status === 'untested' && status !== 'dnc';
     const open = c.needs_validation && canReach ? true : cur.open === 'reach-' + c.id;
     let ctl = '<div class="ctl">';
@@ -375,12 +381,66 @@
       ctl += '<button type="button" class="btn small" data-act="toggle" data-form="reach-' + esc(c.id) + '" aria-expanded="' + open + '">' +
         (open ? 'Close' : 'Log a reach-out') + '</button>';
     }
+    if (ai && c.status !== 'wrong' && c.status !== 'dnc') {
+      ctl += '<button type="button" class="btn small" data-act="cwrong" data-cid="' + esc(c.id) + '" title="Not this owner\'s, or not real">Wrong</button>';
+    }
     ctl += '<select class="select" data-act="cstatus" data-cid="' + esc(c.id) + '" aria-label="Contact status">' + options(CONTACT_STATUS, c.status) + '</select></div>';
     return '<div class="p-contact" data-cid="' + esc(c.id) + '"><div class="chead"><span class="ch ' + (CH_CLASS[c.status] || 'none') + '">' +
       esc(CH_LABEL[c.channel] || c.channel) + '</span><span class="val">' + contactValue(c) + '</span>' +
+      (ai ? '<span class="pill" title="Found by AI web research. Not confirmed until you reach out.">AI</span>' : '') +
       (c.needs_validation && canReach ? '<span class="pill hot">Next</span>' : '') + '</div>' +
       (who ? '<div class="meta">' + esc(who) + '</div>' : '') + '<div class="meta">' + esc(meta) + '</div>' +
-      (c.notes ? '<div class="meta">' + esc(c.notes) + '</div>' : '') + ctl + (open ? reachForm(dr, c) : '') + '</div>';
+      (ai ? aiSourceHtml(findingFor(dr, c.id)) : (c.notes ? '<div class="meta">' + esc(c.notes) + '</div>' : '')) +
+      ctl + (open ? reachForm(dr, c) : '') + '</div>';
+  }
+
+  /* ---------- AI research findings ---------- */
+
+  function researchOf(dr) {
+    return dr.research || {runs: [], findings: []};
+  }
+
+  function findingFor(dr, cid) {
+    return (researchOf(dr).findings || []).find((f) => Number(f.contact_point_id) === Number(cid)) || null;
+  }
+
+  function aiSourceHtml(f) {
+    if (!f) return '';
+    const sure = [f.label, CONFIDENCE[f.confidence] || f.confidence, f.match_reason].filter(Boolean).join(' · ');
+    return '<div class="meta">' + (safeUrl(f.source_url) ? extLink(f.source_url, 'Where the AI saw it') + ' ' : '') + esc(sure) + '</div>';
+  }
+
+  function findingRow(f) {
+    const what = [f.role && f.kind === 'person' ? f.label : '', f.kind !== 'person' && f.label && f.label !== FINDING_KIND[f.kind] ? f.label : '',
+      CONFIDENCE[f.confidence] || f.confidence, f.status === 'lead' ? 'unsure lead, not added' : '', f.status === 'wrong' ? 'marked wrong' : '']
+      .filter(Boolean).join(' · ');
+    const btn = f.status === 'wrong'
+      ? '<button type="button" class="btn small quiet" data-act="fwrong" data-fid="' + esc(f.id) + '" data-status="kept">Undo</button>'
+      : '<button type="button" class="btn small" data-act="fwrong" data-fid="' + esc(f.id) + '" data-status="wrong">Wrong</button>';
+    return '<li><b>' + esc(FINDING_KIND[f.kind] || f.kind) + ':</b> ' + esc(f.value) + (what ? ' <span class="muted">· ' + esc(what) + '</span>' : '') +
+      (f.match_reason ? '<div class="meta">' + esc(f.match_reason) + '</div>' : '') +
+      '<div class="meta">' + (safeUrl(f.source_url) ? extLink(f.source_url, 'Source') + ' ' : '') + btn + '</div></li>';
+  }
+
+  /* What the AI research found for this owner: the filing, people and website (contacts are in the list above),
+     each with the page it was seen on, and a Wrong button. Findings from blocked sites are never shown. */
+  function researchHtml(dr) {
+    const R = researchOf(dr);
+    const runs = R.runs || [];
+    if (!runs.length) return '';
+    const last = runs[0];
+    const shown = runs.find((r) => r.outcome !== 'error');
+    const mine = shown ? (R.findings || []).filter((f) => Number(f.run_id) === Number(shown.id)) : [];
+    const list = mine.filter((f) => !f.contact_point_id && (f.status === 'kept' || f.status === 'lead' || f.status === 'wrong'));
+    const dropped = mine.filter((f) => f.status === 'blocked' || f.status === 'rejected').length;
+    const head = [RUN_OUTCOME[last.outcome] || last.outcome, last.created_at ? fmt.date(last.created_at) : '',
+      last.from_cache ? 'from a saved answer' : ''].filter(Boolean).join(' · ');
+    return '<h3 style="margin-top:6px">AI research</h3><p class="note" style="margin:0">' + esc(head) +
+      (last.outcome === 'error' && last.error ? '. ' + esc(last.error) : '') + '</p>' +
+      (shown && shown.summary ? '<p class="note" style="margin:0">' + esc(shown.summary) + '</p>' : '') +
+      (list.length ? '<ul class="p-why">' + list.map(findingRow).join('') + '</ul>' : '') +
+      (dropped ? '<p class="note" style="margin:0">' + esc(fmt.plural(dropped, 'finding') + ' dropped (a people-search site, no source link, or not a real contact).') + '</p>' : '') +
+      '<p class="note" style="margin:0">Nothing here is confirmed until you reach the owner.</p>';
   }
 
   function reachForm(dr, c) {
@@ -916,6 +976,10 @@
       redrawContact(true);
     } else if (act === 'outreach') {
       outreach(b);
+    } else if (act === 'cwrong') {
+      drillWrite('/api/contacts/' + Number(b.getAttribute('data-cid')), {status: 'wrong'}, 'PATCH');
+    } else if (act === 'fwrong') {
+      drillWrite('/api/research/findings/' + Number(b.getAttribute('data-fid')), {status: b.getAttribute('data-status')}, 'PATCH');
     } else if (act === 'level') {
       levelAction(b.getAttribute('data-action'));
     } else if (act === 'review') {
