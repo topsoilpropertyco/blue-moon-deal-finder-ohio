@@ -7,10 +7,15 @@ the page get the DRILL summary (next step and channel badges) from `drill.engine
 Thresholds used by the list views live in config.yaml under `web:` (defaults in WEB_DEFAULTS):
 moon_score (the "Blue Moon 10%+" view), funnel_score (the funnel's last step), long_owned_years and
 mom_owner_types.
+
+Buy-box decisions made by hand: rows carry rule_reasons (what the rules said), by_hand ('added' | 'aside') and
+aside_buckets (their set-aside groups). set_aside() is the Why? panel: each reason with its groups, counted from
+the groups stored with the scores; list_properties(bucket=...) lists one group (the Review list).
 """
 from __future__ import annotations
 
 import copy
+import logging
 import re
 import sqlite3
 from collections import Counter
@@ -19,22 +24,28 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import AssetClass, Settings, get_settings, has_secret
-from ..db import loads, market_by_slug, one, rows, scalar, this_month
+from ..db import loads, market_by_slug, one, pending_rescore, rows, scalar, this_month
 from ..drill import engine
 from ..drill import links as drill_links
 from ..enrich.owners import OWNER_TYPE_LABELS as OWNER_TYPES
 from ..imagery import explain_prior, images_for, map_links, queue_counts
+from ..scoring import buckets as B
+from ..scoring import overrides
 from ..scoring.buybox import (
     EXCLUSION_LABELS,
-    EXCLUSION_REASONS,
+    MANUAL_REASON,
     METRIC_UNITS,
+    SET_ASIDE_REASONS,
     SIZE_BASIS_LABELS,
     ScoringConfig,
+    apply_overrides,
     evaluate,
     scoring_config,
     visual_color,
 )
 from ..scoring.learn import OUTCOME_LABELS
+
+log = logging.getLogger(__name__)
 
 WEB_DEFAULTS: dict[str, Any] = {
     "moon_score": 0.10,              # "Blue Moon 10%+" view and the summary count
@@ -146,6 +157,7 @@ p.id, p.name, p.address, p.unit, p.city, p.state, p.zip, p.county, p.apn, p.lat,
 p.units, p.building_sqft, p.lot_acres, p.year_built, p.owner_name, p.crexi_url,
 s.in_buybox, s.exclusion_reasons, s.size_value, s.size_basis, s.size_color, s.rent_color,
 s.score, s.coverage_have, s.coverage_total, s.rank,
+COALESCE(s.rule_reasons, s.exclusion_reasons) AS rule_reasons, s.aside_buckets,
 dt.minutes AS drive_minutes, dt.method AS drive_method,
 rf.fit AS rent_fit,
 v.property_id AS v_id, v.status AS v_status, v.ai_label, v.final_p, v.reviewed_label, v.checked_at AS v_checked_at,
@@ -281,10 +293,22 @@ def _round(v: Any, digits: int = 1) -> float | None:
     return None if v is None else round(float(v), digits)
 
 
+def by_hand(in_buybox: Any, reasons: list[str], rule_reasons: list[str]) -> str | None:
+    """'added' (in the buy box although a rule said no), 'aside' (set aside by hand) or None."""
+    if MANUAL_REASON in reasons:
+        return "aside"
+    if in_buybox and rule_reasons:
+        return "added"
+    return None
+
+
 def property_row(r: Mapping[str, Any], drill: Mapping[str, Any] | None, mc: MarketCtx) -> dict:
     """One PropertyRow (ARCHITECTURE.md) from a joined row plus its DRILL summary."""
     d = drill or {}
     in_box = r.get("in_buybox")
+    reasons = loads(r.get("exclusion_reasons"), []) or []
+    rule_reasons = loads(r.get("rule_reasons"), None)
+    rule_reasons = reasons if rule_reasons is None else (rule_reasons or [])
     return {
         "id": r["id"], "name": r.get("name"), "address": r.get("address"), "unit": r.get("unit"),
         "city": r.get("city"), "state": r.get("state"), "zip": r.get("zip"), "county": r.get("county"),
@@ -299,7 +323,9 @@ def property_row(r: Mapping[str, Any], drill: Mapping[str, Any] | None, mc: Mark
         "years_owned": _round(r.get("years_owned")),
         "score": r.get("score"), "coverage_have": r.get("coverage_have"), "coverage_total": r.get("coverage_total"),
         "rank": r.get("rank"), "in_buybox": None if in_box is None else bool(in_box),
-        "exclusion_reasons": loads(r.get("exclusion_reasons"), []) or [],
+        "exclusion_reasons": reasons, "rule_reasons": rule_reasons,
+        "by_hand": by_hand(in_box, reasons, rule_reasons) if in_box is not None else None,
+        "aside_buckets": loads(r.get("aside_buckets"), []) or [],
         "level": d.get("level", r.get("level")), "drill_status": d.get("status", r.get("drill_status")),
         "next_step_text": d.get("next_step_text"), "next_step_kind": (d.get("next_step") or {}).get("kind"),
         "channels": d.get("channels") or {c: "none" for c in engine.CHANNELS},
@@ -312,9 +338,15 @@ def property_row(r: Mapping[str, Any], drill: Mapping[str, Any] | None, mc: Mark
 
 def list_properties(conn: sqlite3.Connection, slug: str, *, view: str | None = "all", q: str | None = None,
                     sort: str | None = "rank", direction: str | None = None, limit: Any = None, offset: Any = 0,
-                    include_excluded: bool = False, settings: Settings | None = None) -> dict:
-    """{total, items:[PropertyRow], counts:{view: n}, view, sort, dir, limit, offset, q}."""
+                    include_excluded: bool = False, bucket: str | None = None,
+                    settings: Settings | None = None) -> dict:
+    """{total, items:[PropertyRow], counts:{view: n}, view, sort, dir, limit, offset, q, bucket, review}.
+
+    bucket: one set-aside group ('drive_time:76-90'). The list is then that group, in or out of the buy box
+    (like the 'everything' view), so rows don't disappear while you decide; `review` describes the group."""
     mc = market_ctx(conn, slug, settings)
+    group = (bucket or "").strip() or None
+    group_params = B.member_params(group) if group else {}     # ValueError (400) for a key it doesn't know
     view = (view or "all").strip().lower()
     if view not in VIEWS:
         raise ValueError(f"'{view}' is not a list view. Use one of: {', '.join(VIEWS)}.")
@@ -324,8 +356,9 @@ def list_properties(conn: sqlite3.Connection, slug: str, *, view: str | None = "
     order, direction = _order_by(sort, direction)
     limit, offset = _clamp_page(limit, offset, mc.web)
     search_sql, search_params = _search(q)
-    params = {**_base_params(mc), **search_params, "limit": limit, "offset": offset}
-    where = f"{BASE_FROM} AND {_view_where(view, include_excluded)} AND {search_sql}"
+    params = {**_base_params(mc), **search_params, **group_params, "limit": limit, "offset": offset}
+    scope = f"({B.MEMBER_SQL})" if group else _view_where(view, include_excluded)
+    where = f"{BASE_FROM} AND {scope} AND {search_sql}"
     found = _all(conn, f"SELECT {ROW_COLUMNS}, COUNT(*) OVER () AS _total {where} "
                        f"ORDER BY {order} LIMIT :limit OFFSET :offset", params)
     total = int(found[0]["_total"]) if found else int(
@@ -335,7 +368,8 @@ def list_properties(conn: sqlite3.Connection, slug: str, *, view: str | None = "
         "total": total, "items": [property_row(r, drill.get(r["id"]), mc) for r in found],
         "counts": view_counts(conn, mc, search_sql, params, include_excluded),
         "view": view, "sort": sort, "dir": direction, "limit": limit, "offset": offset, "q": q or "",
-        "include_excluded": bool(include_excluded),
+        "include_excluded": bool(include_excluded), "bucket": group,
+        "review": review_block(conn, mc, group) if group else None,
     }
 
 
@@ -369,7 +403,6 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
                "best_guess_person": drill["best_guess_person"]}
     enrich = {"drive": layers["drive_times"], "rent": layers["rent_fits"], "visual": layers["visual_checks"],
               "owner": layers["owners"]}
-    ev = evaluate(prop, enrich, mc.ac, mc.market, mc.settings)
     score = layers["scores"] or {}
     return {
         **property_row(joined or prop, summary, mc),
@@ -379,13 +412,7 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
         "signals": loads(score.get("signals_json"), []) or [],
         "score_info": {"base_rate": mc.cfg.base_rate, "computed_at": score.get("computed_at"),
                        "scored": bool(score)},
-        "buybox": {
-            "exclusion_reasons": ev["exclusion_reasons"],
-            "exclusions": [{"reason": k, "label": EXCLUSION_LABELS.get(k, k), "detail": ev["exclusion_details"].get(k)}
-                           for k in ev["exclusion_reasons"]],
-            "size_detail": ev["size_detail"], "size_basis_label": SIZE_BASIS_LABELS.get(ev["size_basis"]),
-            "size_estimated": ev["size_estimated"], "flags": ev["flags"],
-        },
+        "buybox": _buybox_block(conn, mc, prop, enrich, score),
         "drive": _drive_detail(layers["drive_times"], mc),
         "visual_check": _visual_detail(prop, layers["visual_checks"], joined or {}, mc),
         "rent": _rent_detail(layers["rent_fits"], mc),
@@ -396,6 +423,60 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
         "outcome": _outcome(layers["outcomes"]),
         "asset_class": asset_class_info(mc.ac),
     }
+
+
+def _buybox_block(conn: sqlite3.Connection, mc: MarketCtx, prop: Mapping[str, Any], enrich: Mapping[str, Any],
+                  score: Mapping[str, Any] | None) -> dict:
+    """The drawer's buy-box section: the rules checked live, with the decisions made by hand applied (the same
+    way scoring applies them, so the drawer, the list and the exports agree), who decided and the history."""
+    found = overrides.for_property(conn, int(prop["id"]))
+    rules = evaluate(prop, enrich, mc.ac, mc.market, mc.settings)
+    ev = apply_overrides(rules, found)
+    details = ev["exclusion_details"]
+    spec = B.group_spec(mc.market, mc.ac, mc.settings)
+    groups = loads((score or {}).get("aside_buckets"), []) or []
+    decisions = overrides.decisions_list(found)
+    for d in decisions:   # what the rules say now, next to what they said when it was decided
+        d["detail_now"] = (details.get(d["reason"]) if d["reason"] != "*" else
+                           "; ".join(f"{EXCLUSION_LABELS.get(k, k)}: {v}" for k, v in details.items()
+                                     if k != MANUAL_REASON) or "Fits the buy box by the rules")
+    return {
+        "in_buybox": ev["in_buybox"], "rules_in_buybox": ev["rules_in_buybox"],
+        "exclusion_reasons": ev["exclusion_reasons"],
+        "exclusions": [{"reason": k, "label": EXCLUSION_LABELS.get(k, k), "detail": details.get(k)}
+                       for k in ev["exclusion_reasons"]],
+        "rule_reasons": ev["rule_reasons"],
+        "rules": [{"reason": k, "label": EXCLUSION_LABELS.get(k, k), "detail": details.get(k),
+                   "waived": k in ev["waived"], "kept": k in ev["kept"]} for k in ev["rule_reasons"]],
+        "waived": ev["waived"], "kept": ev["kept"], "manual": ev["manual"],
+        "decisions": decisions, "history": overrides.history(conn, int(prop["id"])),
+        "groups": [{"key": g, "reason": g.split(":", 1)[0],
+                    "label": f"{_set_aside_label(g.split(':', 1)[0], mc)}: "
+                             f"{B.label_for(g, spec, prop.get('property_type'))}"} for g in groups],
+        "size_detail": ev["size_detail"], "size_basis_label": SIZE_BASIS_LABELS.get(ev["size_basis"]),
+        "size_estimated": ev["size_estimated"], "flags": ev["flags"],
+    }
+
+
+def buybox_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Settings | None = None) -> dict:
+    """Only the drawer's buy-box section for one property (after a decision)."""
+    mc = market_ctx(conn, slug, settings)
+    prop = one(conn, "SELECT * FROM properties WHERE id = ? AND market_id = ?", (pid, mc.id))
+    if not prop:
+        raise KeyError(f"Property {pid} is not in this market.")
+    layers = {k: _one_by_property(conn, t, pid) for k, t in
+              (("drive", "drive_times"), ("rent", "rent_fits"), ("visual", "visual_checks"), ("owner", "owners"))}
+    return _buybox_block(conn, mc, prop, layers, _one_by_property(conn, "scores", pid))
+
+
+def property_row_by_id(conn: sqlite3.Connection, slug: str, pid: int, settings: Settings | None = None) -> dict:
+    """One PropertyRow, the way the deals list shows it."""
+    mc = market_ctx(conn, slug, settings)
+    joined = _first(conn, f"SELECT {ROW_COLUMNS} {BASE_FROM} AND p.id = :pid", {**_base_params(mc), "pid": pid})
+    if not joined:
+        raise KeyError(f"Property {pid} is not in this market.")
+    drill = engine.summaries(conn, slug, property_ids=[pid]).get(pid)
+    return property_row(joined, drill, mc)
 
 
 def _drive_detail(drive: Mapping[str, Any] | None, mc: MarketCtx) -> dict:
@@ -572,6 +653,8 @@ def summary(conn: sqlite3.Connection, slug: str, settings: Settings | None = Non
     from ..drill.credits import credit_status
 
     mc = market_ctx(conn, slug, settings)
+    if mc.id in pending_rescore(conn):
+        _rescore_once(conn, slug)
     c = _counts_row(conn, mc)
     review = queue_counts(conn, slug) if mc.ac.visual_enabled else {"total": 0}
     pen = round(c["pen_confirmed"] / c["pen_target"], 4) if c["pen_target"] else 0.0
@@ -610,6 +693,16 @@ def summary(conn: sqlite3.Connection, slug: str, settings: Settings | None = Non
                        "long_owned_years": mc.web["long_owned_years"], "visual_green_min": mc.cfg.visual_green_min,
                        "visual_red_max": mc.cfg.visual_red_max},
     }
+
+
+def _rescore_once(conn: sqlite3.Connection, slug: str) -> None:
+    """Scores saved before the version 2 update have no set-aside groups yet: re-score the market once (free,
+    about a second) so the Why? panel can show them."""
+    from ..scoring.rank import compute_scores
+    try:
+        compute_scores(conn, slug)
+    except Exception:  # the summary must still load; it tries again next time
+        log.exception("Could not re-score %s for its set-aside groups", slug)
 
 
 def funnel(conn: sqlite3.Connection, slug: str, settings: Settings | None = None) -> dict:
@@ -722,6 +815,7 @@ def _reason_label(reason: str, mc: MarketCtx) -> str:
         "property_type": f"Listed as {ac.label.lower()}",
         "year": f"Built {ac.year_built_min} or later" if ac.year_built_min else "Any year",
         "size": f"{lo:,.0f}-{hi:,.0f} {unit} (or unknown)",
+        MANUAL_REASON: "Not set aside by hand",
     }.get(reason, EXCLUSION_LABELS.get(reason, reason))
 
 
@@ -741,45 +835,117 @@ def _set_aside_label(reason: str, mc: MarketCtx) -> str:
     }.get(reason, EXCLUSION_LABELS.get(reason, reason))
 
 
+_SET_ASIDE_SQL = """
+SELECT s.in_buybox, s.exclusion_reasons AS reasons, COALESCE(s.rule_reasons, s.exclusion_reasons) AS rules,
+       s.aside_buckets AS groups, p.property_type, dt.method, dt.minutes,
+       (SELECT group_concat(o.reason) FROM buybox_overrides o
+         WHERE o.property_id = p.id AND o.decision = 'keep') AS kept
+FROM properties p JOIN scores s ON s.property_id = p.id
+LEFT JOIN drive_times dt ON dt.property_id = p.id
+WHERE p.market_id = ? AND (s.in_buybox = 0 OR COALESCE(s.rule_reasons, s.exclusion_reasons) != '[]')
+"""
+_TALLY = ("count", "only", "still_aside", "added", "kept", "estimated")
+
+
 def set_aside(conn: sqlite3.Connection, mc: MarketCtx) -> dict:
-    """Why properties are out of the buy box (they are never deleted): each reason with how many it covers
-    (one property can have several reasons) and how many have only that reason. Drive times that are
-    straight-line estimates are counted, and so are "close calls": set aside only for an estimated drive
-    within web.drive_close_call_minutes of the limit, which may come back once Google measures real drives."""
-    found = rows(conn, "SELECT s.exclusion_reasons AS reasons, dt.method AS method, dt.minutes AS minutes "
-                       "FROM properties p JOIN scores s ON s.property_id = p.id "
-                       "LEFT JOIN drive_times dt ON dt.property_id = p.id "
-                       "WHERE p.market_id = ? AND s.in_buybox = 0", (mc.id,))
+    """The Why? panel: why properties are out of the buy box (they are never deleted).
+
+    total = how many are set aside now. Each reason (one property can have several) has `count` (the rules said
+    so, or set aside by hand), `only` (set aside for this reason alone), `still_aside`, `added` (in the buy box
+    by hand anyway), `kept` (Keep set aside), a plain `explain`, and its groups (`buckets`, same numbers plus
+    `estimated` drive times). A reason's groups add up to its count. Drive times that are straight-line
+    estimates are counted, and so are "close calls": set aside only for an estimated drive within
+    web.drive_close_call_minutes of the limit, which may come back once Google measures real drives.
+    One query and one pass over the rows (the summary is asked for often)."""
+    found = rows(conn, _SET_ASIDE_SQL, (mc.id,))
+    spec = B.group_spec(mc.market, mc.ac, mc.settings)
     max_minutes = mc.market.get("max_drive_minutes")
     close_window = float(mc.web.get("drive_close_call_minutes") or 0)
-    count: Counter[str] = Counter()
-    only: Counter[str] = Counter()
-    several = estimated = close = 0
+    by_reason: dict[str, Counter[str]] = {}
+    by_group: dict[str, Counter[str]] = {}
+    samples: dict[str, str] = {}
+    total = several = estimated = close = added = by_hand_aside = also_far = 0
+    parsed: dict[Any, list[str]] = {}
+
+    def as_list(raw: Any) -> list[str]:
+        if raw not in parsed:              # a few dozen distinct lists, thousands of rows
+            parsed[raw] = [str(x) for x in (loads(raw, []) or [])]
+        return parsed[raw]
+
     for r in found:
-        reasons = set(loads(r.get("reasons"), []) or [])
-        count.update(reasons)
-        if len(reasons) == 1:
-            only.update(reasons)
-        elif len(reasons) > 1:
-            several += 1
-        if "drive_time" in reasons and r.get("method") == "estimate":
-            estimated += 1
-            minutes = r.get("minutes")
-            if reasons == {"drive_time"} and max_minutes and minutes is not None \
-                    and float(minutes) <= float(max_minutes) + close_window:
-                close += 1
-    order = sorted((k for k in count if count[k]), key=lambda k: (-count[k], k))
-    return {"total": len(found), "several": several,
-            "reasons": [{"key": k, "label": _set_aside_label(k, mc), "count": count[k], "only": only[k]}
-                        for k in order],
+        final = set(as_list(r.get("reasons")))
+        rules = as_list(r.get("rules"))
+        aside = not r.get("in_buybox")
+        everything = set(rules) | (final & {MANUAL_REASON})
+        groups = as_list(r["groups"]) if r.get("groups") is not None else \
+            [f"{x}:{B.OTHER}" for x in sorted(everything, key=_reason_order)]
+        kept = set((r.get("kept") or "").split(",")) - {""}
+        drive_estimate = r.get("method") == "estimate"
+        if aside:
+            total += 1
+            several += len(final) > 1
+            if "drive_time" in final and drive_estimate:
+                estimated += 1
+                minutes = r.get("minutes")
+                if final == {"drive_time"} and max_minutes and minutes is not None \
+                        and float(minutes) <= float(max_minutes) + close_window:
+                    close += 1
+        else:
+            added += 1 if rules else 0
+        by_hand_aside += MANUAL_REASON in final
+        also_far += "skip_county" in everything and "drive_time" in everything
+        for key in groups:
+            reason = key.split(":", 1)[0]
+            tally = {"count": 1, "only": everything == {reason}, "still_aside": aside, "added": not aside,
+                     "kept": reason in kept, "estimated": reason == "drive_time" and drive_estimate}
+            by_group.setdefault(key, Counter()).update({k: int(v) for k, v in tally.items()})
+            by_reason.setdefault(reason, Counter()).update({k: int(v) for k, v in tally.items()})
+            if reason == "property_type" and key not in samples and r.get("property_type"):
+                samples[key] = str(r["property_type"]).strip()
+    order = sorted((k for k in by_reason if by_reason[k]["count"]), key=lambda k: (-by_reason[k]["count"], k))
+    return {"total": total, "several": several,
+            "reasons": [_reason_entry(k, by_reason[k], by_group, samples, spec, mc, also_far) for k in order],
             "drive_estimated": estimated, "drive_close_calls": close,
-            "close_call_minutes": close_window, "max_drive_minutes": max_minutes}
+            "close_call_minutes": close_window, "max_drive_minutes": max_minutes,
+            "by_hand": {"added": added, "set_aside": by_hand_aside}}
+
+
+def _reason_order(reason: str) -> int:
+    return SET_ASIDE_REASONS.index(reason) if reason in SET_ASIDE_REASONS else 99
+
+
+def _reason_entry(reason: str, tally: Counter[str], by_group: Mapping[str, Counter[str]], samples: Mapping[str, str],
+                  spec: B.GroupSpec, mc: MarketCtx, also_far: int) -> dict:
+    fixed = spec.order(reason)
+    keys = [k for k in by_group if k.split(":", 1)[0] == reason]
+    keys.sort(key=lambda k: (k.endswith(f":{B.OTHER}"), fixed.index(k) if k in fixed else len(fixed),
+                             -by_group[k]["count"], k))
+    return {"key": reason, "label": _set_aside_label(reason, mc), "count": tally["count"], "only": tally["only"],
+            "explain": B.explain(reason, mc.market, mc.ac, mc.settings, also_far=also_far),
+            "still_aside": tally["still_aside"], "added": tally["added"], "kept": tally["kept"],
+            "buckets": [{"key": k, "label": B.label_for(k, spec, samples.get(k)),
+                         **{f: by_group[k][f] for f in _TALLY}} for k in keys]}
+
+
+def review_block(conn: sqlite3.Connection, mc: MarketCtx, bucket: str) -> dict:
+    """What the Review list shows above one group: {bucket, reason, reason_label, label, explain, count,
+    still_aside, added, kept, only}."""
+    reason, _ = B.parse_key(bucket)
+    info = set_aside(conn, mc)
+    entry = next((x for x in info["reasons"] if x["key"] == reason), None)
+    group = next((g for g in (entry or {}).get("buckets", []) if g["key"] == bucket), None)
+    spec = B.group_spec(mc.market, mc.ac, mc.settings)
+    return {"bucket": bucket, "reason": reason, "reason_label": _set_aside_label(reason, mc),
+            "label": group["label"] if group else B.label_for(bucket, spec),
+            "explain": entry["explain"] if entry else B.explain(reason, mc.market, mc.ac, mc.settings),
+            **{f: int((group or {}).get(f) or 0) for f in ("count", "still_aside", "added", "kept", "only")}}
 
 
 def filter_funnel(base: list[dict], mc: MarketCtx) -> list[dict]:
-    """Loaded, then what is left after each filter (in a sensible order). Nothing is deleted."""
+    """Loaded, then what is left after each filter (in a sensible order), and last the ones set aside by hand.
+    Nothing is deleted. The steps count why properties are out now, so a rule ignored by hand removes fewer."""
     reasons_of = [set(loads(r.get("exclusion_reasons"), []) or []) for r in base]
-    order = [r for r in FUNNEL_ORDER if r in EXCLUSION_REASONS] + [r for r in EXCLUSION_REASONS if r not in FUNNEL_ORDER]
+    order = [r for r in FUNNEL_ORDER if r in SET_ASIDE_REASONS] + [r for r in SET_ASIDE_REASONS if r not in FUNNEL_ORDER]
     out = [{"key": "loaded", "label": "Loaded", "count": len(base), "removed": 0, "removed_label": None}]
     applied: set[str] = set()
     left = len(base)

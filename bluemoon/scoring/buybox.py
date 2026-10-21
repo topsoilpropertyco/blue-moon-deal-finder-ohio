@@ -14,6 +14,11 @@ Filters (a property failing any of them is set aside, never deleted):
   (matched at the start of a word, case-insensitive; a blank type is kept).
 Missing data never excludes.
 
+Decisions by hand (table buybox_overrides) sit on top of the rules: `apply_overrides(ev, decisions)` turns
+what the rules say into the final answer. rank.compute_scores, the property drawer, learning and the exports
+all use it, so they agree. `rule_reasons` keeps what the rules said; `exclusion_reasons` is why it is out now
+(the rule reasons not waived, plus 'manual' when set aside by hand); in_buybox == (exclusion_reasons == []).
+
 Size evidence, best first: units + sq ft > units > estimate (units = building sq ft / sqft_per_unit) >
 unknown. `size_basis` records which one was used.
 
@@ -41,7 +46,12 @@ EXCLUSION_LABELS: dict[str, str] = {
     "state": "State not in the buy box",
     "skip_county": "County on the skip list",
     "property_type": "Not this kind of property",
+    "manual": "Set aside by hand",
 }
+MANUAL_REASON = "manual"                       # set aside by hand (never a rule)
+SET_ASIDE_REASONS: tuple[str, ...] = EXCLUSION_REASONS + (MANUAL_REASON,)
+WHOLE = "*"                                    # a decision about the whole property, not one rule
+DECISIONS: tuple[str, ...] = ("include", "exclude", "keep")
 SIZE_BASES: tuple[str, ...] = ("units+sqft", "units", "address_estimate", "sqft_estimate", "acres_estimate",
                                "sqft", "acres", "unknown")
 SIZE_BASIS_LABELS: dict[str, str] = {
@@ -333,3 +343,62 @@ def evaluate(prop: Mapping[str, Any], enrich: Mapping[str, Any] | None, asset_cl
         "drive_minutes": minutes,
         "flags": flags,
     }
+
+
+# --- decisions by hand ---------------------------------------------------------------------------
+
+def _decision_maps(decisions: Mapping[str, Any] | None,
+                   meta: Mapping[str, Mapping[str, Any]] | None) -> tuple[dict[str, str], dict[str, Mapping]]:
+    """{reason: decision} and {reason: row} from either plain decisions or buybox_overrides rows."""
+    plain: dict[str, str] = {}
+    rows: dict[str, Mapping] = dict(meta or {})
+    for reason, value in (decisions or {}).items():
+        if isinstance(value, Mapping):
+            plain[str(reason)] = str(value.get("decision") or "")
+            rows.setdefault(str(reason), value)
+        elif value:
+            plain[str(reason)] = str(value)
+    return plain, rows
+
+
+def _who_when(row: Mapping[str, Any] | None) -> str:
+    row = row or {}
+    parts = []
+    if row.get("decided_by"):
+        parts.append(f"by {row['decided_by']}")
+    if row.get("decided_at"):
+        parts.append(f"on {str(row['decided_at'])[:10]}")
+    text = " ".join(parts)
+    note = clean_str(row.get("note"))
+    return f"{text}: {note}" if note and text else (note or text)
+
+
+def apply_overrides(ev: Mapping[str, Any], decisions: Mapping[str, Any] | None = None,
+                    meta: Mapping[str, Mapping[str, Any]] | None = None) -> dict:
+    """The final buy-box answer: the rules (`evaluate`) plus the decisions made by hand. Pure.
+
+    `decisions`: {'*' or a rule key: 'include' | 'exclude' | 'keep'}, or buybox_overrides rows by reason
+    (then who, when and the note come from the rows). `meta` adds rows for plain decisions.
+    - ('*', include): in the buy box whatever the rules say.
+    - ('*', exclude): set aside by hand (reason 'manual'), even when the rules pass.
+    - (rule, include): this rule is ignored for the property ("waived"); other failing rules still count.
+    - (rule, keep): looked at, the rule stands. No effect on the answer.
+    Adds rule_reasons, rules_in_buybox, waived, kept and manual ('include' | 'exclude' | 'waived' | None).
+    Safe to call again on its own result."""
+    plain, rows = _decision_maps(decisions, meta)
+    rule_reasons = list(ev.get("rule_reasons", ev.get("exclusion_reasons") or []))
+    details = {k: v for k, v in dict(ev.get("exclusion_details") or {}).items() if k != MANUAL_REASON}
+    whole = plain.get(WHOLE)
+    waived = [r for r in rule_reasons if plain.get(r) == "include"]
+    kept = [r for r in rule_reasons if plain.get(r) == "keep"]
+    left = [r for r in rule_reasons if r not in waived]
+    if whole == "include":
+        final, reasons, manual = True, [], "include"
+    elif whole == "exclude":
+        final, reasons, manual = False, left + [MANUAL_REASON], "exclude"
+        details[MANUAL_REASON] = _who_when(rows.get(WHOLE)) or "set aside by hand"
+    else:
+        final, reasons, manual = not left, left, ("waived" if waived else None)
+    return {**ev, "in_buybox": final, "exclusion_reasons": reasons, "exclusion_details": details,
+            "rule_reasons": rule_reasons, "rules_in_buybox": not rule_reasons, "waived": waived, "kept": kept,
+            "manual": manual}

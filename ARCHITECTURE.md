@@ -35,7 +35,10 @@ Crexi CSV/XLSX ─► ingest ─► properties (master list, every original colu
 
 - Never print, log or commit API keys. Read secrets only via `bluemoon.config.secret(name)`.
 - Never delete rows that fail a filter: `scores.in_buybox=0` + `scores.exclusion_reasons`, exported to
-  `output/<market>/excluded_<reason>.csv`.
+  `output/<market>/excluded_<reason>.csv` (and `excluded_manual.csv` for the ones set aside by hand).
+- Buy-box decisions made by hand live in `buybox_overrides` (every change in `buybox_override_log`) and are
+  applied only in `rank.compute_scores`, so `scores.in_buybox` / `exclusion_reasons` are the final answer and
+  `in_buybox == (exclusion_reasons == [])` holds for every row. `scores.rule_reasons` keeps what the rules said.
 - Cache every external API result (`bluemoon.cache.cached`) and record every billable call (`record_call`).
 - Paid steps support `dry_run=True` (count + cost, no calls) and `limit`. Runs over
   `safety.confirm_over_properties` need `confirm=True` from the caller (CLI asks; web shows the estimate first).
@@ -123,10 +126,24 @@ Every function that writes commits its own transaction.
   (`{in_buybox, exclusion_reasons:[...], size_value, size_basis, size_color, visual_color, rent_color}`).
   Exclusion reasons: drive_time, year, size, state, skip_county, property_type. Missing data never excludes.
   Size basis hierarchy: units+sqft > units > sqft-estimate > unknown.
+  `apply_overrides(ev, decisions) -> dict` (pure) applies the decisions made by hand: final `in_buybox` and
+  `exclusion_reasons` (rule reasons not waived, plus `manual` = set aside by hand), and `rule_reasons`,
+  `waived`, `kept`, `manual` ('include'|'exclude'|'waived'|None). `SET_ASIDE_REASONS` = the rules + `manual`.
+- `overrides.py`: decisions by hand (tables `buybox_overrides`, keyed (property_id, reason '*' or a rule key),
+  decision include|exclude ('*' only)|keep (a rule only); and the append-only `buybox_override_log`).
+  `load(conn, market_ids)`, `for_property`, `history`, `set_decision(conn, ids, reason, decision, actor, ...)`,
+  `clear(...)`, `undo_batch(conn, batch_id, actor)`; and the web's `decide_group`, `decide_property`, `undo`
+  (they re-score the market before returning). Who: `auth.signed_in_as()` on the web, `cli` from the CLI.
+- `buckets.py`: the Why? panel's set-aside groups. Keys `<reason>:<id>` (e.g. `drive_time:76-90`, `size:1-4`,
+  `year:1960s`, `skip_county:oh-clermont`, `state:ky`, `property_type:retail`, `manual:by-hand`;
+  `<reason>:other` = not grouped). Edges from `config.yaml set_aside` and `asset_classes.yaml size.set_aside_*`.
+  Worked out at score time into `scores.aside_buckets`; `MEMBER_SQL` lists one group (json_each, bound
+  parameters). `explain(reason, ...)` gives the plain-English text.
 - `blue_moon.py`: `signals_for(prop, enrich, asset_class, settings) -> list[dict]` items
   `{key, label, value, multiplier (None = skipped), why}`; `probability(signals, base_rate) -> float`.
 - `rank.py`: `compute_scores(conn, market_slug, progress=None) -> dict` (writes `scores`, rank 1..n among
-  in-buybox by: score desc, visual final_p desc, drive minutes asc).
+  in-buybox by: score desc, visual final_p desc, drive minutes asc). The only writer of `scores`: applies the
+  decisions by hand and stores `rule_reasons` and `aside_buckets` (JSON lists).
 - `learn.py`: `learned_weights(conn, market_slug) -> dict` (empirical-Bayes blend of starting multipliers with
   outcomes; prior strength `scoring.learn_prior_strength`), `model_summary(conn, market_slug) -> dict`.
 
@@ -188,9 +205,10 @@ Every function that writes commits its own transaction.
 - `bluemoon/jobs.py`: background thread runner. `start_job(kind, market_slug, params) -> int`,
   `get_job(job_id) -> dict`, `list_jobs(limit=20)`. Progress written to `jobs`.
 - `bluemoon/exports.py`: `export_market(conn, market_slug, out_dir=None, only=None, stamp_handoffs=True) ->
-  dict[str, Path]` (`ranked_list.xlsx`, `ranked_list.csv`, `excluded_<reason>.csv`, `crm_handoff.csv`,
-  `mailing_list.csv`, `drill_worklist.csv`, `run_summary.md`). Property lists include "Why this score" and
-  "Photo reasons". CSV cells that could run as a formula start with `'`; xlsx links are http(s) only.
+  dict[str, Path]` (`ranked_list.xlsx`, `ranked_list.csv`, `excluded_<reason>.csv` incl. `excluded_manual.csv`,
+  `crm_handoff.csv`, `mailing_list.csv`, `drill_worklist.csv`, `run_summary.md`). Property lists include "Why
+  this score", "Photo reasons" and, after "Why set aside": "Buy box decision", "Rules said", "Decided by",
+  "Decided on", "Set-aside groups". CSV cells that could run as a formula start with `'`; xlsx links are http(s) only.
 - `run.py` CLI: `uv run run.py <command> [--market SLUG] [--limit N] [--dry-run] [--yes]` with commands
   `import <files...> [--force]` (a folder: oldest first, files already imported in any market skipped),
   `owners`, `drive`, `rent`, `photos`, `classify`, `score`, `drill`, `all`, `estimate`, `export`, `calibrate`,
@@ -231,8 +249,11 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 |---|---|---|
 | GET | `/api/health` | `{ok, version, keys:{google:bool, anthropic:bool, hud:bool, census:bool}, vision_backend, claude_cli:bool, auth_required, authenticated, signed_in_as, login_email, share}` |
 | GET | `/api/markets` | `[{slug, name, asset_class, asset_label, geography, properties, in_buybox, confirmed}]` |
-| GET | `/api/m/{slug}/summary` | `{market:{slug,name,geography,origin_label,origin_lat,origin_lng,max_drive_minutes}, asset_class:{key,label,size_metric,visual_enabled,rent_enabled,visual_question,target_word}, properties, in_buybox, blue_moon_10, needs_review, penetration, levels, levels_in_buybox, credits, set_aside:{total, several, reasons:[{key,label,count,only}], drive_estimated, drive_close_calls, close_call_minutes, max_drive_minutes}, last_import, layers:[{key,label,done,total}], drill_waiting, drill_waiting_detail:{total,validate,stages,basis}}` (drill_waiting = buy-box owners whose next step is reach-out or a hands-on stage) |
-| GET | `/api/m/{slug}/properties?view=&q=&sort=&limit=&offset=&include_excluded=` | `{total, items:[PropertyRow]}` |
+| GET | `/api/m/{slug}/summary` | `{market:{slug,name,geography,origin_label,origin_lat,origin_lng,max_drive_minutes}, asset_class:{key,label,size_metric,visual_enabled,rent_enabled,visual_question,target_word}, properties, in_buybox, blue_moon_10, needs_review, penetration, levels, levels_in_buybox, credits, set_aside:{total, several, reasons:[{key,label,count,only,explain,still_aside,added,kept,buckets:[{key,label,count,only,still_aside,added,kept,estimated}]}], drive_estimated, drive_close_calls, close_call_minutes, max_drive_minutes, by_hand:{added,set_aside}}, last_import, layers:[{key,label,done,total}], drill_waiting, drill_waiting_detail:{total,validate,stages,basis}}` (drill_waiting = buy-box owners whose next step is reach-out or a hands-on stage) |
+| GET | `/api/m/{slug}/properties?view=&q=&sort=&limit=&offset=&include_excluded=&bucket=` | `{total, items:[PropertyRow], review}`; `bucket` = one set-aside group (in or out of the buy box), `review:{bucket,reason,reason_label,label,explain,count,still_aside,added,kept,only}` |
+| POST | `/api/m/{slug}/buybox/decide` | body `{bucket, decision: add_only\|add_all\|keep\|clear, note?}` -> `{batch_id, changed, total, now_in, still_out:[{reason,label,count}], message, set_aside, in_buybox}` (re-scores first) |
+| POST | `/api/m/{slug}/buybox/undo` | body `{batch_id}` -> same shape as decide |
+| POST | `/api/m/{slug}/properties/{id}/buybox` | body `{decision: include\|exclude\|rules, reason?: '*'\|rule key, note?}` -> `{row: PropertyRow, buybox, message, batch_id, in_buybox}` |
 | GET | `/api/m/{slug}/properties/{id}` | `PropertyDetail` |
 | POST | `/api/m/{slug}/properties/{id}/attempt` | body `{stage_key, outcome, detail?, person?, person_role?, contacts?}` |
 | POST | `/api/m/{slug}/properties/{id}/contacts` | body `{channel, value, source?, person_name?, notes?}` |
@@ -264,11 +285,13 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 PropertyRow: `{id, address, city, state, zip, county, lat, lng, units, building_sqft, lot_acres, size_value,
 size_basis, size_color, drive_minutes, drive_method, visual:{label, p, color, needs_review}, rent_fit,
 owner_name, owner_type, years_owned, score, coverage_have, coverage_total, rank, in_buybox, exclusion_reasons,
-level, drill_status, next_step_text, channels:{mail,phone,text,email,social,vm: none|untested|verified|wrong|dnc},
+rule_reasons, by_hand ('added'|'aside'|null), aside_buckets, level, drill_status, next_step_text, channels:{mail,phone,text,email,social,vm: none|untested|verified|wrong|dnc},
 crexi_url}`.
 
 PropertyDetail: PropertyRow + `{property:{all columns}, raw:{original columns}, signals:[...], visual_check:{...,
-images:[url]}, rent:{...}, owner:{...}, drill: property_drill(...), links:[...], outcome}`.
+images:[url]}, rent:{...}, owner:{...}, drill: property_drill(...), links:[...], outcome, buybox:{in_buybox,
+exclusion_reasons, exclusions, rule_reasons, rules, waived, kept, manual, decisions:[{reason, reason_label, decision,
+bucket, note, decided_by, decided_at, detail_at_decision, detail_now}], history, groups, size_detail, ...}}`.
 
 ## Frontend (`bluemoon/web/static/`)
 

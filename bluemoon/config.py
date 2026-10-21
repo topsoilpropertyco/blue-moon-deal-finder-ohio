@@ -45,6 +45,9 @@ class SizeSpec(BaseModel):
     fallback: str | None = None
     sqft_per_unit: float | None = None
     acres_per_unit: float | None = None
+    # Set-aside groups (the Why? panel): edges below ok[0] and above ok[1]. None = worked out from `ok`.
+    set_aside_below: list[float] | None = None
+    set_aside_above: list[float] | None = None
 
 
 class AssetClass(BaseModel):

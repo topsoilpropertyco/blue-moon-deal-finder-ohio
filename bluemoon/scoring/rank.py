@@ -6,6 +6,9 @@ Blue Moon score (high first), then photo-check final_p (high first), then drive 
 
 When you have recorded outcomes (deals marked Blue Moon / bought / passed / lost), the score uses the
 learned multipliers from learn.py instead of the starting ones in config/asset_classes.yaml.
+
+Decisions made by hand (overrides.py) are applied here, and only here: in_buybox and exclusion_reasons are the
+final answer, rule_reasons what the rules alone said, and aside_buckets the set-aside groups (buckets.py).
 """
 from __future__ import annotations
 
@@ -18,9 +21,10 @@ from datetime import date
 from typing import Any
 
 from ..config import Settings, get_settings
-from ..db import dumps, market_by_slug, now_iso, rows, scalar, upsert
+from ..db import dumps, market_by_slug, now_iso, pending_rescore, rescore_done, rows, scalar, upsert
+from . import buckets, overrides
 from .blue_moon import coverage, probability, signals_for
-from .buybox import EXCLUSION_LABELS, EXCLUSION_REASONS, evaluate, scoring_config
+from .buybox import EXCLUSION_LABELS, MANUAL_REASON, SET_ASIDE_REASONS, apply_overrides, evaluate, scoring_config
 
 log = logging.getLogger(__name__)
 
@@ -45,13 +49,23 @@ def _chunks(ids: list[int]) -> Iterable[list[int]]:
         yield ids[i:i + _CHUNK]
 
 
-def load_scoring_rows(conn: sqlite3.Connection, market_ids: Iterable[int]) -> list[tuple[dict, dict]]:
-    """[(properties row, {"drive", "rent", "visual", "owner"} rows or None)] for these markets, by id."""
+def load_scoring_rows(conn: sqlite3.Connection, market_ids: Iterable[int],
+                      property_ids: Iterable[int] | None = None) -> list[tuple[dict, dict]]:
+    """[(properties row, {"drive", "rent", "visual", "owner"} rows or None)] for these markets, by id.
+    property_ids: only these properties (of those markets)."""
     ids = list(market_ids)
     if not ids:
         return []
     marks = ",".join("?" for _ in ids)
-    props = rows(conn, f"SELECT * FROM properties WHERE market_id IN ({marks}) ORDER BY id", ids)
+    if property_ids is None:
+        props = rows(conn, f"SELECT * FROM properties WHERE market_id IN ({marks}) ORDER BY id", ids)
+    else:
+        props = []
+        for chunk in _chunks(sorted({int(i) for i in property_ids})):
+            q = ",".join("?" for _ in chunk)
+            props += rows(conn, f"SELECT * FROM properties WHERE market_id IN ({marks}) AND id IN ({q})",
+                          [*ids, *chunk])
+        props.sort(key=lambda p: p["id"])
     pids = [p["id"] for p in props]
     layers: dict[str, dict[int, dict]] = {k: {} for k in ENRICH_TABLES}
     for key, table in ENRICH_TABLES.items():
@@ -112,12 +126,16 @@ def compute_scores(conn: sqlite3.Connection, market_slug: str, progress: Progres
     owners_ran = _ensure_owners(conn, market["id"], market_slug, s)
     weights, learn_info = _weights(conn, market_slug, ac, s)
     data = load_scoring_rows(conn, [market["id"]])
+    decisions = overrides.load(conn, [market["id"]])
+    spec = buckets.group_spec(market, ac, s)
     total = len(data)
     _tell(progress, 0.05, f"Scoring {total:,} properties")
 
     items: list[dict] = []
     for i, (prop, enrich) in enumerate(data):
-        ev = evaluate(prop, enrich, ac, market, s)
+        ev = apply_overrides(evaluate(prop, enrich, ac, market, s), decisions.get(prop["id"]))
+        ev["aside_buckets"] = buckets.bucket_keys(ev["rule_reasons"], prop, ev, spec,
+                                                  ev["manual"] == "exclude")
         sigs = signals_for(prop, enrich, ac, s, weights=weights, today=today)
         have, of = coverage(sigs)
         visual = enrich.get("visual") or {}
@@ -133,6 +151,8 @@ def compute_scores(conn: sqlite3.Connection, market_slug: str, progress: Progres
     ranks = {it["property_id"]: n for n, it in enumerate(ranked, start=1)}
     _tell(progress, 0.85, "Saving scores")
     _save(conn, items, ranks)
+    if market["id"] in pending_rescore(conn):
+        rescore_done(conn, market["id"])     # scored since the version 2 update: its groups exist now
     _tell(progress, 1.0, "Scores saved")
     return _summary(market_slug, ac, items, ranked, owners_ran, learn_info)
 
@@ -146,6 +166,8 @@ def _save(conn: sqlite3.Connection, items: list[dict], ranks: dict[int, int]) ->
                 "property_id": it["property_id"],
                 "in_buybox": 1 if ev["in_buybox"] else 0,
                 "exclusion_reasons": dumps(ev["exclusion_reasons"]),
+                "rule_reasons": dumps(ev["rule_reasons"]),
+                "aside_buckets": dumps(ev["aside_buckets"]),
                 "size_value": ev["size_value"],
                 "size_basis": ev["size_basis"],
                 "size_color": ev["size_color"],
@@ -165,9 +187,12 @@ def _summary(market_slug: str, ac: Any, items: list[dict], ranked: list[dict], o
     reasons: Counter[str] = Counter()
     colors: dict[str, Counter[str]] = {"size": Counter(), "visual": Counter(), "rent": Counter()}
     basis: Counter[str] = Counter()
+    added = aside = 0
     for it in items:
         ev = it["ev"]
         reasons.update(ev["exclusion_reasons"])
+        added += 1 if ev["in_buybox"] and ev["rule_reasons"] else 0
+        aside += 1 if MANUAL_REASON in ev["exclusion_reasons"] else 0
         basis[ev["size_basis"]] += 1
         for axis, counter in colors.items():
             c = ev[f"{axis}_color"]
@@ -180,7 +205,8 @@ def _summary(market_slug: str, ac: Any, items: list[dict], ranked: list[dict], o
         "properties": len(items),
         "in_buybox": in_box,
         "excluded": len(items) - in_box,
-        "exclusion_counts": {r: reasons.get(r, 0) for r in EXCLUSION_REASONS},
+        "exclusion_counts": {r: reasons.get(r, 0) for r in SET_ASIDE_REASONS},
+        "by_hand": {"added": added, "set_aside": aside},
         "size_basis": dict(basis),
         "colors": {k: dict(v) for k, v in colors.items()},
         "score": _distribution([it["score"] for it in items]),
@@ -205,6 +231,10 @@ def _message(r: dict) -> str:
     if r["excluded"]:
         why = ", ".join(f"{EXCLUSION_LABELS[k].lower()} {n:,}" for k, n in r["exclusion_counts"].items() if n)
         parts.append(f"{r['excluded']:,} were set aside ({why}); nothing was deleted.")
+    hand = r.get("by_hand") or {}
+    if hand.get("added") or hand.get("set_aside"):
+        parts.append(f"By hand: {hand.get('added', 0):,} added to the buy box, "
+                     f"{hand.get('set_aside', 0):,} set aside.")
     dist = r["score_in_buybox"] if r["in_buybox"] else r["score"]
     if dist["max"] is not None:
         parts.append(f"Blue Moon scores run from {dist['min']:.1%} to {dist['max']:.1%} "

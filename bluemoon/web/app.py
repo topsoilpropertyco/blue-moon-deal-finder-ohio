@@ -65,6 +65,7 @@ from ..imagery import (
 )
 from ..imagery import queue_counts as review_counts
 from ..ingest import IngestError, import_file, preview_file
+from ..scoring import overrides
 from ..scoring.learn import model_summary, set_outcome
 from . import auth, queries
 
@@ -189,6 +190,16 @@ class Rescorer:
             self._timers.pop(slug, None)
         self._run(slug)
 
+    def run_now(self, slug: str, conn: sqlite3.Connection) -> None:
+        """Re-score right now, inside the request, on its connection (after a buy-box decision, so the answer
+        it returns is already right). Waits for a background re-score of the same market to finish first, so
+        that one can't save over the decision. Errors are raised, not swallowed."""
+        from ..scoring.rank import compute_scores
+        with self._lock:
+            running = self._running.setdefault(slug, threading.Lock())
+        with running:
+            compute_scores(conn, slug)
+
     def _run(self, slug: str) -> None:
         from ..scoring.rank import compute_scores
         with self._lock:
@@ -295,6 +306,24 @@ class ReviewIn(BaseModel):
 class OutcomeIn(BaseModel):
     outcome: str | None = Field(default=None, max_length=40)
     note: Text = None
+
+
+class GroupDecideIn(BaseModel):
+    """The Why? panel's Decide button: one set-aside group, one choice (checked in overrides.decide_group)."""
+    bucket: str = Field(max_length=120)
+    decision: str = Field(max_length=20)       # add_only | add_all | keep | clear
+    note: Text = None
+
+
+class BuyboxIn(BaseModel):
+    """The drawer's buy-box buttons (checked in overrides.decide_property)."""
+    decision: str = Field(max_length=20)       # include | exclude | rules
+    reason: str = Field(default="*", max_length=40)
+    note: Text = None
+
+
+class UndoIn(BaseModel):
+    batch_id: str = Field(max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class JobIn(BaseModel):
@@ -535,9 +564,50 @@ def market_summary(slug: str, conn: Conn) -> dict:
 def properties(slug: str, conn: Conn, view: str = "all", q: str | None = Query(None, max_length=200),
                sort: str = "rank", direction: str | None = Query(None, alias="dir"),
                limit: int | None = Query(None, ge=1), offset: int = Query(0, ge=0),
-               include_excluded: bool = False) -> dict:
+               include_excluded: bool = False, bucket: str | None = Query(None, max_length=120)) -> dict:
     return queries.list_properties(conn, slug, view=view, q=q, sort=sort, direction=direction, limit=limit,
-                                   offset=offset, include_excluded=include_excluded)
+                                   offset=offset, include_excluded=include_excluded, bucket=bucket)
+
+
+# --- routes: buy-box decisions by hand -----------------------------------------------------------
+
+def _actor(request: Request) -> str:
+    """Who made a decision: an email, 'this Mac', 'team' or 'open' (auth.signed_in_as)."""
+    return auth.signed_in_as(request) or "unknown"
+
+
+def _decided(conn: sqlite3.Connection, slug: str, result: dict) -> dict:
+    """Add the refreshed Why? panel and the buy-box count to a decision's result."""
+    mc = queries.market_ctx(conn, slug)
+    result["set_aside"] = queries.set_aside(conn, mc)
+    result["in_buybox"] = int(db.scalar(conn, f"SELECT COUNT(*) FROM properties p LEFT JOIN scores s ON "
+                                              f"s.property_id = p.id WHERE p.market_id = ? AND {queries.IN_BOX}",
+                                        (mc.id,)) or 0)
+    return result
+
+
+@router.post("/api/m/{slug}/buybox/decide")
+def buybox_decide(slug: str, body: GroupDecideIn, request: Request, conn: Conn) -> dict:
+    require_market(conn, slug)
+    result = overrides.decide_group(conn, slug, body.bucket, body.decision, _actor(request), note=body.note,
+                                    rescore=lambda: rescorer.run_now(slug, conn))
+    return _decided(conn, slug, result)
+
+
+@router.post("/api/m/{slug}/buybox/undo")
+def buybox_undo(slug: str, body: UndoIn, request: Request, conn: Conn) -> dict:
+    require_market(conn, slug)
+    result = overrides.undo(conn, slug, body.batch_id, _actor(request), rescore=lambda: rescorer.run_now(slug, conn))
+    return _decided(conn, slug, result)
+
+
+@router.post("/api/m/{slug}/properties/{pid}/buybox")
+def property_buybox(slug: str, pid: int, body: BuyboxIn, request: Request, conn: Conn) -> dict:
+    require_property(conn, slug, pid)
+    result = overrides.decide_property(conn, slug, pid, body.decision, _actor(request), reason=body.reason,
+                                       note=body.note, rescore=lambda: rescorer.run_now(slug, conn))
+    return {**result, "row": queries.property_row_by_id(conn, slug, pid),
+            "buybox": queries.buybox_detail(conn, slug, pid)}
 
 
 @router.get("/api/m/{slug}/properties/{pid}")
