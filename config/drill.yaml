@@ -27,7 +27,7 @@ stages:
     automation: auto
     cost: free
     applies_to: [all]
-    sources: [crexi_export]
+    sources: [crexi_export, ohio_statewide_parcels, indiana_sales_disclosure]
     method: Owner name and mailing address from the Crexi export.
     hit_rate: 0.95
     learn: Separates records with an owner name from the ones invisible to commodity data.
@@ -38,7 +38,7 @@ stages:
     automation: auto
     cost: free
     applies_to: [all]
-    sources: [internal_portfolio]
+    sources: [internal_portfolio, ohio_statewide_parcels, indiana_sales_disclosure]
     method: Groups properties that share an owner name or mailing address. A contact or confirmation on one property carries to its siblings.
     hit_rate: 0.10
     learn: One owner often holds several properties under different LLCs at the same mailing address.
@@ -49,7 +49,7 @@ stages:
     automation: assisted
     cost: free
     applies_to: [all]
-    sources: [county_auditor]
+    sources: [county_auditor, county_gis]
     method: Open the parcel page by parcel number. Confirm the current owner, the tax mailing address and the last transfer date.
     hit_rate: 0.85
     learn: Tax records give the legal owner of record and catch recent sales Crexi missed.
@@ -63,7 +63,7 @@ stages:
     asset_classes: [apartments, mobile_home_park]
     states: [OH]
     sources: [rental_registration]
-    method: Ohio law (ORC 5323.02) makes residential rental owners register with the county auditor, including a phone number for the owner or, for an LLC, its agent or a member. Look the parcel up in the county's rental registration.
+    method: Ohio counties with 200,000+ people keep a rental registration (ORC 5323.02) with an owner or agent phone. Franklin and Montgomery show it online with the phone; Hamilton and Delaware online without the phone; Butler and Warren by public-records request. Some cities (Springfield, Dayton, Columbus) keep their own registry; ask them for the owner contact on file.
     hit_rate: 0.35
     learn: Often the only free source of an owner's phone number.
 
@@ -73,7 +73,7 @@ stages:
     automation: assisted
     cost: free
     applies_to: [small_llc, corporation, portfolio, trust, estate, institutional, unknown]
-    sources: [ohio_sos, indiana_inbiz, opencorporates]
+    sources: [ohio_sos, indiana_inbiz, opencorporates, sec_edgar, ohio_ucc, indiana_sales_disclosure, ohio_mh_park_licenses, ohio_campground_licenses, indiana_mhc_roster, indiana_campground_roster, ohfa_compliance, bbb_profiles]
     method: Search the entity at the Secretary of State. Record the statutory agent, organizer or incorporator, and any officers named in filings.
     hit_rate: 0.15
     learn: Separates owners hidden behind an entity from owners who are truly unreachable.
@@ -84,7 +84,7 @@ stages:
     automation: assisted
     cost: free
     applies_to: [small_llc, corporation, portfolio, trust, estate, unknown]
-    sources: [county_recorder]
+    sources: [county_recorder, ohio_ucc]
     method: Open the deed and mortgage at the county recorder. The person who signed for the LLC or trust is usually the decision-maker.
     hit_rate: 0.30
     learn: Signatures on deeds and mortgages name the real people behind entities.
@@ -96,7 +96,7 @@ stages:
     cost: free
     applies_to: [all]
     asset_classes: [apartments, self_storage, campground_rv, mobile_home_park]
-    sources: [google_maps_listing, apartment_listings, state_licenses]
+    sources: [google_maps_listing, apartment_listings, hud_multifamily, hud_lihtc, epa_water_systems, hifld_mobile_home_parks, mhvillage_directory, ohio_self_storage_assn, ohio_real_estate_license, indiana_real_estate_license, fmcsa_carriers, epa_echo, ohio_epa_edocs, state_licenses]
     method: Find the leasing office, manager or park office listing and its phone. Ask them to pass a message to the owner or share the owner's contact.
     hit_rate: 0.30
     learn: Operating properties have a front desk; managers know the owner.
@@ -107,7 +107,7 @@ stages:
     automation: assisted
     cost: free
     applies_to: [all]
-    sources: [google_search, linkedin, facebook, free_people_search]
+    sources: [google_search, linkedin, facebook, free_people_search, bbb_profiles]
     method: Search the best-guess person with the city. Check LinkedIn, Facebook and business websites. Free people-search sites can show phones and relatives; use them by hand only.
     hit_rate: 0.20
     learn: Younger owners and active landlords are more findable here.
@@ -129,7 +129,7 @@ stages:
     automation: assisted
     cost: free
     applies_to: [all]
-    sources: [probate_court, clerk_of_courts]
+    sources: [probate_court, clerk_of_courts, obituaries, county_delinquent_tax, sheriff_sales, courtlistener]
     method: Search probate (estates, guardianships), civil cases (evictions name the owner and its attorney), liens and foreclosures tied to the owner or property.
     hit_rate: 0.25
     learn: Properties in legal limbo have paper trails, and change how we approach the owner.
@@ -140,7 +140,7 @@ stages:
     automation: manual
     cost: free
     applies_to: [all]
-    sources: [mail]
+    sources: [mail, ohio_voter_file]
     method: Mail a letter to the owner's mailing address, the statutory agent's address, and "Owner" at the property. Ask them to call or text.
     hit_rate: 0.05
     learn: Always available; slow but reaches owners who avoid phones.
@@ -151,7 +151,7 @@ stages:
     automation: manual
     cost: free
     applies_to: [all]
-    sources: [neighbors, local_brokers]
+    sources: [neighbors, county_gis, ohio_statewide_parcels, local_brokers]
     method: Ask adjacent owners, local brokers, property managers and contractors who own or manage the property.
     hit_rate: 0.20
     learn: High-touch, low-tech. Works on high-value targets.
@@ -174,15 +174,20 @@ stages:
     automation: manual
     cost: free
     applies_to: [all]
-    sources: [all_sources]
+    sources: [all_sources, sec_edgar, obituaries]
     method: One person exhausts every angle on this record. What remains after this is truly unreachable, and we know why.
     hit_rate: 0.50
     learn: Final filter.
 
 # Testing contact info is not a stage in the list: whenever a property has
 # untested contact info, its next step is to reach out on it.
+# Tuning (starting values; change freely).
+hit_rate_prior_strength: 10     # how many real tries it takes before your own hit rates outweigh the starting guesses
+advice_min_tries: 10            # tries on a stage before the app gives advice about it
+
 validate:
   name: Reach out and confirm
+  tries_before_moving_on: 2     # unanswered tries on a contact before the drill also moves on to the next stage
   channels: [phone, text, email, social, vm, mail]
   outcomes:
     no_answer: {label: No answer, effect: none}

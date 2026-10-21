@@ -29,6 +29,7 @@ def normalize_address(addr: str | None, city: str | None = None, state: str | No
     if not a:
         return None
     a = a.upper()
+    a = re.sub(r"\bP\s*\.?\s*O\s*\.?\s*BOX\b", "PO BOX", a)
     a = re.sub(r"[.,#]", " ", a)
     a = re.sub(r"\s+", " ", a).strip()
     words = [_SUFFIXES.get(w, w) for w in a.split(" ")]
@@ -96,10 +97,10 @@ def parse_date(v: Any) -> date | None:
         return v.date()
     if isinstance(v, date):
         return v
-    s = str(v).strip()
+    s = str(v).strip().replace("T", " ")
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d"):
         try:
-            return datetime.strptime(s[:19], fmt).date()
+            return datetime.strptime(s[:19] if " " in fmt else s[:10], fmt).date()
         except ValueError:
             continue
     return None

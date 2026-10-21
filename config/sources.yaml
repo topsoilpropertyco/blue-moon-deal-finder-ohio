@@ -37,6 +37,7 @@ sources:
     finds: Owner or agent name, address and phone for residential rentals.
   ohio_sos:
     name: Ohio Secretary of State business search
+    states: [OH]
     kind: link
     cost: free
     priority: 2
@@ -173,4 +174,1198 @@ sources:
     template: https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}
     finds: A look at the property.
 
-counties: {}
+  # --- Added 2026-10-21 from the data-source research (see docs/DATA_SOURCES.md). ---------------
+  # `drill_stages` and `asset_classes` on these entries are notes for wiring config/drill.yaml;
+  # the app does not read them. `county_slot` (read by the app) points a county source at a slot
+  # in the county table below. `api` is the machine-readable endpoint for a later automatic step.
+  county_gis:
+    name: County parcel map (GIS)
+    kind: county
+    cost: free
+    priority: 2
+    finds: Parcel lines, acreage and the neighbors around the property; some maps link to the auditor page.
+    how: Find the parcel on the map, then click the parcels next to it for neighbor owners.
+    drill_stages: [county_auditor, neighbor_network]
+  county_delinquent_tax:
+    name: County delinquent-tax list
+    kind: county
+    county_slot: delinquent_tax
+    cost: free
+    priority: 3
+    finds: Owners behind on property taxes (a motivated-seller sign) and how much they owe.
+    how: Look for the parcel or the owner on the list. Most auditor parcel pages also show delinquent taxes.
+    drill_stages: [court_records, letters]
+  sheriff_sales:
+    name: Sheriff's sale auctions (Ohio RealForeclose)
+    kind: county
+    county_slot: sheriff_sale
+    cost: free
+    priority: 3
+    finds: Foreclosure sales with the case number, parcel, appraised value and the lender suing.
+    how: Search the auction calendar for the address or parcel. The case number leads to the clerk of courts file. Every Ohio county here has a site at {county}.sheriffsaleauction.ohio.gov.
+    drill_stages: [court_records]
+  ohio_statewide_parcels:
+    name: Ohio statewide parcel map (OGRIP)
+    kind: link
+    cost: free
+    priority: 1
+    states: [OH]
+    url: "https://geohio.maps.arcgis.com/apps/instant/lookup/index.html?appid=8bfcff44b9734007b4c8853a6a0b9e04"
+    api: "https://services2.arcgis.com/MlJ0G8iWUyC7jAmu/arcgis/rest/services/OhioStatewidePacels_full_view/FeatureServer/0"
+    finds: For every Ohio parcel, the owner's mailing address, the land-use code (401-403 apartments, 415 mobile home park, 416 campground, 480 warehouse, 300/400 vacant land) and a link to the county auditor page. No owner name.
+    how: Click the property. A mailing address that differs from the property address means an absentee owner. The same mailing address on several parcels means one owner (a portfolio). The data is mostly from 2023, so confirm the owner on the auditor page.
+    drill_stages: [records_baseline, portfolio_match, neighbor_network, letters]
+  hud_multifamily:
+    name: HUD-assisted apartments (manager phone and email)
+    kind: link
+    cost: free
+    priority: 1
+    url: "https://www.hud.gov/hud-partners/multifamily-assist-section8-database"
+    template: "https://services.arcgis.com/VTyQ9soqVukalItT/ArcGIS/rest/services/MULTIFAMILY_PROPERTIES_ASSISTED/FeatureServer/0/query?where=STD_ZIP5%3D%27{zip}%27&outFields=PROPERTY_NAME_TEXT,STD_ADDR,STD_CITY,TOTAL_UNIT_COUNT,PROPERTY_ON_SITE_PHONE_NUMBER,MGMT_AGENT_ORG_NAME,MGMT_CONTACT_FULL_NAME,MGMT_CONTACT_MAIN_PHN_NBR,MGMT_CONTACT_EMAIL_TEXT&returnGeometry=false&f=html"
+    api: "https://services.arcgis.com/VTyQ9soqVukalItT/ArcGIS/rest/services/MULTIFAMILY_PROPERTIES_ASSISTED/FeatureServer/0"
+    finds: For HUD-assisted or HUD-insured apartments, the management company, contact name, phone and email, plus the on-site phone.
+    how: The link lists every HUD-assisted property in the ZIP code. Look for this address. HUD's Section 8 database (Excel, updated monthly, link in docs/DATA_SOURCES.md) also lists the owner company with its phone and email.
+    asset_classes: [apartments]
+    drill_stages: [property_contacts, entity_unmask]
+  hud_lihtc:
+    name: HUD tax-credit (LIHTC) apartments
+    kind: link
+    cost: free
+    priority: 2
+    url: "https://www.huduser.gov/portal/datasets/lihtc/property.html"
+    template: "https://egis.hud.gov/arcgis/rest/services/gotit/LIHTCProperties/MapServer/0/query?where=STD_ZIP5%3D%27{zip}%27&outFields=PROJECT,STD_ADDR,STD_CITY,N_UNITS,CONTACT,COMPANY,CO_TEL&returnGeometry=false&f=html"
+    finds: Tax-credit apartment projects with the owner contact person, company and phone (projects through about 2014).
+    how: The link lists every tax-credit project in the ZIP code. Look for this address. The contact is often the original developer.
+    asset_classes: [apartments]
+    drill_stages: [property_contacts, entity_unmask]
+  epa_water_systems:
+    name: EPA public water systems (operator phone and email)
+    kind: link
+    cost: free
+    priority: 1
+    url: "https://data.epa.gov/efservice/WATER_SYSTEM/PRIMACY_AGENCY_CODE/OH/PWS_NAME/CONTAINING/CAMPGROUND/PWS_ACTIVITY_CODE/A/JSON"
+    template: "https://data.epa.gov/efservice/WATER_SYSTEM/PRIMACY_AGENCY_CODE/{state}/CITY_NAME/{city}/PWS_ACTIVITY_CODE/A/JSON"
+    api: "https://data.epa.gov/efservice/WATER_SYSTEM/PRIMACY_AGENCY_CODE/{state}/PWS_ACTIVITY_CODE/A/JSON"
+    finds: Campgrounds, mobile home parks and rural properties with their own well are listed with the operator's name, phone, email and mailing address.
+    how: The link lists the active water systems in the city. Look for the park or campground name (pws_name) and read admin_name, phone_number and email_addr. The city is the system's mailing city, so also try the next town over.
+    asset_classes: [campground_rv, mobile_home_park, apartments]
+    drill_stages: [property_contacts, entity_unmask]
+  hifld_mobile_home_parks:
+    name: Mobile home and RV park list (HIFLD)
+    kind: link
+    cost: free
+    priority: 2
+    url: "https://services.arcgis.com/0ZRg6WRC7mxSLyKX/ArcGIS/rest/services/Mobile_Home_Parks/FeatureServer"
+    template: "https://services.arcgis.com/0ZRg6WRC7mxSLyKX/ArcGIS/rest/services/Mobile_Home_Parks/FeatureServer/0/query?where=STATE%3D%27{state}%27+AND+CITY%3D%27{city_q}%27&outFields=NAME,ADDRESS,CITY,TELEPHONE,TYPE&returnGeometry=false&f=html"
+    finds: Park name, address and office phone for mobile home parks and RV parks (1,407 Ohio parks).
+    how: The link lists the parks in the city. The office phone usually reaches the operator. The base data is from about 2013, so check that the park still operates.
+    asset_classes: [mobile_home_park, campground_rv]
+    drill_stages: [property_contacts]
+  ohio_mh_park_licenses:
+    name: Ohio manufactured home park operator licenses
+    kind: link
+    cost: free
+    priority: 2
+    states: [OH]
+    url: "https://com.ohio.gov/divisions-and-programs/manufactured-homes-program/park-operators/mh-park-operator-license"
+    finds: The licensed operator's legal name, park address and approved lot count. Licenses do not transfer, so a new licensee means a recent sale.
+    how: There is no public list online. Email MHProgram@com.ohio.gov (614-644-2223) for the licensed-park roster. Check one license at https://elicense.ohio.gov/oh_verifylicense.
+    asset_classes: [mobile_home_park]
+    drill_stages: [entity_unmask, property_contacts]
+  ohio_campground_licenses:
+    name: Ohio campground and RV park licenses (local health district)
+    kind: link
+    cost: free
+    priority: 2
+    states: [OH]
+    url: "https://odh.ohio.gov/know-our-programs/campgrounds"
+    finds: The licensed operator's name and address and the lot count for every RV park and campground. Licenses do not transfer, so a new licensee means a recent sale.
+    how: Licenses are held by the county health district, not the state. Find the district on ODH's directory, then ask for the licensed-campground list. Clark County - environmental@ccchd.com, 937-390-5600.
+    asset_classes: [campground_rv]
+    drill_stages: [entity_unmask, property_contacts]
+  indiana_mhc_roster:
+    name: Indiana mobile home community roster
+    kind: link
+    cost: free
+    priority: 1
+    states: [IN]
+    url: "https://secure.in.gov/health/eph/mobile-home-community-inspection-and-licensing-program/mhc-roster"
+    finds: Every licensed Indiana mobile home community (5 or more homes) with licensee details.
+    how: Search by county or community name.
+    asset_classes: [mobile_home_park]
+    drill_stages: [entity_unmask, property_contacts]
+  indiana_campground_roster:
+    name: Indiana RV campground roster
+    kind: link
+    cost: free
+    priority: 1
+    states: [IN]
+    url: "https://secure.in.gov/health/eph/recreational-vehicle-campgrounds/campground-roster/"
+    finds: Every licensed Indiana campground (10 or more sites) with operator details.
+    how: Search by county.
+    asset_classes: [campground_rv]
+    drill_stages: [entity_unmask, property_contacts]
+  ohio_self_storage_assn:
+    name: Self Storage Association of Ohio member directory
+    kind: link
+    cost: free
+    priority: 2
+    url: "https://www.ohiossa.org/Membership/Member-Directory"
+    finds: About 150 member companies with a contact person (often the owner), facility address and phone. Mostly independent Ohio operators.
+    how: Look for the facility or owner name. Ohio has no storage license, so there is no state list.
+    asset_classes: [self_storage]
+    drill_stages: [property_contacts, entity_unmask]
+  mhvillage_directory:
+    name: MHVillage park directory
+    kind: link
+    cost: free
+    priority: 4
+    url: "https://www.mhvillage.com/parks/oh"
+    finds: About 2,100 Ohio communities with lot counts and sometimes a manager or office phone.
+    how: A commercial site. Browse by hand; do not scrape.
+    asset_classes: [mobile_home_park]
+    drill_stages: [property_contacts]
+  fmcsa_carriers:
+    name: FMCSA trucking company census
+    kind: link
+    cost: free
+    priority: 3
+    url: "https://data.transportation.gov/d/az4n-8mr2"
+    finds: Every registered trucking company with its yard address, phone, email and up to two officer names.
+    how: Filter by city or ZIP code. A carrier based at the property address is the owner or tenant of the yard.
+    asset_classes: [outdoor_storage, warehouse]
+    drill_stages: [property_contacts, entity_unmask]
+  epa_echo:
+    name: EPA ECHO facility search
+    kind: link
+    cost: free
+    priority: 3
+    url: "https://echo.epa.gov/facilities/facility-search"
+    finds: Regulated businesses at an address (warehouses, trucking, scrap yards) with their permits. The facility name is usually the operator.
+    how: Search by address or city. Use it to learn who occupies a warehouse or yard.
+    asset_classes: [warehouse, outdoor_storage]
+    drill_stages: [property_contacts]
+  ohio_epa_edocs:
+    name: Ohio EPA document search
+    kind: link
+    cost: free
+    priority: 4
+    states: [OH]
+    url: "https://edocpub.epa.ohio.gov/publicportal/edochome.aspx"
+    finds: Permits and stormwater filings that name the facility operator and a contact person.
+    how: Search by company name or county.
+    asset_classes: [warehouse, outdoor_storage, mobile_home_park, campground_rv]
+    drill_stages: [property_contacts]
+  sec_edgar:
+    name: SEC EDGAR company search
+    kind: link
+    cost: free
+    priority: 3
+    url: "https://www.sec.gov/edgar/search/"
+    template: "https://www.sec.gov/cgi-bin/browse-edgar?company={owner_q}&type=&dateb=&owner=include&count=40&action=getcompany"
+    finds: Filings by funds and syndicators. Form D filings name the people who run the LLC.
+    how: Mostly useful for larger owners that raise money from investors. Open any Form D and read 'Related Persons'.
+    drill_stages: [entity_unmask, deep_research]
+  ohio_ucc:
+    name: Ohio UCC filing search
+    kind: link
+    cost: free
+    priority: 4
+    states: [OH]
+    url: "https://ucc.ohiosos.gov/"
+    finds: Lenders and related companies that filed against the owner.
+    how: Search the owner name. Opens in a browser only.
+    drill_stages: [entity_unmask, recorder_documents]
+  ohio_real_estate_license:
+    name: Ohio real estate license lookup
+    kind: link
+    cost: free
+    priority: 3
+    states: [OH]
+    url: "https://elicense3.com.ohio.gov/Lookup/LicenseLookup.aspx"
+    finds: Whether a property manager or broker is licensed, and their brokerage.
+    how: Use after you have a manager or company name. Ohio requires a broker license to manage for others. Newer portal - https://lpi.elicense.ohio.gov/
+    drill_stages: [property_contacts]
+  indiana_real_estate_license:
+    name: Indiana license lookup (real estate brokers)
+    kind: link
+    cost: free
+    priority: 4
+    states: [IN]
+    url: "https://mylicense.in.gov/EVerification/Search.aspx"
+    finds: License status and firm for Indiana brokers and managers.
+    how: Search by name.
+    drill_stages: [property_contacts]
+  indiana_sales_disclosure:
+    name: Indiana sales disclosure files (STATS Indiana)
+    kind: link
+    cost: free
+    priority: 1
+    states: [IN]
+    url: "https://www.stats.indiana.edu/about/sdf.asp"
+    finds: Every Indiana sale since 2008 with buyer and seller names and mailing addresses and the price.
+    how: Download the yearly files in a browser. Match on the parcel number to get the buyer (the owner) and their mailing address.
+    drill_stages: [records_baseline, entity_unmask, portfolio_match]
+  ohio_voter_file:
+    name: Ohio voter file
+    kind: link
+    cost: free
+    priority: 3
+    states: [OH]
+    url: "https://www6.ohiosos.gov/ords/f?p=VOTERFTP:STWD"
+    finds: Every registered voter's full name, birth year and home address. Confirms which John Smith is the owner and where to mail him.
+    how: Download by hand (four files). Commercial-use rules were not checked; read the page before using it for outreach.
+    drill_stages: [entity_unmask, letters]
+  obituaries:
+    name: Obituary search
+    kind: link
+    cost: free
+    priority: 3
+    url: "https://www.legacy.com/obituaries/search"
+    template: "https://www.google.com/search?q=%22{person_q}%22+obituary+{city_q}+{state}"
+    finds: Whether an owner has died, and the spouse, children and funeral home. Leads to the probate estate and the new decision-maker.
+    how: If you find one, search the county probate court for the estate and its executor.
+    drill_stages: [court_records, deep_research]
+  bbb_profiles:
+    name: Better Business Bureau profiles
+    kind: link
+    cost: free
+    priority: 4
+    template: "https://www.bbb.org/search?find_text={owner_q}&find_loc={city_q}%2C%20{state}"
+    finds: Owner or president names and phone for property management and landlord companies.
+    how: Open the business profile and look for 'Business Management'. The data is self-reported.
+    drill_stages: [property_contacts, entity_unmask]
+  courtlistener:
+    name: Federal court and bankruptcy search (CourtListener)
+    kind: link
+    cost: free
+    priority: 4
+    template: "https://www.courtlistener.com/?type=r&q=%22{owner_q}%22"
+    finds: Federal cases and bankruptcies that name the owner or the LLC.
+    how: Free, but coverage is partial. PACER has everything at $0.10 a page (free under $30 a quarter).
+    drill_stages: [court_records]
+  national_dnc:
+    name: National Do Not Call Registry (for callers)
+    kind: link
+    cost: free
+    priority: 1
+    url: "https://telemarketing.donotcall.gov/"
+    finds: Which phone numbers are on the Do Not Call list. Check before calling or texting an owner.
+    how: Register as an organization to download numbers by area code (first 5 area codes free, then $85 each a year). Indiana also has its own list ($750 a year). See docs/DATA_SOURCES.md.
+    drill_stages: [property_contacts, web_footprint, paid_skip_trace]
+  ohfa_compliance:
+    name: Ohio Housing Finance Agency (OHFA) portfolio
+    kind: link
+    cost: free
+    priority: 4
+    states: [OH]
+    url: "https://www.ohiohome.org/compliance"
+    finds: Owners and management agents of OHFA-funded apartments.
+    how: No public download. Ask OHFA for the portfolio list by public-records request.
+    asset_classes: [apartments]
+    drill_stages: [entity_unmask, property_contacts]
+
+# County table: one entry per county, under its state. The app reads these slots:
+#   auditor | rental_registration | recorder | probate | clerk | gis   (and any slot a source names
+#   with county_slot: delinquent_tax | sheriff_sale). A slot is {url, template?, name?, how?}.
+#   `url` is the search page. `template` is a deep link built from the property's APN; it is only
+#   given when it was checked. template_status: tested = a parcel page loaded with the right owner;
+#   county_published = the county's own map or data uses this exact link, but the site blocks
+#   scripts so it was not loaded here; none = no parcel link, use the search page.
+#   rental_registration also says available (true/false/null = unknown) and includes_phone.
+#   city_rental, code_enforcement, bulk_data, fips and note are reference notes for people.
+# Every URL was checked on 2026-10-21. Sites behind Cloudflare or Azure firewalls work in a normal
+# browser but not from scripts; never scrape them (several robots.txt files forbid it).
+counties:
+  OH:
+    CLARK:
+      fips: '39023'
+      auditor:
+        url: "https://clarkcountyauditor.org/Search"
+        template: "https://clarkcountyauditor.org/Parcel?Parcel={apn_digits}"
+        template_status: tested
+        how: Opens the parcel page. The parcel number is 16 digits with no dashes (e.g. 3400700028404020); the link strips the dashes for you. The site shows a 'checking your browser' screen first, then loads. To search by owner name, use the Search page.
+        note: 'Pivot Point site behind Cloudflare (403 to every script). The 16-digit key was confirmed 2026-10-21 through Pivot Point''s record-card PDF for parcel 3400700028404020 (owner CITY OF SPRINGFIELD OHIO THE, 0 BURT ST). robots.txt bans automated collection: links are for a person only.'
+      rental_registration:
+        name: City of Springfield rental registry (no public search)
+        url: "https://springfieldohio.gov/city_services/rental-property-registration/"
+        available: false
+        includes_phone: null
+        how: 'No county registry: Clark (about 136,000 people) is under the 200,000-person line in ORC 5323. The City of Springfield runs its own registry ($35 a single-unit property, $25 a unit in multi-unit buildings, $750 cap per owner). There is no public search. Ask the city for the owner and contact on file with a public-records request. Questions: 937-324-7385.'
+      recorder:
+        url: "https://clark.oh.publicsearch.us/"
+        how: 'Free name and document search (GovOS PublicSearch). The older CountyFusion site still works: https://countyfusion14.govos.com/countyweb/loginDisplay.action?countyname=ClarkOH'
+      probate:
+        url: "https://probate.clarkcountyohio.gov/recordSearch.php"
+        how: Accept the disclaimer, then search estates by name. New filings appear after about a day.
+      clerk:
+        url: "https://eservices.clarkcountyohiocourt.com/eservices/home.page"
+        how: Common Pleas civil and foreclosure cases. Evictions are in Clark County Municipal Court (https://clarkcountymunicipalcourt.gov/, opens in a browser only; its case search was not checked).
+      gis:
+        url: "https://clarkcountyauditor.org/Map"
+        how: Auditor map. Not confirmed (the site blocks scripts). No free public parcel data layer was found for Clark.
+      city_rental:
+        url: "https://springfieldohio.gov/city_services/rental-property-registration/"
+        how: 'City of Springfield Rental Property Registry (active). Owners register in City Works Online: https://app05.cityworksonline.com/CLIENT_SpringfieldOH-Public/login. No public lookup; use a public-records request.'
+      code_enforcement:
+        url: "https://springfieldohio.gov/code-compliance/"
+        how: City of Springfield Code Compliance.
+      delinquent_tax:
+        url: "https://clarkcountyauditor.org/DelinquencyReport"
+        how: Auditor delinquent-tax report with CSV export. Opens in a browser only (the site blocks scripts).
+      sheriff_sale:
+        url: "https://clark.sheriffsaleauction.ohio.gov/"
+      note: Checked 2026-10-21. Clark is the only county in the market with no free bulk owner file or public parcel map service; owner mailing addresses come from the statewide parcel layer (2023 data) or the auditor page.
+    CHAMPAIGN:
+      fips: '39021'
+      auditor:
+        url: "https://auditor.co.champaign.oh.us/"
+        template: "https://auditor.co.champaign.oh.us/Parcel?Parcel={apn}"
+        template_status: tested
+        how: Uses the dashed parcel number as written, e.g. C06-03-00-54-05-004-00. If the APN has no dashes (C060300540500400) the link will not match; use the search page instead.
+        note: Pivot Point site behind Cloudflare. Key confirmed 2026-10-21 by the county's own ArcGIS map popup and by the record-card PDF for C06-03-00-54-05-004-00 (owner NICHOLAS MICHAEL WEST, 8953 DAVISSON RD). robots.txt bans automated collection.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Champaign has about 39,000.
+      recorder:
+        url: "https://countyfusion9.kofiletech.us/countyweb/login.do?countyname=ChampaignOH"
+        how: CountyFusion. Log in as a guest to search the index. Viewing or printing images may need a paid account.
+      probate:
+        url: "https://eservices.champaigncountyfamilycourt.com"
+        how: Champaign County Family Court (Probate Division) case search.
+      clerk:
+        url: "https://eservices.champaignclerk.com"
+        how: 'Common Pleas civil and foreclosure cases. Evictions and small claims: Champaign County Municipal Court, http://web1.civicacmi.com/ChampaignCoMC/Court/Default.aspx'
+      gis:
+        url: "https://www.arcgis.com/apps/mapviewer/index.html?webmap=1430eb78810b4b0183265489ec74152a"
+        how: The auditor's public ArcGIS map ('Auditor Main Map').
+      sheriff_sale:
+        url: "https://champaign.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: County Engineer parcel layer with owner and mailing address
+        url: "https://services5.arcgis.com/HBIN2hfRscrws7eM/arcgis/rest/services/parcel_joined/FeatureServer/0"
+        how: 'Free ArcGIS layer: owner, owner address, taxpayer address, land use, sale date and price. Parcel (dashed) and Parcel2 (no dashes).'
+      note: Checked 2026-10-21. https://www.champaigncountyohio.gov/ did not connect from here.
+    GREENE:
+      fips: '39057'
+      auditor:
+        url: "https://auditor.greenecountyohio.gov/Search"
+        template_status: none
+        how: 'Search by parcel number (format E13-0001-0016-0-0017-00) or owner name. There is no link by parcel number: parcel pages use an internal Property_ID, e.g. https://auditor.greenecountyohio.gov/RealEstate/Index?Property_ID=45822&TaxYear=2025. The Property_ID is in the county GIS layer.'
+        note: ISSG site. /Search and /RealEstate return 403 to scripts (Azure firewall) and robots.txt disallows /RealEstate. The Property_ID link format is confirmed from the county's own delinquent list.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Greene has about 168,000.
+      recorder:
+        url: "https://greene.oh.publicsearch.us/"
+        how: Free index and full-text search (GovOS PublicSearch).
+      probate:
+        url: "https://www.greenecountyohio.gov/2087/JWorks-Case-Search"
+        how: Probate Court case search (JWorks). Opens in a browser only; its contents could not be checked from here.
+      clerk:
+        url: "https://courts.greenecountyohio.gov/eservices/"
+        how: Common Pleas civil and foreclosure cases. Evictions are in the Xenia, Fairborn and Beavercreek-area municipal courts (not checked).
+      gis:
+        url: "https://gis.greenecountyohio.gov/GIMS/"
+      delinquent_tax:
+        url: "https://auditor.greenecountyohio.gov/DelinquentList"
+        how: Delinquent-tax list. Each tax district exports to CSV (parcel, owner, address, amount, link).
+      sheriff_sale:
+        url: "https://greene.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Auditor public records ZIP (207 MB)
+        url: "https://auditor.greenecountyohio.gov/media/Documents/PublicRecords.zip"
+        how: Every parcel with owner and values. Updated 2026-10-20 when checked.
+      - name: Open data parcel layer
+        url: "https://gis.greenecountyohio.gov/webgis2/rest/services/OpenData/OpenData/MapServer/1"
+        how: Owner name, taxpayer contact, tax mailing address, land use, values, sales and delinquent taxes due.
+      - name: Tax parcel layer with Property_ID
+        url: "https://gis.greenecountyohio.gov/webgis2/rest/services/PAS/TaxParcels/MapServer/1"
+        how: Same fields plus Property_ID, which builds the auditor page link.
+      note: Checked 2026-10-21. The auditor root redirects to /Search (403 to scripts).
+    MADISON:
+      fips: '39097'
+      auditor:
+        url: "https://auditor.co.madison.oh.us/"
+        template: "https://auditor.co.madison.oh.us/Parcel?Parcel={apn}"
+        template_status: county_published
+        how: Uses the parcel number with its dash and dot, e.g. 15-00185.000. The undashed form (1500185000) will not match; use the search page instead.
+        note: The county's own ArcGIS maps build this exact link from the TAXPIN field. The site sits behind Cloudflare, so the page was not loaded here. robots.txt bans automated collection.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Madison has about 44,000.
+      recorder:
+        url: "https://madison.oh.publicsearch.us/"
+        how: 'Free search (GovOS PublicSearch). The Recorder page also links CountyFusion: https://countyfusion14.govos.com/countyweb/loginDisplay.action?countyname=MadisonOH'
+      probate:
+        url: "https://www.madison.oh.gov/departments/court_system/juvenile_probate/index_search.php"
+        how: Use the record search form on this page.
+      clerk:
+        url: "https://clerk.co.madison.oh.us/"
+        how: 'Common Pleas record search. Evictions: Madison County Municipal Court, https://muni.co.madison.oh.us/caseSearch.php'
+      gis:
+        url: "https://experience.arcgis.com/experience/d9cf258148684d8dbd7929bbe3879f59"
+        how: Madison County Engineer's Parcel Viewer.
+      sheriff_sale:
+        url: "https://madison.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Parcel layer with owner and mailing address
+        url: "https://services1.arcgis.com/Wz3RgwtkgJCGuhMd/arcgis/rest/services/parcel_joined/FeatureServer/0"
+        how: 'Free ArcGIS layer: TAXPIN, owner, full owner mailing address, taxpayer address, land use, sales, values.'
+      - name: Madison County GIS data hub
+        url: "https://madison-county-gis-data-download-madcoengineer.hub.arcgis.com/"
+        how: Downloads.
+      note: Checked 2026-10-21. The auditor's /Map returns 403 to scripts.
+    MONTGOMERY:
+      fips: '39113'
+      auditor:
+        url: "https://www.mcrealestate.org/search/commonsearch.aspx?mode=parid"
+        template: "https://www.mcrealestate.org/Datalets/Datalet.aspx?mode=profileall&UseSearch=no&pin={apn_spaces_q}"
+        template_status: tested
+        how: 'Opens the parcel page. The county needs spaces instead of dashes (R72 04407 0002); the link converts Crexi''s dashes for you. If the page says ''No Data'', use the search page.'
+        note: 'Loads directly (no firewall). Tested 2026-10-21: R72 04407 0002 = 238 BIERCE AVE, owner EQUITY POINT INVESTMENTS INC. Other tabs use the same link with mode=sales, mode=taxes or mode=rentalreg_detail.'
+      rental_registration:
+        url: "https://go.mcohio.org/ApplicationS/auditor/rentalreg/RENTAL_REGISTRATION_LIST.CFM"
+        template: "https://www.mcrealestate.org/Datalets/Datalet.aspx?mode=rentalreg_detail&UseSearch=no&pin={apn_spaces_q}"
+        template_status: tested
+        available: true
+        includes_phone: true
+        how: Shows the registered owner, agent, address and phone for this parcel (needs the parcel number with spaces). The list page has free CSV files for each tax district, with agent name and phone.
+        note: "Tested 2026-10-21 on R72 04407 0002: agent FIRST REALTY GROUP INC., phone 937-435-5000. Bulk CSV pattern: https://go.mcohio.org/applicationS/auditor/rentalreg/data/rental_reg_{DISTRICT}.csv (e.g. R72 = Dayton, about 7,083 rows)."
+      recorder:
+        url: "https://riss.mcrecorder.org/"
+        how: 'Recorder''s Information Search System. Free name search: https://riss.mcrecorder.org/document_search/byname.cfm'
+      probate:
+        url: "https://go.mcohio.org/applications/probate/prodcfm/casesearchx.cfm"
+        how: Estate search by name or by year and case number.
+      clerk:
+        url: "https://pro.mcohio.org/"
+        how: 'Common Pleas civil and foreclosure (PROv3). Dayton evictions: https://clerkofcourt.daytonohio.gov/PA/CvSearchTypes.cfm?initialArea=civil. Kettering, Vandalia, Miamisburg and the county courts were not checked.'
+      gis:
+        url: "https://gis.mcohio.org/VPCore/VP.html?config=aud"
+      code_enforcement:
+        url: "https://www.daytonohio.gov/221/Housing-Inspection"
+        how: 'City of Dayton Housing Inspection. Also: Vacant Property Registration https://www.daytonohio.gov/1249/Vacant-Property-Registration and the Housing Condition Survey https://dayton-housing-condition-survey-daytonohio.hub.arcgis.com/. Dayton rentals register with the county auditor, not the city.'
+      delinquent_tax:
+        url: "https://go.mcohio.org/applications/treasurer/search/"
+        how: Treasurer tax search (balances and delinquency).
+      sheriff_sale:
+        url: "https://montgomery.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Rental registration CSVs by tax district (67 files, with phone)
+        url: "https://go.mcohio.org/ApplicationS/auditor/rentalreg/RENTAL_REGISTRATION_LIST.CFM"
+        how: Columns include parcel, location, agent type, agent name, agent address, phone, number of units and registration date. All files were dated 10/01/2026 when checked.
+      note: 'Checked 2026-10-21. Best county in the market: parcel and rental pages load directly and the rental CSVs carry phone numbers. mcauditor.org now redirects to a Cloudflare-blocked page.'
+    MIAMI:
+      fips: '39109'
+      auditor:
+        url: "https://www.miamicountyohioauditor.gov/Search"
+        template: "https://www.miamicountyohioauditor.gov/Parcel?Parcel={apn}"
+        template_status: county_published
+        how: Uses the dashed parcel number, e.g. A01-032530. The undashed form (A01032530) will not match; use the search page instead.
+        note: The auditor's own public ArcGIS maps build this exact link from the PARCEL field. The site sits behind Cloudflare, so the page was not loaded here. robots.txt bans automated collection.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Miami has about 109,000.
+      recorder:
+        url: "https://rep4laredo.fidlar.com/OHMiami/DirectSearch/#/search"
+        how: Free index search (Fidlar). Full images need a paid Laredo subscription.
+      probate:
+        url: "https://probate.miamicountyohio.gov/recordSearch.php?k=searchForm5503"
+        how: Open in a browser (it fails from scripts). New filings appear after about a day.
+      clerk:
+        url: "https://courts.miamicountyohio.gov/eservices/"
+        how: Covers Common Pleas and Miami County Municipal Court (evictions).
+      gis:
+        url: "https://www.arcgis.com/apps/mapviewer/index.html?webmap=b9645ca4929b44a09e5b3cdca28b5f93"
+        how: The auditor's public ArcGIS map.
+      delinquent_tax:
+        url: "https://www.miamicountyohioauditor.gov/DelinquencyReport"
+        how: Delinquency report with CSV export. Opens in a browser only.
+      sheriff_sale:
+        url: "https://miami.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Parcel layer with owner, mailing address and delinquency
+        url: "https://services3.arcgis.com/wCWf4EGMg4PzHwzA/arcgis/rest/services/parcel_joined/FeatureServer/0"
+        how: 'Free ArcGIS layer: PARCEL (dashed), owner, owner address, tax mailing address, land use, delinquency, values, sales.'
+      note: Checked 2026-10-21.
+    LOGAN:
+      fips: '39091'
+      auditor:
+        url: "https://realestate.logancountyohio.gov/Search"
+        template_status: none
+        how: 'Search by parcel number (format 36-007-13-01-002-000) or owner name. There is no link by parcel number: parcel pages use an internal Property_ID (field Property_I in the county GIS layer).'
+        note: "ISSG site. /Search and /RealEstate return 403 to scripts (Azure firewall). The county map's own popup link uses an old host that now drops the path. Unconfirmed current form: https://realestate.logancountyohio.gov/RealEstate/Summary?Property_ID={Property_ID}."
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Logan has about 46,000.
+      recorder:
+        url: "https://countyfusion11.kofiletech.us/countyweb/loginDisplay.action?countyname=LoganOH"
+        how: CountyFusion. A guest login gives an index search; images may need an account or a fee.
+      probate:
+        url: "https://eservices.logancountycourts.com/eservices/home.page.2"
+        how: Probate Court case search. The Probate Court and Clerk of Courts share this portal.
+      clerk:
+        url: "https://eservices.logancountycourts.com/eservices/home.page.2"
+        how: Common Pleas civil and foreclosure. Bellefontaine Municipal Court (evictions) was not checked.
+      gis:
+        url: "https://experience.arcgis.com/experience/3bf5d7e9037b4332a1c8837a6a021408/"
+      delinquent_tax:
+        url: "https://realestate.logancountyohio.gov/DelinquentList"
+        how: Delinquent-tax list.
+      sheriff_sale:
+        url: "https://logan.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Auditor CAMA and tax files
+        url: "https://realestate.logancountyohio.gov/additional-links-cama-and-tax-files"
+        how: 'Free ZIPs: PublicRecordsExcel.zip, PublicRecordsXML.zip, GISExtract.zip (download with a normal click).'
+      - name: County parcel layer with owner and taxpayer contact
+        url: "https://services9.arcgis.com/mFxO7gBbusFBQ5o9/arcgis/rest/services/Logan_County_Parcels/FeatureServer/12"
+        how: Owner and taxpayer names and addresses, land use, conveyance date and price, Property_ID.
+      note: 'Checked 2026-10-21. GIS hub: https://logan-county-gis-data-loganco.hub.arcgis.com/'
+    UNION:
+      fips: '39159'
+      auditor:
+        url: "https://beacon.schneidercorp.com/Application.aspx?App=UnionCountyOH&PageType=Search"
+        template: "https://beacon.schneidercorp.com/Application.aspx?AppID=1260&LayerID=41600&PageTypeID=4&PageID=15350&KeyValue={apn}"
+        template_status: county_published
+        how: Uses the formatted account number, e.g. 29-0006444.0000. A 13-digit APN (2900064440000) will not match; use the search page instead.
+        note: The county's own ArcGIS map builds this exact Beacon link from the ACCOUNT field. Beacon sits behind Cloudflare, so it works in a browser only.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Union has about 63,000.
+      recorder:
+        url: "https://www2.co.union.oh.us/PaxWorld5/"
+        how: Official records search. Accept the disclaimer at https://www.unioncountyohio.gov/recorder-disclaimer first. Deed and mortgage index PDFs from 1875 to 1994 are on that page too.
+      probate:
+        url: "https://eservices.co.union.oh.us/eservices"
+        how: Probate and the Clerk of Courts share this portal.
+      clerk:
+        url: "https://eservices.co.union.oh.us/eservices"
+        how: 'Common Pleas records. Evictions: Marysville Municipal Court, https://court.marysvilleohio.org/recordSearch.php'
+      gis:
+        url: "https://www7.co.union.oh.us/unionoh/"
+      sheriff_sale:
+        url: "https://union.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Parcel layer with owner and mailing address
+        url: "https://www7.co.union.oh.us/unioncountyohio/rest/services/parcelOwnerAcreageNBHDpClass/MapServer/0"
+        how: Owner, parcel class, mailing address, sale date.
+      - name: Current-year parcel layer with the Beacon account number
+        url: "https://www7.co.union.oh.us/unioncountyohio/rest/services/parcel/MapServer/0"
+        how: ACCOUNT (the Beacon key), address, current owner, most recent sale.
+      note: Checked 2026-10-21. The old appraisalresearchcorp.com parcel search sites no longer connect.
+    CLINTON:
+      fips: '39027'
+      auditor:
+        url: "https://clintoncountyauditor.org/Search"
+        template: "https://clintoncountyauditor.org/RealEstate/Default/Lookup?number={apn_digits}"
+        template_status: county_published
+        how: 15-digit parcel number with no dashes (010-02-03-03-0000-00 becomes 010020303000000); the link strips the dashes for you. Opens in a browser.
+        note: The county GIS layer publishes this exact link for every parcel (field AudWeb). The page returns 403 to scripts (Azure firewall).
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Clinton has about 42,000.
+      recorder:
+        url: "https://ohclinton.fidlar.com/OHClinton/AvaWeb/#!/search"
+        how: Free index search (Fidlar AVA). Images or prints may cost a fee.
+      probate:
+        url: "https://www.clintoncountycourts.org/recordSearch.php?k=searchForm1403"
+        how: Accept the agreement, then search by name.
+      clerk:
+        url: "https://www.clintoncountycourts.org/recordSearch.php?k=searchForm1404"
+        how: Common Pleas civil and foreclosure. Clinton County Municipal Court has no online case search.
+      gis:
+        url: "https://clintoncountygis.maps.arcgis.com/apps/webappviewer/index.html?id=27c2559c95e34c3792d4ec9270a696f1"
+      code_enforcement:
+        url: "https://wilmingtonohio.gov/departments/code-enforcement/"
+        how: 'City of Wilmington Code Enforcement. Building and zoning: https://wilmingtonohio.gov/departments/building-zoning/. No rental registry.'
+      sheriff_sale:
+        url: "https://clinton.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Auditor property data downloads
+        url: "https://clintoncountyauditor.org/property-data-download"
+        how: Free PublicRecordsXML.zip and GISExtract.zip.
+      - name: County parcel layer with owner and mailing address
+        url: "https://services1.arcgis.com/tAhcHWpOD9ygNPbJ/arcgis/rest/services/cntyparcelsRealPropData_gdb/FeatureServer/0"
+        how: Owner and taxpayer mailing addresses, land use, deed, sale date and price, and the auditor link (AudWeb). The best owner source for Clinton.
+      note: Checked 2026-10-21.
+    FAYETTE:
+      fips: '39047'
+      auditor:
+        url: "https://www.fayettecountyauditor.org/Search"
+        template_status: none
+        how: Search by parcel number (format 010-016-0-00-001-00) or owner. The search is sometimes blocked even in a browser. Parcel pages use an internal Property_ID, e.g. https://www.fayettecountyauditor.org/RealEstate/Summary?Property_ID=10001; get it from the bulk extract or the statewide parcel layer.
+        note: ISSG site behind an Azure firewall. /Parcel?Parcel= returns 404.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Fayette has about 29,000. The auditor's bulk extract has no rental file.
+      recorder:
+        url: "https://countyfusion8.govos.com/countyweb/loginDisplay.action?countyname=FayetteOH"
+        how: CountyFusion. A free guest login gives a name index search; copies cost a fee.
+      probate:
+        url: "https://courts.fayette-co-oh.com/"
+        how: 'Common Pleas and Probate share this record search (captcha). Records before 2001: https://www.fayette-co-oh.com/367/Record-Search-Prior-to-2001'
+      clerk:
+        url: "https://courts.fayette-co-oh.com/"
+        how: 'Common Pleas civil and foreclosure. Evictions: Washington Court House Municipal Court, https://caselook.cityofwchmunicipalcourt.com/search/2420'
+      gis:
+        url: "https://fayettegis.maps.arcgis.com/apps/webappviewer/index.html?id=5282cde4ca26448ba736c91e5fcd6c6c"
+      sheriff_sale:
+        url: "https://fayette.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Auditor public records extract (40 MB ZIP)
+        url: "https://www.fayettecountyauditor.org/api/Document/PublicRecordsRequest.zip"
+        how: 49 XML files. Parcel.xml has owner and taxpayer mailing addresses, Property_ID, and flags for foreclosure, sheriff sale and bankruptcy. Also a delinquent list. Listed at https://www.fayettecountyauditor.org/data-download
+      note: Checked 2026-10-21.
+    SHELBY:
+      fips: '39149'
+      auditor:
+        url: "https://realestate.shelbycountyauditors.com/Search"
+        template_status: none
+        how: Search by parcel number (format 01-2602278.012) or owner. Parcel pages use an internal Property_ID (e.g. https://realestate.shelbycountyauditors.com/RealEstate/Summary?Property_ID=10038); get it from the bulk extract or the statewide parcel layer.
+        note: ISSG site; parcel pages and search returned 403 to scripts and to a headless browser. Do not use shelbycountyauditors.com without the realestate. prefix (certificate error).
+      rental_registration:
+        name: City of Sidney rental registration (no public search)
+        url: "https://www.sidneyoh.com/503/Housing-Programs"
+        available: false
+        includes_phone: null
+        how: 'No county registry: Shelby (about 48,000 people) is under the 200,000-person line in ORC 5323. The City of Sidney runs a free Residential Rental Registration (paper or email form to Community Development). There is no online lookup; ask the city by public-records request.'
+      recorder:
+        url: "https://countyfusion13.govos.com/countyweb/loginDisplay.action?countyname=ShelbyOH"
+        how: CountyFusion. A free guest login gives an index search; images and copies cost a fee.
+      probate:
+        url: "https://search.shelbyco.net/eservices/"
+        how: Probate shares the county's CourtView system with the clerk (captcha on entry).
+      clerk:
+        url: "https://search.shelbyco.net/eservices/"
+        how: Common Pleas and Sidney Municipal Court (evictions) share this case search (captcha on entry).
+      gis:
+        url: "https://experience.arcgis.com/experience/42818c03ae384edc91ab658faf2664e0/"
+      city_rental:
+        url: "https://www.sidneyoh.com/503/Housing-Programs"
+        how: 'City of Sidney Residential Rental Registration (free; paper or email form). Announcement: https://www.sidneyoh.com/CivicAlerts.aspx?AID=670'
+      code_enforcement:
+        url: "https://epl.sidneyoh.us/energov_prod/selfservice"
+        how: City of Sidney permits and code self-service portal.
+      sheriff_sale:
+        url: "https://shelby.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Auditor extract (100 MB ZIP)
+        url: "https://shelby-auditor-public.issg.io/api/Document/ExtractXML.zip"
+        how: 57 XML files. Parcel.xml has owner and taxpayer mailing addresses, Property_ID, and foreclosure, sheriff-sale and bankruptcy flags; also a delinquent list. Listed at https://realestate.shelbycountyauditors.com/property-data-downloads
+      note: Checked 2026-10-21.
+    FRANKLIN:
+      fips: '39049'
+      auditor:
+        url: "https://property.franklincountyauditor.com/_web/search/commonsearch.aspx?mode=parid"
+        template: "https://audr-apps.franklincountyohio.gov/redir/Link/Parcel/{apn}"
+        template_status: tested
+        how: Works with 010-042534-00, 010-042534 or 01004253400. The page shows the owner and a 'Rental Registration Yes/No' flag.
+        note: "Tested 2026-10-21: 010-042534-00 = owner 110 COMMONS LLC. Direct form: https://property.franklincountyauditor.com/_web/Datalets/Datalet.aspx?mode=profileall&UseSearch=no&pin={apn_digits} (needs all 11 digits)."
+      rental_registration:
+        url: "https://property.franklincountyauditor.com/_web/search/commonsearch.aspx?mode=parid"
+        template: "https://property.franklincountyauditor.com/_web/Datalets/Datalet.aspx?mode=rental_app&UseSearch=no&pin={apn_digits}"
+        template_status: tested
+        available: true
+        includes_phone: true
+        how: 'The parcel''s Rental Contact tab: owner, manager or business, title, address and phone. Blank when the owner has not registered.'
+        note: 'Tested 2026-10-21 on 01004253400: GEORGE YPSILANTIS, PELLA COMPANY, PROPERTY MANAGER, phone on file. Questions: 614-525-4663, RentalRegistration@franklincountyohio.gov.'
+      recorder:
+        url: "https://franklin.oh.publicsearch.us/"
+        how: Free search with document images. You can type the parcel number into the quick search.
+      probate:
+        url: "https://probate.franklincountyohio.gov/Record-Search/General-Case-Search"
+        how: 'General case search (opens in a browser). Name index that also works directly: https://probatesearch.franklincountyohio.gov/netdata/PBCNameInx.ndm/input?string=LASTNAME'
+      clerk:
+        url: "https://fcdcfcjs.co.franklin.oh.us/CaseInformationOnline/"
+        how: 'Common Pleas civil and foreclosure. Evictions, small claims and the housing-code court: Franklin County Municipal Court, https://www.fcmcclerk.com/case/search'
+      gis:
+        url: "https://gis.franklincountyohio.gov/parcelviewer/"
+      code_enforcement:
+        url: "https://portal.columbus.gov/permits/Cap/CapHome.aspx?module=Enforcement"
+        how: 'City of Columbus code-enforcement cases, searchable by address. Zoning map: https://gis.columbus.gov/zoning/'
+      sheriff_sale:
+        url: "https://franklin.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Auditor open file directory
+        url: "https://apps.franklincountyauditor.com/"
+        how: Parcel CSVs by year (/Parcel_CSV/), monthly appraisal and tax extracts (/Outside_User_Files/), GIS shapefiles.
+      - name: GIS data extractor
+        url: "https://gis.franklincountyohio.gov/dataextract/"
+        how: Download parcels for an area.
+      note: 'Checked 2026-10-21. The most automatable county. Treasurer balances: https://treapropsearch.franklincountyohio.gov/Details.aspx?district=010&parcel=042534&ext=00 (the parcel number split in three parts).'
+    WARREN:
+      fips: '39165'
+      auditor:
+        url: "https://auditor.warrencountyohio.gov/propertysearch/Search/Parcel"
+        template: "https://auditor.warrencountyohio.gov/propertysearch/Search/PerformParcelSearch?ParcelNumber={apn_digits}&TaxYearId=59ace439-808b-4eb4-9f96-bf15dcbe3023"
+        template_status: tested
+        how: 10-digit parcel number (16-36-107-001 becomes 1636107001). The tax-year code in the link may change next tax year; if the page says 0 results, use the search page.
+        note: 'Tested 2026-10-21: 1636107001 = 5037 FIELDHURST CT MASON. Keep the path lowercase (/propertysearch/); the capitalized form returns 403. Do not use wcauditor.org (now points to an unrelated site).'
+      rental_registration:
+        name: Warren County rental registration form (no online lookup)
+        url: "https://auditor.warrencountyohio.gov/Documents/RealEstateForms/Rental_Property_Reg.pdf"
+        available: false
+        includes_phone: null
+        how: Warren is over 200,000 people, so owners must register, but there is no online lookup. Ask the auditor for the filing by public-records request. It has the owner or corporate officer's name, phone and address, and an Ohio agent for out-of-state owners.
+      recorder:
+        url: "https://ohwarren.fidlar.com/OHWarren/AvaWeb/"
+        how: Free index search by name or 10-digit parcel number (Fidlar AVA). Laredo is the paid option for full images.
+      probate:
+        url: "http://probate.co.warren.oh.us/search.php"
+        how: Search one field at a time (name or case number).
+      clerk:
+        url: "https://clerkofcourt.co.warren.oh.us/BenchmarkCP/Home.aspx/Search"
+        how: 'Common Pleas civil and foreclosure. Evictions outside the cities: Warren County Court, https://countycourt.co.warren.oh.us/BenchmarkCounty/Home.aspx/Search. City courts: Lebanon https://court.lebanonohio.gov/, Mason http://masoncourtoh.gov/.'
+      gis:
+        url: "https://maps.warrencountyohio.gov/wcgis/webmap/index.html?config=auditor"
+      code_enforcement:
+        url: "https://www.warrencountyohio.gov/BldgInsp/Search/PermitSearch/Index"
+        how: County building permit search.
+      sheriff_sale:
+        url: "https://warren.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Auditor public data export
+        url: "https://auditor.warrencountyohio.gov/propertysearch/PublicDataExport/Index"
+        how: Free downloads.
+      note: Checked 2026-10-21.
+    PREBLE:
+      fips: '39135'
+      auditor:
+        url: "https://beacon.schneidercorp.com/Application.aspx?AppID=1125&LayerID=28338&PageTypeID=2&PageID=11805"
+        template_status: none
+        how: 'Search in a browser. Parcel numbers are 18 characters starting with a letter (A01710100000002001). Likely parcel link, not confirmed: https://beacon.schneidercorp.com/Application.aspx?AppID=1125&LayerID=28338&PageTypeID=4&PageID=11807&KeyValue=A01710100000002001'
+        note: Beacon sits behind a Cloudflare challenge that no automated browser here could pass. Use the statewide parcel layer for owner mailing addresses.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Preble has about 41,000. The auditor posts the state form (DTE 100R) anyway; ask the auditor whether any filings exist.
+      recorder:
+        url: "https://countyfusion2.govos.com/countyweb/loginDisplay.action?countyname=PrebleOH"
+        how: CountyFusion. A free guest login gives an index search; copies cost a fee.
+      probate:
+        url: "http://app.prebleohiojuvenileprobate.org/recordSearch.php?k=searchForm6803"
+      clerk:
+        url: "https://pa.preblecountyohio.net/eservices/"
+        how: 'Common Pleas records. Evictions: Eaton Municipal Court, https://eatonmunicipalcourtohio.gov/recordSearch.php?k=searchForm6820'
+      gis:
+        url: "https://beacon.schneidercorp.com/Application.aspx?AppID=1125&LayerID=28338&PageTypeID=1&PageID=11804"
+      sheriff_sale:
+        url: "https://preble.sheriffsaleauction.ohio.gov/"
+      note: Checked 2026-10-21. prebco.org sometimes drops connections; retry.
+    AUGLAIZE:
+      fips: '39011'
+      auditor:
+        url: "https://auditoraccess.auglaizecounty.org/search/commonsearch.aspx?mode=realprop"
+        template: "https://auditoraccess.auglaizecounty.org/Datalets/Datalet.aspx?UseSearch=no&pin={apn_nodash}"
+        template_status: tested
+        how: A letter plus 10 digits, e.g. A0305104700. The link skips the search disclaimer.
+        note: 'Tested 2026-10-21: A0305104700 = 19207 CENTER ST, owner BRUNS ANN E, land use 401 apartments 4-19 units.'
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Auglaize has about 46,000.
+      recorder:
+        url: "https://countyfusion9.govos.com/countyweb/loginDisplay.action?countyname=AuglaizeOH"
+        how: CountyFusion with a free guest login.
+      probate:
+        url: "https://dockets.auglaizecounty.org/eservicesJVPR/"
+        how: Probate CourtView. Images are online only from July 1, 2009.
+      clerk:
+        url: "https://dockets.auglaizecounty.org/eservicesCRTV/"
+        how: 'Common Pleas. Evictions: Auglaize County Municipal Court, https://dockets.auglaizecounty.org/eservicesMUNI/'
+      gis:
+        url: "https://gis.auglaizecounty.org/main/"
+      delinquent_tax:
+        url: "https://www2.auglaizecounty.org/elected-officials/treasurer/notice-delinquency"
+        how: 'Treasurer delinquency notice. Sheriff''s sales: https://www2.auglaizecounty.org/elected-officials/sheriff/sheriffs-sales'
+      sheriff_sale:
+        url: "https://auglaize.sheriffsaleauction.ohio.gov/"
+      note: Checked 2026-10-21. Use www2.auglaizecounty.org for the county site; www and the bare domain fail.
+    DARKE:
+      fips: '39037'
+      auditor:
+        url: "https://darkecountyrealestate.org/"
+        template_status: none
+        how: 'Search in a browser. Likely parcel link, not confirmed: https://darkecountyrealestate.org/Parcel?Parcel=A01-0-409-04-00-00-20100 (dashed parcel number).'
+        note: The whole site sits behind a Cloudflare challenge. Use the statewide parcel layer for owner mailing addresses.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Darke has about 51,000. Ask the auditor (937-547-7310) if you need more.
+      recorder:
+        url: "https://rep2laredo.fidlar.com/OHDarke/AvaWeb/"
+        how: Free index search of land records from May 1996 (Fidlar AVA). A free Property Fraud Alert is also offered.
+      probate:
+        url: "https://www.darkeprobatejuvenile.org/recordSearch.php?k=searchForm1903"
+      clerk:
+        url: "http://70.62.18.22/eservices/home.page.2"
+        how: 'Common Pleas and Darke County Municipal Court (evictions), linked from https://darkecourts.com/. Eviction information: https://darkecourts.com/evictions/'
+      code_enforcement:
+        url: "https://darkecounty_permit.portal.iworq.net/portalhome/darkecounty_permit"
+        how: County building permit portal (opens in a browser).
+      sheriff_sale:
+        url: "https://darke.sheriffsaleauction.ohio.gov/"
+      note: Checked 2026-10-21. No county GIS viewer was found (only PDF township maps on https://www.mydarkecounty.com/zoning).
+    DELAWARE:
+      fips: '39041'
+      auditor:
+        url: "https://auditor.delco-gis.org/"
+        template: "https://auditor.delco-gis.org/?parcelid={apn_digits}"
+        template_status: tested
+        how: 14-digit parcel number (519-420-03-001-000 becomes 51942003001000). It may list more than one match; the exact parcel is first.
+        note: 'Tested 2026-10-21 in a headless browser: 51942003001000 = M & O FAMILY PROPERTIES LLC. The old Manatron link still loads but shows only sketches and photos.'
+      rental_registration:
+        url: "https://co.delaware.oh.us/rental/search.htm"
+        available: true
+        includes_phone: false
+        how: 'Free search by street or city, no login. Full lists for each tax district: https://co.delaware.oh.us/rental/reports.htm (parcel, address, units, average rent, contact name and address; no phone).'
+      recorder:
+        url: "https://delaware.dts-central-oh.com/PaxWorld/"
+        how: Free document search, with free AlertMe notices.
+      probate:
+        url: "https://court.co.delaware.oh.us/eservices/home.page.2"
+        how: Covers recent probate dockets.
+      clerk:
+        url: "https://court.co.delaware.oh.us/eservices/home.page"
+        how: 'Common Pleas. Pending civil filings: https://clerkofcourts.co.delaware.oh.us/pending-civil-filings/. Evictions: Delaware Municipal Court, https://connect.municipalcourt.org/AWC/court/ (accept the disclaimer).'
+      gis:
+        url: "https://auditor.delco-gis.org/"
+      code_enforcement:
+        url: "https://www.delawareohio.net/government/departments/planning-community-development/code-enforcement"
+        how: City of Delaware code enforcement (no online case lookup; opens in a browser).
+      sheriff_sale:
+        url: "https://delaware.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Rental registration reports (65 tax districts)
+        url: "https://co.delaware.oh.us/rental/reports.htm"
+        how: 'One HTML table per district: every registered rental with units, average rent and contact name and address.'
+      - name: Auditor property information downloads
+        url: "https://auditor.co.delaware.oh.us/propinfo/"
+        how: Property data downloads.
+      note: Checked 2026-10-21. Best county for rental contacts by district.
+    PICKAWAY:
+      fips: '39129'
+      auditor:
+        url: "https://auditor.pickawaycountyohio.gov/"
+        template_status: none
+        how: 'Search in a browser. Likely parcel link, not confirmed: https://auditor.pickawaycountyohio.gov/Parcel?Parcel=A0100010000600 (parcel number without dashes, letter kept).'
+        note: The site sits behind a Cloudflare challenge. Use the statewide parcel layer for owner mailing addresses.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Pickaway has about 58,000. Ask the auditor (740-474-4765) if you need more.
+      recorder:
+        url: "https://countyfusion2.govos.com/countyweb/loginDisplay.action?countyname=PickawayOH"
+        how: CountyFusion with a free guest login. Name index from 1990.
+      probate:
+        url: "https://caselook.pickawaypjcourt.com/search/6503"
+      clerk:
+        url: "https://eservices.pickawaycountycourts.com/eservices/home.page"
+        how: 'Common Pleas. Accept the terms, then a captcha. Evictions: Circleville Municipal Court, https://onlinedocket.circlevillecourt.com/recordSearch.php'
+      gis:
+        url: "https://experience.arcgis.com/experience/af677c91f37b47e8b4bf3668fc48f189"
+        how: Basic parcel search map.
+      code_enforcement:
+        url: "https://circlevilleoh.gov/public-service/code-enforcement/"
+        how: City of Circleville code enforcement (property maintenance and vacant buildings).
+      sheriff_sale:
+        url: "https://pickaway.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Pickaway parcels shapefile
+        url: "https://www.arcgis.com/home/item.html?id=c4f83568145e44ed9f378a59d8b69feb"
+        how: 'Free download used for the auditor''s website. Open data hub: https://pickawayopendata-pickaway-gis.opendata.arcgis.com/'
+      note: Checked 2026-10-21.
+    BUTLER:
+      fips: '39017'
+      auditor:
+        url: "https://propertysearch.bcohio.gov/search/commonsearch.aspx?mode=parid"
+        template: "https://propertysearch.bcohio.gov/Datalets/Datalet.aspx?mode=profileall&UseSearch=no&pin={apn_nodash}&jur=000"
+        template_status: tested
+        how: A letter plus 13 digits with no dashes, e.g. A0200001000004; the link removes dashes for you.
+        note: 'Tested 2026-10-21: A0200001000004 = 12080 LICK RD.'
+      rental_registration:
+        name: Butler County rental registration (no online lookup)
+        url: "https://auditor.bcohio.gov/real_estate/rental_registration/index.php"
+        available: false
+        includes_phone: null
+        how: Butler is over 200,000 people, so owners must register, but there is no online lookup. Ask the Auditor's Real Estate division for the filing (513-887-3154, realestate@bcohio.gov). It has the owner's or agent's name, address and phone.
+      recorder:
+        url: "https://butler.oh.publicsearch.us/"
+        how: 'Free search and viewing. Legacy search 1987 to present: https://recorder.bcohio.gov/search_records/real_estate_1987-present.php'
+      probate:
+        url: "https://probatecourt.bcohio.gov/recordSearch.php?k=searchForm0909"
+        how: Click Continue on the disclaimer, then search estates by name.
+      clerk:
+        url: "https://clerkservices.bcohio.gov/eservices"
+        how: 'Common Pleas civil, foreclosure and judgment liens (from 2000). Evictions: Butler County Area Courts, https://docket.bcohio.gov. Hamilton, Middletown, Fairfield and Oxford municipal courts were not checked.'
+      gis:
+        url: "https://experience.arcgis.com/experience/021981b10d4142429efda3e031944fb0/page/Page?views=Information"
+      code_enforcement:
+        url: "https://www.hamilton-oh.gov/vacant-property-registration"
+        how: City of Hamilton vacant property registration (no rental registry found).
+      sheriff_sale:
+        url: "https://butler.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: County Engineer parcel layer
+        url: "https://gismaps.bceo.org/server/rest/services/Public/ParcelQuery/MapServer/0"
+        how: PIN, owner, location and acres, no login.
+      note: Checked 2026-10-21.
+    HAMILTON:
+      fips: '39061'
+      auditor:
+        url: "https://wedge.hcauditor.org/"
+        template: "https://wedge.hcauditor.org/view/re/{apn_digits}"
+        template_status: tested
+        how: 13-digit parcel number (079-0001-0128-90 becomes 0790001012890). The page shows owner, tax mailing address, last transfer and a 'Rental Registration Yes/No' flag. A 404 means no such parcel.
+        note: 'Tested 2026-10-21. Other tabs: /names, /transfers, /tax_lien, /cagis_map. Search results export to CSV.'
+      rental_registration:
+        url: "https://www.hamiltoncountyauditor.org/tax_rentalregistration.asp"
+        available: true
+        includes_phone: false
+        how: 'Each parcel page shows ''Rental Registration Yes/No''. Free CSV of every registered rental parcel (owner and mailing address, no phone): https://www.hamiltoncountyauditor.org/download/revalue/rentalregistrationexport.csv. For the agent and phone on the filed form, email rental.registration@Auditor.Hamilton-Co.org or call 513-946-4099.'
+        note: CSV was 5.1 MB with 30,754 rows on 2026-10-21. The site is slow at times; retry.
+      recorder:
+        url: "https://acclaim-web.hamiltoncountyohio.gov/AcclaimWebLive"
+        how: 'Free search. Use ''Auditor #'' (the parcel number) to list every deed and mortgage on the parcel.'
+      probate:
+        url: "https://www.probatect.org/court-records/court-record-search"
+        how: Opens in a browser only.
+      clerk:
+        url: "https://www.courtclerk.org/records-search/"
+        how: 'Common Pleas and Hamilton County Municipal Court (evictions), free. Parcel search lists court and foreclosure cases on a parcel: https://www.courtclerk.org/records-search/parcel-id/. Eviction schedules: https://www.courtclerk.org/records-search/eviction-schedule-search/'
+      gis:
+        url: "https://cagis.hamilton-co.org/cagisonline/"
+      code_enforcement:
+        url: "https://data.cincinnati-oh.gov/resource/cncm-znd6.json"
+        how: 'City of Cincinnati code-enforcement cases (open data): complaints, inspections and violations by address. Some cities and townships run their own rental registration.'
+      sheriff_sale:
+        url: "https://hamilton.sheriffsaleauction.ohio.gov/"
+      bulk_data:
+      - name: Rental registration CSV (all registered rental parcels)
+        url: "https://www.hamiltoncountyauditor.org/download/revalue/rentalregistrationexport.csv"
+        how: Owner name and mailing address for about 30,000 rental parcels. The best bulk rental list in the market.
+      note: Checked 2026-10-21.
+    HARDIN:
+      fips: '39065'
+      auditor:
+        url: "http://realestate.co.hardin.oh.us/re-search.php"
+        template: "http://realestate.co.hardin.oh.us/re-chg.php?account={apn_digits}"
+        template_status: tested
+        how: 12-digit parcel number (25-150056.0000 becomes 251500560000). A wrong number still opens a page, with a blank owner.
+        note: Tested 2026-10-21 on three parcels. http only (https times out). The county also links Beacon (App=HardinCountyOH), which is browser only.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: 'No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Hardin has about 30,000. Auditor: 419-674-2239.'
+      recorder:
+        url: "https://countyfusion14.kofiletech.us/countyweb/loginDisplay.action?countyname=HardinOH"
+        how: CountyFusion. Guest login to search the index and view images; printing may cost a fee.
+      probate:
+        url: "http://hardincourts.com:8888/recordSearch"
+        how: Did not answer from here (unusual port). Try it in a browser, or email probate@hardincountyohio.gov.
+      clerk:
+        url: "http://www.hardincourts.com/recordSearch.php?k=searchForm3301"
+        how: 'Common Pleas, free after the disclaimer. Evictions: Hardin County Municipal Court, http://www.hardincourts.com/recordSearch.php?k=searchForm3320'
+      gis:
+        url: "http://www.hcgis.com/"
+        how: Flaky; may forward to the Beacon map, which opens in a browser only.
+      sheriff_sale:
+        url: "https://hardin.sheriffsaleauction.ohio.gov/"
+      note: Checked 2026-10-21.
+    HIGHLAND:
+      fips: '39071'
+      auditor:
+        url: "https://highlandcountyauditor.org/Search"
+        template_status: none
+        how: 'Search in a browser. Likely parcel link, format not confirmed: https://highlandcountyauditor.org/Parcel?Parcel=<parcel number>.'
+        note: Pivot Point site behind Cloudflare.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: 'No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Highland has about 43,000. Auditor: 937-393-1915.'
+      recorder:
+        url: "https://countyfusion7.kofiletech.us/countyweb/login.do?countyname=HighlandOH"
+        how: CountyFusion. Guest login for the index and images.
+      probate:
+        url: "https://highlandjpcourt.com/recordSearch.php?k=searchForm3602"
+      clerk:
+        url: "https://eaccess.hccpc.org/eservices/home.page"
+        how: 'Common Pleas. Evictions in Hillsboro: Hillsboro Municipal Court, https://hillsboromuni.com/search/3620 (accept the disclaimer). The County Court in Greenfield was not checked.'
+      gis:
+        url: "https://hcgisweb.co.highland.oh.us/gisweb/pages/maps/HIGHLAND-COUNTY-GENERAL.aspx"
+      delinquent_tax:
+        url: "https://highlandcountyauditor.org/DelinquencyReport"
+        how: Auditor delinquency report. Browser only; not opened here.
+      sheriff_sale:
+        url: "https://highland.sheriffsaleauction.ohio.gov/"
+      note: Checked 2026-10-21.
+    ALLEN:
+      fips: '39003'
+      auditor:
+        url: "https://beacon.schneidercorp.com/Application.aspx?App=AllenCountyOH&PageType=Search"
+        template_status: none
+        how: Search in a browser (Beacon). The parcel-number format could not be checked.
+        note: Beacon sits behind Cloudflare.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: 'No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Allen has about 102,000. Auditor: 419-223-8520.'
+      recorder:
+        url: "https://recorderexternal.allencountyohio.com/paxworld"
+        how: Needs a free account (sign up on the page).
+      probate:
+        url: "http://courtvweb.allencountyohio.com/eservices/home.page.2"
+      clerk:
+        url: "http://courtvweb.allencountyohio.com/eservices"
+        how: 'Common Pleas. Evictions in Lima: Lima Municipal Court, https://limamunicipalcourt.municipalonlinepayments.com/limamunicipalcourt/court/search'
+      gis:
+        url: "https://beacon.schneidercorp.com/Application.aspx?App=AllenCountyOH&PageType=Map"
+      sheriff_sale:
+        url: "https://allen.sheriffsaleauction.ohio.gov/"
+      note: Checked 2026-10-21.
+    MARION:
+      fips: '39101'
+      auditor:
+        url: "https://propertysearch.marioncountyohio.gov/"
+        template_status: none
+        how: 'Search in a browser. Likely parcel link, format not confirmed: https://propertysearch.marioncountyohio.gov/Parcel?Parcel=<parcel number>.'
+        note: Pivot Point site behind Cloudflare.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Marion has about 65,000.
+      recorder:
+        url: "https://rep3laredo.fidlar.com/OHMarion/AvaWeb/#/search"
+        how: Free index search (Fidlar AVA). Copies are ordered in person or in writing.
+      probate:
+        url: "https://courtrecords.co.marion.oh.us/eservices/home.page.9"
+        how: Linked by the Family Division (which handles probate); not confirmed it includes estates.
+      clerk:
+        url: "https://courtrecords.co.marion.oh.us/eservices"
+        how: 'Common Pleas. Evictions: Marion Municipal Court, https://www.marionmunicipalcourt.org/recordSearch.php?k=searchForm5120'
+      gis:
+        url: "https://propertysearch.marioncountyohio.gov/Map"
+      delinquent_tax:
+        url: "https://propertysearch.marioncountyohio.gov/DelinquencyReport"
+        how: 'Auditor delinquency report. Browser only; not opened here. County land bank: https://landbank.co.marion.oh.us/'
+      sheriff_sale:
+        url: "https://marion.sheriffsaleauction.ohio.gov/"
+      note: Checked 2026-10-21.
+    ROSS:
+      fips: '39141'
+      auditor:
+        url: "https://auditor.rosscountyohio.gov/Search"
+        template_status: none
+        how: 'Search in a browser. Likely parcel link, format not confirmed: https://auditor.rosscountyohio.gov/Parcel?Parcel=<parcel number>. Do not use rosscountyauditor.org (expired).'
+        note: Pivot Point site behind Cloudflare.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: No county rental registry. The Ohio rental-registration law (ORC 5323) only covers counties with more than 200,000 people, and Ross has about 77,000.
+      recorder:
+        url: "https://countyfusion9.kofiletech.us/countyweb/login.do?countyname=RossOH"
+        how: CountyFusion. Guest login for the index and images.
+      probate:
+        url: "https://eaccess.co.ross.oh.us/eservices/"
+        how: Probate and the Clerk share this portal. Works in a browser.
+      clerk:
+        url: "https://eaccess.co.ross.oh.us/eservices/"
+        how: 'Common Pleas civil and foreclosure. Evictions in Chillicothe: https://public.chillicothemunicipalcourt.org/Search'
+      delinquent_tax:
+        url: "https://auditor.rosscountyohio.gov/DelinquencyReport"
+        how: Auditor delinquency report. Browser only; not opened here.
+      sheriff_sale:
+        url: "https://ross.sheriffsaleauction.ohio.gov/"
+      note: Checked 2026-10-21. No public county GIS viewer was found.
+  IN:
+    WAYNE:
+      fips: '18177'
+      auditor:
+        name: Wayne County property record card
+        url: "https://beacon.schneidercorp.com/?site=WayneCountyIN"
+        template: "http://prc.co.wayne.in.us/prc_card_2026/{apn_digits}.pdf"
+        template_status: tested
+        how: Opens the 2026 property record card (PDF). Uses the 18-digit state parcel number (89-16-33-330-610.000-030 becomes 891633330610000030). The year in the link changes each year.
+        note: 'Tested 2026-10-21 (2025 and 2026 cards). Owner and tax mailing address as data: https://gisweb4.co.wayne.in.us/arcgis/rest/services/Property/Parcel_Owner/FeatureServer/0/query?where=PIN%3D%27891633330610000030%27&outFields=*&returnGeometry=false&f=json. Beacon (the search page) is browser only.'
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: Indiana has no county rental registry, and Richmond has none either. Owner and tax mailing address come from the county parcel layer or the record card.
+      recorder:
+        url: "https://www.doxpop.com/prod/in/recorder/"
+        how: Doxpop needs an account; images are paid. Deed book and page numbers are free in the county parcel layer (DEEDNBR).
+      probate:
+        url: "https://public.courts.in.gov/mycase/"
+        how: Indiana MyCase, free. Search Wayne Circuit and Superior courts; estates are case types ES and EU.
+      clerk:
+        url: "https://public.courts.in.gov/mycase/"
+        how: 'Civil, small claims and evictions on MyCase, free. Newer portal: https://publicaccess.courts.in.gov/home/portal'
+      gis:
+        url: "https://wayneco.inframeinc.com/map.html"
+      code_enforcement:
+        url: "https://bsaonline.com/?uid=2676"
+        how: City of Richmond permits and inspections (BS&A). No rental registry.
+      bulk_data:
+      - name: County parcel layer with owner and tax mailing address
+        url: "https://gisweb4.co.wayne.in.us/arcgis/rest/services/Property/Parcel_Owner/FeatureServer/0"
+        how: '35,391 parcels: owner name, site address, tax-bill mailing address, deed numbers, year built, acreage, and links to yearly record cards.'
+      note: Checked 2026-10-21. The old domain co.wayne.in.us times out, but its gisweb4 and prc subdomains work.
+    UNION:
+      fips: '18161'
+      auditor:
+        name: Union County (IN) GIS property search
+        url: "http://union.in.wthgis.com/"
+        template_status: none
+        how: 'Property record cards are in the county GIS. Owner-name search form: http://union.in.wthgis.com/tgis/custom.aspx?DSID=642&RequestType=CustomSearchForm&FormType=BasicParcels'
+        note: '18-digit state parcel number, county code 81 (e.g. 81-08-12-105-021.001-003). No parcel deep-link format found. Assessor: ucassessor@unioncountyin.us, 765-458-5331.'
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: Indiana has no county rental registry, and none was found for Liberty.
+      recorder:
+        url: "http://www.doxpop.com"
+        how: Doxpop. Account required; images are paid.
+      probate:
+        url: "https://public.courts.in.gov/mycase/"
+        how: Indiana MyCase, free. Union Circuit Court handles estates (ES and EU).
+      clerk:
+        url: "https://public.courts.in.gov/mycase/"
+        how: Civil, small claims and evictions on MyCase, free.
+      gis:
+        url: "http://union.in.wthgis.com/"
+      note: 'Checked 2026-10-21. The county site is on in.gov: https://www.in.gov/counties/union/'
+    RANDOLPH:
+      fips: '18135'
+      auditor:
+        name: Randolph County property record (XSoft Engage)
+        url: "https://engage.xsoftinc.com/randolph"
+        template: "https://engage.xsoftinc.com/randolph/map/getparceldetail?parcelId={apn_digits}"
+        template_status: tested
+        how: 18-digit state parcel number, dashed or not (68-02-25-252-059.000-019). Shows owner and mailing address. An error 400 means the parcel is not in the system.
+        note: Tested 2026-10-21 on five parcels.
+      rental_registration:
+        available: false
+        includes_phone: null
+        how: Indiana has no county rental registry, and none was found for Winchester or Union City.
+      recorder:
+        url: "http://www.doxpop.com"
+        how: 'Doxpop (account required; images are paid). Property Watch: https://watch.doxpop.com/property/. Public terminals at the Recorder''s office in Winchester.'
+      probate:
+        url: "https://public.courts.in.gov/mycase/"
+        how: Indiana MyCase, free. Estates are ES and EU.
+      clerk:
+        url: "https://public.courts.in.gov/mycase/"
+        how: 'Civil, small claims and evictions on MyCase, free. Clerk''s evictions page: https://www.in.gov/counties/randolph/departments/clerk/small-claims-evictions/'
+      gis:
+        url: "https://engage.xsoftinc.com/randolph/map"
+      note: Checked 2026-10-21. The easiest Indiana county to automate.

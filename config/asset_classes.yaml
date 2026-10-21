@@ -42,7 +42,7 @@ asset_classes:
       # Brad's sweet spot, monthly rent by bedroom count (0 = studio)
       scale: {0: 800, 1: 1000, 2: 1200, 3: 1500}
       focus_bedrooms: 2
-      margin: 0.15                 # within 15% of the scale = "near"
+      margin: 0.15                 # within 15% of the scale = "in", within 30% = "near"
     visual_check:
       enabled: true
       question: Is it a walk-up? How do residents reach their front doors?

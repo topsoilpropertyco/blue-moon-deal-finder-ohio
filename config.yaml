@@ -61,6 +61,8 @@ crexi:
   # Force a column mapping when auto-mapping guesses wrong.
   # Key = our field name, value = exact Crexi column header.
   column_overrides: {}
+  fuzzy_min_score: 88            # 0-100; how close a column name must be to auto-match
+  units_from_addresses_min: 2    # use 'Number of Addresses' as the unit count only when it is at least this
 
 # Counties the drive-time filter should never keep, whatever the minutes.
 geography:
@@ -75,11 +77,23 @@ drive:
   # Road miles ~ straight-line miles x road_factor; minutes at avg_mph.
   estimate: {road_factor: 1.25, avg_mph: 48}
   batch_size: 25                 # destinations per Routes API request
+  routing_preference: TRAFFIC_UNAWARE   # cheapest Google tier (Essentials)
+  google_max_estimate_ratio: 2.0 # skip Google when the free estimate is over 2x the market's max minutes
+  timeout_seconds: 60
+  max_retries: 4
+
+geocode:
+  # Only for properties without map coordinates. Free US Census geocoder first; Google only if it fails.
+  benchmark: Public_AR_Current
+  census_batch_size: 1000        # Census allows up to 10,000 per batch
+  max_retries: 3
 
 google:
   concurrency: 5
-  street_view: {fov: 80, pitch: 5, size: 640x640, side_offsets_deg: [-35, 35], radius_m: 50}
-  satellite: {zoom: 19, size: 640x640, maptype: satellite}
+  street_view: {fov: 80, pitch: 5, size: 640x640, side_offsets_deg: [-35, 35], radius_m: 50, source: outdoor}
+  satellite: {zoom: 19, size: 640x640, maptype: satellite, marker: true}
+  timeout_seconds: 30
+  max_retries: 3
   # Hard caps per run. A run stops when it hits one.
   max_street_view_images_per_run: 3000
   max_satellite_images_per_run: 1000
@@ -102,6 +116,8 @@ vision:
     model: sonnet
     timeout_seconds: 240
     pause_seconds: 2             # gap between calls, to be gentle on plan limits
+    json_schema: true            # ask Claude Code for validated JSON
+    rate_limit_wait_seconds: 60
   anthropic_api:
     model: claude-sonnet-5-5
     max_tokens: 800
@@ -109,6 +125,13 @@ vision:
   max_calls_per_run: 400
   examples_per_call: 6           # labeled examples from your reviews sent with each call
   weight_vision: 0.8             # final = 80% photo verdict, 20% rules prior
+  images_per_example: 2          # photos sent per labeled example
+  max_consecutive_errors: 3      # stop a run after this many errors in a row
+
+review:
+  spot_check_fraction: 0.05      # share of green/red results also sent to review as spot checks
+  acceptance_min: 0.90           # green must be >= 90% truly target; red >= 90% truly not
+  acceptance_min_reviews: 10     # reviews needed before pass/fail is shown
 
 rent:
   # hud_arcgis = HUD's free public map service (no key)
@@ -116,6 +139,9 @@ rent:
   # hud_api    = HUD USER API (needs HUD_API_TOKEN)
   source: hud_arcgis
   hud_arcgis_url: https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Fair_Market_Rents/FeatureServer/0/query
+  hud_safmr_url: https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/HUD_PDR_Small_Area_Fair_Market_Rents/FeatureServer
+  prefer_small_area: true        # use ZIP-level Small Area FMRs where HUD has them
+  concurrency: 3                 # be polite to HUD
 
 safety:
   confirm_over_properties: 50    # paid runs bigger than this need an explicit OK
@@ -123,3 +149,19 @@ safety:
 scoring:
   base_rate: 0.015               # Blue Moon odds before any evidence
   learn_prior_strength: 30       # pseudo-observations behind each starting weight
+  worn_improvement_ratio: 0.35   # building value under 35% of total = "worn"
+  visual_green_min: 80
+  visual_red_max: 20
+  estimate_weight: 0.5           # estimated sizes count half as much in the score
+  positive_outcomes: [blue_moon, bought]
+
+owners:
+  portfolio_min_properties: 5    # an owner with this many separate sites is a "portfolio" owner
+  institutional_min_properties: 40
+  same_site_meters: 200          # parcels this close count as one site
+  mailing_group_max_names: 50    # a mailing address used by more names than this is a tax service, not an owner
+  free_and_clear_min_years: 10   # no loan on record and owned this long = likely free and clear
+  maturing_soon_months: 18
+  portfolio_exempt_types: [institutional, government]
+  institutional_names: []        # extra big-operator names
+  overrides: {}                  # "EXACT OWNER NAME": owner_type  (fix a wrong guess)
