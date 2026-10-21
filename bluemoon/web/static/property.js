@@ -36,7 +36,7 @@
   const RENT_FIT = {in: ['g', 'Area rents match the scale'], near: ['y', 'Area rents are close to the scale'], out: ['r', 'Area rents are off the scale'], na: ['n', 'No HUD rent for this area']};
   const RENT_SOURCE = {hud_arcgis: 'HUD Fair Market Rents (HUD map service)', hud_file: 'HUD Fair Market Rents (downloaded file)', hud_api: 'HUD Fair Market Rents (HUD API)'};
   const GEOCODE = {source: 'From the Crexi export', exact: 'Exact (Census)', approximate: 'Approximate (Census)', google: 'Google', failed: 'Could not place it'};
-  const SET_ASIDE = {drive_time: 'Too far to drive', year: 'Built too early', size: 'Wrong size', state: 'State not in the buy box', skip_county: 'County on the skip list', property_type: 'Not this kind of property'};
+  const SET_ASIDE = {drive_time: 'Too far to drive', year: 'Built too early', size: 'Wrong size', state: 'State not in the buy box', skip_county: 'County on the skip list', property_type: 'Not this kind of property', manual: 'Set aside by hand'};
 
   let cur = null;   // {id, slug, root, detail, open, seq, busy, mode:{}, kept:Set}
   let seqNo = 0;
@@ -93,7 +93,7 @@
       c.outcomeEarly = Number((d.drill || {}).level || d.level || 1) === 3 || !!(d.outcome && d.outcome.value);
     }
     const early = c.outcomeEarly;
-    root.innerHTML = headerHtml(d) + scoreHtml(d) + (early ? outcomeHtml(d) : '') + contactHtml(d) + whyHtml(d) + photoHtml(d) +
+    root.innerHTML = headerHtml(d) + scoreHtml(d) + buyboxHtml(d) + (early ? outcomeHtml(d) : '') + contactHtml(d) + whyHtml(d) + photoHtml(d) +
       rentHtml(d) + buildingHtml(d) + ownerHtml(d) + linksHtml(d) + (early ? '' : outcomeHtml(d)) + rawHtml(d);
     root.querySelectorAll('details[data-keep]').forEach((el) => { if (c.kept.has(el.getAttribute('data-keep'))) el.open = true; });
     box.scrollTop = opts && opts.keepScroll ? top : 0;
@@ -183,11 +183,14 @@
     const drive = d.drive || {};
     const mins = has(d.drive_minutes) ? fmt.minutes(d.drive_minutes, d.drive_method) + ' from ' + (drive.origin || 'the starting point') : '';
     const pills = [];
-    if (d.in_buybox === false) {
+    if (d.by_hand === 'aside') {
+      pills.push('<span class="pill bad">Set aside by you</span>');
+    } else if (d.in_buybox === false) {
       const why = (d.exclusion_reasons || []).map((r) => SET_ASIDE[r] || r).join(', ');
       pills.push('<span class="pill bad">Set aside' + (why ? ': ' + esc(why) : '') + '</span>');
-    } else if (has(d.rank)) {
-      pills.push('<span class="pill hot">Rank ' + fmt.num(d.rank) + '</span>');
+    } else {
+      if (d.by_hand === 'added') pills.push('<span class="pill good">In the buy box: added by you</span>');
+      if (has(d.rank)) pills.push('<span class="pill hot">Rank ' + fmt.num(d.rank) + '</span>');
     }
     return '<div class="dhead"><div><div class="eyebrow">' + esc([city, mins].filter(Boolean).join(' · ')) + '</div>' +
       '<h1 style="font-size:28px;margin-top:2px">' + esc(addr) + '</h1>' +
@@ -200,11 +203,99 @@
       text += ' Based on ' + fmt.num(d.coverage_have || 0) + ' of ' + fmt.num(d.coverage_total) + ' signals.';
     }
     if (!has(d.score)) text = 'Not scored yet. The Score step (free, on the Run screen) fills this in.';
-    const ex = (d.buybox && d.buybox.exclusions) || [];
-    const exHtml = ex.map((e) => '<p class="p-flag">Set aside: <b>' + esc(e.label || e.reason) + '</b>' +
-      (e.detail ? '. ' + esc(e.detail) : '') + '</p>').join('');
     return '<div class="score">' + ui.moon(d.score, 64) + '<div><div class="big num">' + esc(fmt.pct(d.score)) + '</div>' +
-      '<p>' + esc(text) + '</p></div></div>' + exHtml;
+      '<p>' + esc(text) + '</p></div></div>';
+  }
+
+  /* ---------- buy box: what the rules say, and decisions made by hand ---------- */
+
+  /** Who decided, readably: 'on the Mac', 'by seth@…', 'by the team'. */
+  function byText(who) {
+    const w = String(who || '').trim();
+    if (!w || w === 'unknown') return '';
+    return {'this Mac': 'on the Mac', open: 'by you', team: 'by the team', cli: 'from the command line'}[w] || 'by ' + w;
+  }
+
+  function decisionText(reason, decision, label) {
+    const rule = '“' + (label || reason) + '”';
+    if (decision === 'include') return reason === '*' ? 'Added to the buy box' : rule + ' no longer counts';
+    if (decision === 'exclude') return 'Set aside by hand';
+    if (decision === 'keep') return 'Kept set aside for ' + rule;
+    if (decision === 'cleared') return 'Back to the rules';
+    return String(decision || '');
+  }
+
+  function whenText(by, at) {
+    return [byText(by), at ? fmt.date(at) : ''].filter(Boolean).join(', ');
+  }
+
+  function buyboxHtml(d) {
+    const bb = d.buybox;
+    if (!bb || typeof bb !== 'object') return '';
+    const rules = Array.isArray(bb.rules) ? bb.rules : [];
+    const decisions = Array.isArray(bb.decisions) ? bb.decisions : [];
+    const history = Array.isArray(bb.history) ? bb.history : [];
+    const inBox = bb.in_buybox !== false;
+    const failing = rules.filter((r) => !r.waived);
+    let verdict;
+    let more = '';
+    if (bb.manual === 'exclude') {
+      verdict = 'Set aside by you.';
+      more = rules.length ? 'The rules also set it aside.' : 'By the rules it would be in the buy box.';
+    } else if (bb.manual === 'include') {
+      verdict = 'In the buy box: added by you.';
+      more = rules.length ? 'By the rules it would be set aside.' : 'The rules agree.';
+    } else if (bb.manual === 'waived') {
+      verdict = inBox ? 'In the buy box: you said the rules it fails don’t count.' : 'Set aside by the rules.';
+      if (!inBox) more = 'You said some rules don’t count here, but ' + (failing.length === 1 ? 'one still does.' : 'others still do.');
+    } else {
+      verdict = inBox ? 'In the buy box: it fits every rule.' : 'Set aside by the rules.';
+    }
+    const list = rules.length ? '<ul class="bb-rules">' + rules.map((r) =>
+      '<li class="' + (r.waived ? 'off' : '') + '"><span class="mk" aria-hidden="true">' + (r.waived ? '–' : '✕') + '</span><div><b>' +
+      esc(r.label || r.reason) + '</b>' + (r.detail ? ' <span class="d">' + esc(r.detail) + '</span>' : '') +
+      (r.waived ? '<span class="pill">doesn’t count: your choice</span>' : '') +
+      (r.kept ? '<span class="pill">kept set aside by you</span>' : '') + '</div></li>').join('') + '</ul>'
+      : '<ul class="bb-rules"><li class="ok"><span class="mk" aria-hidden="true">✓</span><div>Passes every buy-box rule' +
+        (bb.size_detail ? ' <span class="d">(' + esc(bb.size_detail) + (bb.size_estimated ? ', estimated' : '') + ')</span>' : '') + '.</div></li></ul>';
+    const groups = Array.isArray(bb.groups) ? bb.groups : [];
+    const groupLabel = {};
+    groups.forEach((g) => {     // 'Set aside by hand: Set aside by hand' -> 'Set aside by hand'
+      const parts = String(g.label || g.key).split(': ');
+      g.label = parts.length === 2 && parts[0] === parts[1] ? parts[0] : g.label;
+      groupLabel[g.key] = g.label;
+    });
+    const decided = decisions.length ? '<div class="bb-decided">' + decisions.map((x) => {
+      const bits = [decisionText(x.reason, x.decision, x.reason_label), whenText(x.decided_by, x.decided_at)];
+      if (x.bucket && groupLabel[x.bucket]) bits.push('decided for the group ' + groupLabel[x.bucket]);
+      return '<span>' + esc(bits.filter(Boolean).join(' · ')) + '</span>' +
+        (x.note ? '<p class="note">Note: ' + esc(x.note) + '</p>' : '') +
+        (x.detail_at_decision && x.detail_at_decision !== x.detail_now ? '<p class="note">Then: ' + esc(x.detail_at_decision) + '</p>' : '');
+    }).join('') + '</div>' : '';
+    const buttons = [];
+    if (!inBox) buttons.push('<button type="button" class="btn small primary" data-act="buybox" data-decision="include">Add to buy box</button>');
+    else buttons.push('<button type="button" class="btn small" data-act="buybox" data-decision="exclude">Set aside</button>');
+    if (decisions.length) {
+      buttons.push('<button type="button" class="btn small" data-act="buybox" data-decision="rules">Undo: follow the rules</button>');
+    }
+    const groupLinks = groups.length ? '<div class="bb-groups"><span>See others like it:</span>' +
+      groups.map((g) => '<button type="button" class="linkbtn" data-act="bb-review" data-bucket="' + esc(g.key) + '" title="Review every property in this group">' +
+        esc(g.label) + '</button>').join('') + '</div>' : '';
+    const hist = history.length ? '<details class="p-more" data-keep="bbhist"><summary>History (' + (history.length >= 20 ? 'the last 20' : fmt.num(history.length)) + ')</summary>' +
+      '<ul class="bb-hist">' + history.map((h) => {
+        let what = decisionText(h.reason, h.decision, h.reason_label);
+        if (h.decision === 'cleared' && h.previous) what += ' (was: ' + decisionText(h.reason, h.previous, h.reason_label).toLowerCase() + ')';
+        const note = h.note && /^Undo of /.test(h.note) ? 'an Undo' : h.note;   // undo notes name a batch id
+        return '<li><span>' + esc(what) + '</span><span class="when">' + esc(whenText(h.actor, h.created_at)) +
+          (note ? ' · ' + esc(note) : '') + '</span></li>';
+      }).join('') + '</ul></details>' : '';
+    const help = inBox ? 'Set aside means no new photos and no Crexi credits for it, whatever the rules say.'
+      : 'Add to buy box means it gets photos, photo checks and Crexi credits when those steps run.';
+    return section('Buy box',
+      '<p class="bb-verdict ' + (inBox ? 'in' : 'out') + '">' + esc(verdict) + (more ? ' <span class="muted">' + esc(more) + '</span>' : '') + '</p>' +
+      list + decided + groupLinks +
+      '<div class="p-actions">' + buttons.join('') + '</div><p class="note" style="margin:0">' + esc(help) + '</p>' + hist,
+      ' data-part="buybox"');
   }
 
   /* ---------- owner contact (the DRILL) ---------- */
@@ -984,6 +1075,12 @@
       levelAction(b.getAttribute('data-action'));
     } else if (act === 'review') {
       rescoringWrite(BM.m('/properties/' + cur.id + '/review'), {label: b.getAttribute('data-label')});
+    } else if (act === 'buybox') {
+      const decision = b.getAttribute('data-decision');
+      if (['include', 'exclude', 'rules'].includes(decision)) rescoringWrite(BM.m('/properties/' + cur.id + '/buybox'), {decision});
+    } else if (act === 'bb-review') {
+      const key = b.getAttribute('data-bucket');
+      if (/^[a-z_]+:[a-z0-9-]+$/.test(key || '')) BM.go('deals', ['review', key]);
     } else if (act === 'outcome') {
       const key = b.getAttribute('data-outcome');
       const current = (cur.detail.outcome || {}).value;

@@ -398,6 +398,18 @@ td.c,th.c{text-align:right}
 .card .meta .chs{margin-left:6px}
 .card.out{opacity:.85}
 .setaside{display:inline-block;margin-top:3px;font-size:11.5px;color:var(--bad)}
+.setaside.was{color:var(--muted)}
+/* buy-box buttons on a row; on phones they sit under the card (a button can't hold a button) */
+.row-acts{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;margin-top:6px;font-size:12px}
+.row-acts .sep{color:var(--faint)}
+.linkbtn{border:0;background:none;padding:2px 4px;color:var(--accent);font-weight:600;font-size:12.5px;border-radius:6px}
+.linkbtn:hover{text-decoration:underline}
+.card-row{display:flex;flex-direction:column;min-width:0}
+.card-row.has-acts{background:var(--surface);border:1px solid var(--line);border-radius:14px}
+.card-row.has-acts > .card{border:0;padding-bottom:8px}
+.card-row.has-acts:has(> .card.sel){border-color:var(--accent)}
+.card-acts{padding:0 14px 12px 80px}
+.card-acts .row-acts{margin-top:0}
 @media (max-width:760px){
   .deals-chips{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin-inline:-16px;padding-inline:16px;padding-bottom:2px}
   .deals-chips::-webkit-scrollbar{display:none}
@@ -471,6 +483,27 @@ details.p-more[open] > summary{margin-bottom:8px}
 .p-busy{cursor:progress}
 .p-form[data-mode]:not([data-mode="found"]) .found-only{display:none}
 
+/* drawer: the buy-box section */
+.bb-verdict{margin:0;font-weight:600}
+.bb-verdict.out{color:var(--bad)}
+.bb-verdict.in{color:var(--good)}
+.bb-rules{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.bb-rules li{display:grid;grid-template-columns:18px minmax(0,1fr);gap:8px;font-size:13px}
+.bb-rules .mk{color:var(--bad);font-weight:700;text-align:center}
+.bb-rules li.ok .mk{color:var(--good)}
+.bb-rules li.off .mk{color:var(--faint)}
+.bb-rules li.off b{text-decoration:line-through;text-decoration-color:var(--faint)}
+.bb-rules .pill{margin-left:6px}
+.bb-rules span.d{color:var(--muted)}
+.bb-decided{display:flex;flex-direction:column;gap:4px;font-size:13px;margin:0;padding:10px 12px;border-radius:10px;background:var(--sunk)}
+.bb-decided .note{margin:0}
+.bb-groups{margin:0;font-size:12.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:2px 14px;align-items:center}
+.bb-groups span{flex-basis:100%}
+.bb-groups .linkbtn{padding:2px 0;text-align:left}
+.bb-hist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:12.5px}
+.bb-hist li{display:flex;flex-direction:column;gap:1px}
+.bb-hist .when{color:var(--faint)}
+
 /* ---------- phones: comfortable tap targets ---------- */
 @media (max-width:760px),(pointer:coarse){
   .chip,.btn,.seg button,.select,.search,.tab,.market-select,.steps button,.links a,.choice,.p-radio span,.field input,.field select,.input{min-height:40px}
@@ -478,4 +511,6 @@ details.p-more[open] > summary{margin-bottom:8px}
   .chip,.links a,.seg button,.p-radio span{display:inline-flex;align-items:center}
   .x{width:40px;height:40px}
   .p-siblings button{min-height:36px}
+  .linkbtn{min-height:40px;padding-inline:8px}
+  .card-acts{padding-left:14px}
 }

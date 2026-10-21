@@ -176,22 +176,87 @@ details.im-more[open] > summary{margin-bottom:6px}
   .ru-boxhead .x{width:40px;height:40px}
 }
 
-/* Deals: why only some properties are in the buy box */
+/* Deals: why only some properties are in the buy box, each reason with its groups (Review / Decide) */
 .why{display:block;margin:14px 0 4px;padding:14px 18px}
-.why summary{cursor:pointer;list-style:none;font-size:15px;color:var(--muted)}
+.why > summary{cursor:pointer;list-style:none;font-size:15px;color:var(--muted)}
 .why summary::-webkit-details-marker{display:none}
-.why summary b{color:var(--ink)}
+.why > summary b{color:var(--ink)}
 .why-toggle{color:var(--accent);font-weight:600;margin-left:4px}
 .why[open] .why-toggle{display:none}
-.why-list{list-style:none;padding:0;margin:14px 0 8px;display:grid;gap:8px}
-.why-list li{display:grid;grid-template-columns:minmax(150px,220px) 1fr 64px minmax(150px,200px);align-items:center;gap:12px}
+.why-wrap,.review-wrap{scroll-margin-top:120px}
+.why-list{list-style:none;padding:0;margin:14px 0 8px;display:flex;flex-direction:column}
+.why-r{border-top:1px solid var(--line);padding:4px 0}
+.why-r:first-child{border-top:0}
+.why-rs{display:grid;grid-template-columns:minmax(150px,220px) minmax(0,1fr) 64px minmax(150px,200px);align-items:center;gap:4px 12px;cursor:pointer;list-style:none;padding:8px 0}
 .why-l{font-weight:600}
 .why-bar{height:8px;border-radius:6px;background:var(--sunk);overflow:hidden}
 .why-bar i{display:block;height:100%;background:var(--na)}
 .why-n{text-align:right;font-weight:600}
+.why-ex{grid-column:1 / -1;font-size:13px;color:var(--muted);max-width:92ch}
+.why-st{font-size:12.5px;color:var(--accent);font-weight:600}
+.why-rs .why-st{grid-column:1 / -1}
+.why-more{grid-column:1 / -1;justify-self:start;display:inline-flex;align-items:center;gap:6px;color:var(--accent);font-weight:600;font-size:13px}
+.why-more::before{content:"\25B8";font-size:11px;transition:transform .15s}
+.why-more .hide{display:none}
+details[open] > .why-rs .why-more::before{transform:rotate(90deg)}
+details[open] > .why-rs .why-more .show{display:none}
+details[open] > .why-rs .why-more .hide{display:inline}
+.why-gs{list-style:none;margin:2px 0 10px 6px;padding:0 0 0 14px;border-left:2px solid var(--line);display:flex;flex-direction:column}
+.why-g{display:grid;grid-template-columns:minmax(0,1fr) 64px minmax(150px,190px) auto;align-items:center;gap:4px 12px;padding:8px 0;border-bottom:1px solid var(--line)}
+.why-g:last-child{border-bottom:0}
+.why-gl{display:flex;flex-direction:column;gap:1px;min-width:0}
+.why-gl b{font-weight:600}
+.why-gn{text-align:right;font-weight:600}
+.why-gb{display:flex;gap:6px;justify-content:flex-end}
+.why-g > .dec-sheet{grid-column:1 / -1}
 .why .note{margin:6px 0 0}
 .why-acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
-@media (max-width:760px){.why-list li{grid-template-columns:1fr auto}.why-bar{grid-column:1 / -1;order:3}.why-only{grid-column:1 / -1;order:4}}
+@media (max-width:760px){
+  .why{padding:12px 14px}
+  .why-rs{grid-template-columns:minmax(0,1fr) auto}
+  .why-bar{grid-column:1 / -1;order:3}
+  .why-only{grid-column:1 / -1;order:4}
+  .why-ex{order:5}
+  .why-rs .why-st{order:6}
+  .why-more{order:7}
+  .why-gs{margin-left:0;padding-left:10px}
+  .why-g{grid-template-columns:minmax(0,1fr) auto}
+  .why-go{grid-column:1 / -1}
+  .why-gb{grid-column:1 / -1;justify-content:stretch}
+  .why-gb .btn{flex:1 1 0}
+}
+
+/* Decide: the choices for one group (in the Why? panel and the Review header) */
+.dec-sheet{margin:6px 0 2px;padding:12px 14px;border:1px solid var(--accent);border-radius:12px;background:var(--surface);display:flex;flex-direction:column;gap:10px;min-width:0}
+.dec-sheet.busy{opacity:.7;cursor:progress}
+.dec-q{margin:0;font-weight:600}
+.dec-opts{display:flex;flex-direction:column;gap:8px}
+.dec-opt{display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;text-align:left;border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:10px 12px;color:var(--ink)}
+.dec-opt:hover{border-color:var(--faint)}
+.dec-opt b{font-weight:600}
+.dec-opt span{font-size:12.5px;color:var(--muted)}
+.dec-opt.primary{border-color:var(--accent);background:var(--accent-soft)}
+.dec-opt.primary b{color:var(--accent)}
+.dec-sheet .note{margin:0}
+.dec-sheet code{font-family:var(--f-mono);font-size:12px;background:var(--sunk);border-radius:5px;padding:1px 5px;color:var(--ink);overflow-wrap:anywhere}
+.dec-foot{display:flex;justify-content:flex-end}
+
+/* Review: one set-aside group in the list */
+.review-head{margin:14px 0 6px;padding:16px 18px;border-color:var(--accent);gap:8px}
+.rv-top{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:flex-start;justify-content:space-between}
+.rv-title{min-width:0}
+.rv-title h2{font-size:18px;margin-top:2px;text-wrap:balance}
+.rv-ex{margin:0;color:var(--muted);max-width:92ch}
+.rv-stats{margin:0}
+.rv-acts{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+
+/* The toast after a group decision, with Undo (the shared toast can't be clicked) */
+.bb-toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 24px);transform:translateX(-50%);z-index:70;display:flex;align-items:center;gap:10px;background:var(--ink);color:var(--bg);padding:8px 8px 8px 16px;border-radius:12px;box-shadow:var(--shadow);font-size:13px;width:max-content;max-width:calc(100% - 32px)}
+.bb-toast[hidden]{display:none}
+.bb-msg{min-width:0}
+.bb-toast .btn{background:var(--bg);border-color:var(--bg);color:var(--ink);flex:none}
+.bb-toast .x{background:transparent;border-color:transparent;color:var(--bg)}
+@media (max-width:760px){.bb-toast{width:calc(100% - 32px);bottom:calc(env(safe-area-inset-bottom,0px) + 12px)}}
 
 /* Credits: how to spend one credit */
 .cr-how{list-style:none;counter-reset:crhow;padding:0;margin:16px 0 4px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}

@@ -310,3 +310,11 @@ window.BM = {
 Views: deals (list + drive-time rings), drill (overview + stage work queues with check-off), credits, funnel,
 review (photo review with keyboard 1-5), analytics, score (model), sources, import, run (pipeline jobs with
 estimates and confirm), exports, settings. Market switcher in the top bar. Hash routing `#view/param`.
+
+Buy-box decisions in the browser: the Deals "Why?" panel lists `summary.set_aside.reasons[]` with their groups
+(`buckets[]`); each group has Review (`#deals/review/<group key>`, which lists `GET properties?bucket=<key>`
+under a `review` header) and Decide (choices add_only / add_all / keep / clear posted to `POST buybox/decide`;
+the toast's Undo posts `buybox/undo` with the `batch_id`). Set-aside rows have Add to buy box, rows decided by
+hand Undo (`POST properties/{id}/buybox` with include / rules); on phones these buttons sit beside the card
+button, never inside it. The drawer's Buy box section (`property_detail.buybox`) shows each rule, the decisions
+with who and when, the history, and Add to buy box / Set aside / Undo: follow the rules.
