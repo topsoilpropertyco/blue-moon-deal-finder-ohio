@@ -44,6 +44,12 @@ Levels are tracked per channel: mail, phone, text, email, social, voicemail drop
 - Hit rate of each data source by owner type, to find the cheapest path to each kind of owner.
 - Blue Moon score weights tuned from real outcomes and past deals (backtesting).
 
+### 4b. Data control and enrichment (built 2026-10-22)
+- Buy-box decisions by hand on every set-aside group (Review / Decide), with who, when and Undo.
+- AI web research per owner on the Claude plan (untested results with sources; people-search blocked).
+- Fix data in Excel and import it back safely.
+- Next, with Seth's OK: free county records APIs to fill owner names and mailing addresses automatically.
+
 ### 5. Owner profiles and archetypes (next)
 Build a profile of the people behind each property from everything gathered, and group owners into archetypes to guide outreach. Each archetype gets:
 - **Guesses about them:** what the records suggest about their situation.

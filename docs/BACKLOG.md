@@ -15,7 +15,7 @@ Mark an item done (with the date) when it ships; never delete it.
 
 6. **Exports screen wording.** "Files for Brad" isn't quite right. Rework how the exports are named and grouped.
 7. **An export for Crexi.** A clear export meant for Crexi (ask Seth exactly what it should contain and how he'll use it, for example a list of properties to spend credits on).
-8. **Built around the end goal.** The flow is: enrich and improve the data, then put it into the CRM. Make the app's structure follow that path. Seth is thinking more about what this means.
+8. **Built around the end goal.** The flow is: enrich and improve the data, then put it into the CRM. Make the app's structure follow that path. Seth is thinking more about what this means. (2026-10-22: buy-box decisions, AI research and the Excel round trip are steps toward this.)
 
 ## Carried over
 
@@ -36,3 +36,23 @@ Mark an item done (with the date) when it ships; never delete it.
 - Deals explains where the rest of the list went (set-aside reasons, close calls on estimated drive times).
 - Credits screen: three-step "how to spend one credit".
 - `uv run run.py key google` saves a key without opening `.env`.
+
+## Done 2026-10-22 (asked for directly)
+
+- Every set-aside reason broken into groups (drive 61–75 / 76–90 / 91–120 / over 120 min; units 1–4, 5–9, 81–100, 101–200, 201+; decade built; each skipped county), with a plain explanation and **Review** and **Decide** on each group. Decisions by hand with who/when, history and Undo.
+- AI research step (Run screen, `uv run run.py research`): business filings, officers, website, business phone/email and social pages per owner, on the Claude plan; people-search sites blocked; results untested with source links.
+- Fix data in Excel and import it back safely (ranked list or a per-group review file).
+
+## Waiting on Seth (asked 2026-10-22)
+
+- **Free county records APIs.** Verified free official map services with owner names and mailing addresses for Franklin, Greene, Delaware, Miami, Champaign, Madison, Logan, Fayette, Clinton, Shelby (owner names only: Clark, Union; statewide owner names from ODNR, mailing addresses from OGRIP). They could fill the County auditor stage automatically. PRD section 12 says "links only", so this needs Seth's OK. Miami's layer isn't published as open data.
+- **Size groups:** Seth wrote "90 to 120" and "100 to 200"; built as 81–100, 101–200, 201+ (change in `config/asset_classes.yaml`).
+- **AI-found contacts and Crexi credits:** an owner with untested AI contacts waits in Reach out before getting a credit (the DRILL rule). Keep, or let credits go to them anyway?
+- **Letters for properties set aside by hand:** they can still be on the mailing list when a letter is the owner's next step. Keep or stop?
+- **AI research on individuals:** it covers individuals, trusts and estates too (public business presence and social pages only). Keep or limit to companies?
+
+## Still open from the review (2026-10-22)
+
+- Undo for field fixes imported from a spreadsheet (today: type the old value in a fresh download).
+- A decision saved just before a re-score that fails shows an error without an Undo handle (rare: needs a 30-second database lock).
+- Run AI research live with Test on 5 on the Mac: the web-search guard's long blocked list hasn't been tried against the live search service yet.

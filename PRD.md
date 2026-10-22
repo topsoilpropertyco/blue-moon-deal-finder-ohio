@@ -57,6 +57,8 @@ Other asset classes define their own labels (self-storage: drive-up vs interior;
 
 **Ranking:** in-buy-box properties by Blue Moon score, then walk-up probability, then drive time. Rows that fail a filter are never deleted; they are marked with the reason and exported to `output/<market>/excluded_*.csv`.
 
+**Decisions by hand:** the rules decide first; Seth (or a teammate) can add a set-aside property to the buy box, set one aside, or stop one rule counting for a whole group (Deals > Why? > Review / Decide). Every decision records who and when, survives re-scores and re-imports, and can be undone. Set-aside groups (drive minutes, size, decade built, skipped county, state, type) are defined in YAML.
+
 ## 6. Pipeline
 
 Free steps run first; paid steps run last, only on what survives. Every external result is cached in SQLite so re-runs never re-pay.
@@ -77,7 +79,7 @@ DRILL = Data Resolution through Incremental List Liquidation. Industry: buy a li
 
 **Contact levels** (per property): **1 No owner data · 2 Possible owner** (owner data from records, not yet talked to) **· 3 Confirmed owner** (we talked; they confirmed). Level 3 hands the property to the CRM. Records alone never confirm an owner. Side states: wrong info (contact marked wrong, drill continues), exhausted (every stage tried), do not contact.
 
-**Stages** (`config/drill.yaml`, in order, free first): records baseline (auto) → portfolio match (auto) → county auditor → rental registration (Ohio ORC 5323.02 includes an owner/agent phone) → LLC and trust lookup (Secretary of State) → recorder documents (deed/mortgage signers) → on-site and manager contacts (occupant and operator lookup for warehouses and outdoor storage) → web and social search → Crexi credit → court and probate records → letters → neighbors and local network → paid skip trace (off) → deep research. Each stage lists its sources, method, cost and a starting hit-rate guess that real results replace.
+**Stages** (`config/drill.yaml`, in order, free first): records baseline (auto) → portfolio match (auto) → county auditor → rental registration (Ohio ORC 5323.02 includes an owner/agent phone) → LLC and trust lookup (Secretary of State) → recorder documents (deed/mortgage signers) → on-site and manager contacts (occupant and operator lookup for warehouses and outdoor storage) → AI web research (Claude Code on Seth's plan searches the web for the owner's business filing, officers and agent, website, business phone, email and social pages; runs as its own step, never as part of `all`) → web and social search → Crexi credit → court and probate records → letters → neighbors and local network → paid skip trace (off) → deep research. Each stage lists its sources, method, cost and a starting hit-rate guess that real results replace.
 
 **Validation:** whenever a property has untested phone, text, email or social contact info, its next step is to reach out on it and log the outcome (no answer, left message, replied but not confirmed yet, wrong person or number, bounced, talked to owner and confirmed, do not contact). Do not contact is permanent and covers the owner's other properties.
 
@@ -85,7 +87,7 @@ DRILL = Data Resolution through Incremental List Liquidation. Industry: buy a li
 
 **Credits:** 500/month, no roll-over. The plan spends them all: highest-ranked possible owners first, preferring ones the free stages already tried, at a steady daily pace.
 
-**Compliance:** never automate Crexi or people-search sites. Calls and texts to cell phones fall under telemarketing rules (TCPA, Do Not Call); the app flags DNC and keeps "do not contact" permanent.
+**Compliance:** never automate Crexi or people-search sites (AI research blocks them three ways: WebFetch deny rules, a guard that adds them to every web search's blocked list, and a filter that drops any finding sourced from them). Everything AI research finds stays untested (level 2 at most) with the link where it was seen. Calls and texts to cell phones fall under telemarketing rules (TCPA, Do Not Call); the app flags DNC and keeps "do not contact" permanent.
 
 ## 8. Rent data
 
@@ -118,7 +120,7 @@ DRILL = Data Resolution through Incremental List Liquidation. Industry: buy a li
 
 - Python 3.11+, `uv`. `pandas`, `openpyxl`, `httpx`, `pydantic`, `python-dotenv`, `pyyaml`, `rapidfuzz`, `fastapi`, `uvicorn`, `anthropic` (optional backend), stdlib `sqlite3`.
 - Dashboard: FastAPI backend + no-build vanilla-JS single-page app (replaces Streamlit; works on phone and computer). Team access through Cloudflare's free Quick Tunnel (`run.py share`): a public https link; each listed person signs in with their own email and the team password (the dashboard checks both). No account or domain; the link changes when sharing restarts.
-- Photo check: Claude Code on the Mac Mini (`claude -p`, Seth's plan). Optional: Anthropic API (`claude-sonnet-5-5`).
+- Photo check and AI owner research: Claude Code on the Mac Mini (`claude -p`, Seth's plan; research sends owner names, cities and property addresses to Anthropic, never mailing streets). Optional: Anthropic API (`claude-sonnet-5-5`).
 - Google APIs (key `GOOGLE_MAPS_API_KEY`): Geocoding, Routes, Street View Static, Maps Static.
 - Free: HUD map service, US Census geocoder, county and state public-record sites (links only).
 - CLI: `uv run run.py import | owners | drive | rent | photos | classify | score | drill | all | estimate | export | calibrate | serve | status` with `--market`, `--limit`, `--dry-run`, `--yes`.
@@ -174,3 +176,6 @@ Crexi scraping or automated login; automating people-search sites; automated out
 | 2026-10 | HUD rents from HUD's free map service (HUD's download site blocks scripts) |
 | 2026-10 | Package renamed `walkup/` → `bluemoon/` because the scope grew past walk-ups |
 | 2026-10 | Private data never goes to GitHub; it lives on the Mac Mini |
+| 2026-10 | Buy-box decisions by hand (add, set aside, stop a rule counting for a group) with Review/Decide on every set-aside group; the rules stay the default |
+| 2026-10 | AI web research as a DRILL stage on Seth's Claude plan (business filings, officers, website, business phone/email, social pages), people-search sites blocked, results untested |
+| 2026-10 | Blue Moon exports can be fixed in Excel and imported back (whitelisted columns only, stale rows skipped, corrections survive later Crexi imports) |
