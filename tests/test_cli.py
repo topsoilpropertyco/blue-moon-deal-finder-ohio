@@ -156,7 +156,7 @@ def test_options_work_before_or_after_the_command(cli, imported, argv):
 
 
 def test_free_steps(cli, imported, fake_hud):
-    for step in ("owners", "drive", "rent", "score", "drill"):
+    for step in ("owners", "drive", "rent", "parcels", "score", "drill"):
         code, text = cli(step, "--limit", "5")
         assert code == 0, (step, text)
 
@@ -245,7 +245,8 @@ def test_all_waits_and_shows_the_full_estimate(cli, imported, fake_hud, settings
     code, text = cli("all")
     assert code == run.EXIT_WAITING
     assert "Before spending money:" in text and "- Photos:" in text and "--yes" in text
-    assert SECRET not in text and count(settings, "SELECT COUNT(*) FROM api_calls") == 0
+    # nothing was charged (the free county websites of the County records step are counted but cost nothing)
+    assert SECRET not in text and count(settings, "SELECT COUNT(*) FROM api_calls WHERE provider != 'county_gis'") == 0
 
 
 def test_export_command(cli, imported, settings):

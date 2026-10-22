@@ -69,9 +69,12 @@ def counts_by_market(conn: sqlite3.Connection, market_ids: list[int]) -> dict[tu
       JOIN properties p ON p.id = a.property_id
       LEFT JOIN owners o ON o.property_id = a.property_id
       WHERE p.market_id IN ({",".join("?" for _ in ids)}) AND a.stage_key != ?
+        AND NOT (a.actor = 'auto' AND a.stage_key = ?)
     ) WHERE rn = 1 GROUP BY market_id, stage_key, owner_type, outcome
     """
-    for mid, key, ot, outcome, n in conn.execute(sql, (*ids, E.PASS_MARKER)).fetchall():
+    # The county records step checks the county auditor stage off by itself ('auto'). Those are not tries by
+    # hand: counting them would make the hands-on stage look like it always works (and move it up the queue).
+    for mid, key, ot, outcome, n in conn.execute(sql, (*ids, E.PASS_MARKER, E.COUNTY_STAGE)).fetchall():
         for t in (ot or "unknown", "all"):
             c = counts[(int(mid), key, t)]
             if outcome in ("found", "nothing"):

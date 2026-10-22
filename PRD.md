@@ -122,8 +122,8 @@ DRILL = Data Resolution through Incremental List Liquidation. Industry: buy a li
 - Dashboard: FastAPI backend + no-build vanilla-JS single-page app (replaces Streamlit; works on phone and computer). Team access through Cloudflare's free Quick Tunnel (`run.py share`): a public https link; each listed person signs in with their own email and the team password (the dashboard checks both). No account or domain; the link changes when sharing restarts.
 - Photo check and AI owner research: Claude Code on the Mac Mini (`claude -p`, Seth's plan; research sends owner names, cities and property addresses to Anthropic, never mailing streets). Optional: Anthropic API (`claude-sonnet-5-5`).
 - Google APIs (key `GOOGLE_MAPS_API_KEY`): Geocoding, Routes, Street View Static, Maps Static.
-- Free: HUD map service, US Census geocoder, county and state public-record sites (links only).
-- CLI: `uv run run.py import | owners | drive | rent | photos | classify | score | drill | all | estimate | export | calibrate | serve | status` with `--market`, `--limit`, `--dry-run`, `--yes`.
+- Free: HUD map service, US Census geocoder, county and state public-record sites (links), and the counties' free public parcel map services (ArcGIS REST, no key), which the County records step now uses automatically (`config/parcels.yaml`): Franklin, Greene, Delaware, Champaign, Madison, Logan, Fayette, Clinton, Shelby, Clark and Union; any other Ohio county uses the older (2023-24) statewide map data (ODNR owners, OGRIP mailing addresses). Miami's service is switched off (not published as open data). Indiana has no source. Never automated: the auditor web pages themselves (links only).
+- CLI: `uv run run.py import | owners | drive | rent | parcels | photos | classify | score | drill | all | estimate | export | calibrate | serve | status` with `--market`, `--limit`, `--dry-run`, `--yes`.
 - Layout: see `ARCHITECTURE.md`. Package `bluemoon/`. Data in `data/` (SQLite `data/bluemoon.sqlite`), photos in `images/`, labels in `labels/`, outputs in `output/` — all git-ignored.
 
 ## 13. Open questions

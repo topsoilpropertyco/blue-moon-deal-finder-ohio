@@ -74,3 +74,17 @@ def real_crexi() -> Path:
     if not p or not Path(p).exists():
         pytest.skip("BLUEMOON_REAL_CREXI not set")
     return Path(p)
+
+
+@pytest.fixture(autouse=True)
+def no_county_websites(monkeypatch):
+    """Tests never reach a real county website: the county records step gets an empty answer ('no parcel here')
+    unless a test sets up its own fake (tests/test_parcels.py)."""
+    import httpx
+
+    from bluemoon.enrich import parcels
+
+    def empty(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"features": []})
+
+    monkeypatch.setattr(parcels, "make_client", lambda cfg: httpx.Client(transport=httpx.MockTransport(empty)))

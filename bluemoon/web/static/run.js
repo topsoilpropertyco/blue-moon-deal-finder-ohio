@@ -36,6 +36,9 @@
       what: () => 'HUD area rents (free HUD map service) compared with the rent scale.'},
     {key: 'score', title: 'Score', layers: ['score'], limit: false,
       what: () => 'Buy box, colors, Blue Moon score and rank. Properties that fail a filter are set aside, never deleted.'},
+    {key: 'parcels', title: 'County records', layers: ['parcels'], limit: true,
+      what: () => 'The owner and the tax mailing address from each Ohio county\'s free public parcel map, buy-box properties first. ' +
+        'Fills the DRILL\'s county auditor step. Counties without a map of their own use older (2023-24) statewide data. Needs a map location (the drive step places them).'},
     {key: 'photos', title: 'Photos', layers: ['photos'], limit: true, needs: 'visual_enabled',
       what: () => '3 Street View photos and 1 satellite photo of each buy-box property. The first paid step.'},
     {key: 'classify', title: 'Photo check', layers: ['photo_check', 'visual'], limit: true, needs: 'visual_enabled',
@@ -54,7 +57,7 @@
     {key: 'credits', title: 'Spend Crexi credits (you)', layers: [], go: 'credits', goLabel: 'Open Credits',
       what: () => 'The Credits screen lists the best possible owners in order. Open each in Crexi, use a credit there, and record what it showed. Credits don\'t roll over.'},
     {key: 'all', title: 'Run everything', layers: [], limit: true, wide: true,
-      what: () => 'Every machine step in order: owners, drive, rent, score, photos, photo check, score, DRILL. ' +
+      what: () => 'Every machine step in order: owners, drive, rent, score, county records, photos, photo check, score, DRILL. ' +
         'Free steps run first. Big paid steps stop and wait for your OK.'},
   ];
   const LIST = STEPS.filter((st) => st.key !== 'all');
@@ -210,6 +213,11 @@
         const answered = toNum((s.review_counts || {}).reviewed) || 0;
         if (!answered) return {state: 'wait', text: 'Waiting for your photo answers'};
         return {state: 'optional', text: plural(answered, 'answer') + ' to learn from'};
+      }
+      case 'parcels': {
+        if (!L || L.enabled === false) return {state: 'off', text: 'No Ohio properties with a map location yet'};
+        if (complete) return {state: 'done', text: ''};
+        return {state: 'next', text: plural(left, 'property', 'properties') + ' to look up (free)'};
       }
       case 'research': {
         const line = S.est && (S.est.steps || []).find((l) => l.step === 'research');

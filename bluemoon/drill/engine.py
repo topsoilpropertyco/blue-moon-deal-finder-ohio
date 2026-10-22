@@ -64,6 +64,7 @@ RETIRED_OUTCOME_LABELS = {"reached_not_owner": "Reached someone who isn't the ow
 RECORDS_STAGE = "records_baseline"
 PORTFOLIO_STAGE = "portfolio_match"
 CREDIT_STAGE = "crexi_credit"
+COUNTY_STAGE = "county_auditor"   # the county records step (enrich/parcels.py) checks it off as 'auto'
 PASS_MARKER = "_new_pass"   # an attempt row with this stage key starts a new pass through the stages
 CONTACT_GOALS = ("identify", "unmask")
 

@@ -177,7 +177,7 @@ def test_summary(client):
     assert s["levels"] == {"1": 1, "2": 10, "3": 0} and s["penetration"] == 0.0
     assert s["credits"]["per_month"] == 500 and s["needs_review"] == 0
     layers = {layer["key"]: layer for layer in s["layers"]}
-    assert set(layers) == {"owners", "drive", "rent", "photos", "photo_check", "score", "drill"}
+    assert set(layers) == {"owners", "drive", "rent", "photos", "photo_check", "score", "parcels", "drill"}
     assert layers["owners"]["done"] == layers["owners"]["total"] == 11
     assert layers["photos"]["total"] == 6 and layers["rent"]["done"] == 0
     assert all({"key", "label", "done", "total"} <= set(layer) for layer in s["layers"])

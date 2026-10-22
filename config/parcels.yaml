@@ -1,0 +1,189 @@
+# County records: free public parcel map services (ArcGIS REST), asked for the parcel under each property's
+# map point. They give the owner of record and the tax mailing address straight from the county's tax records.
+# Used by the "County records" step (uv run run.py parcels --limit 5 --dry-run, then --limit 5).
+#
+# Every service below is free and needs no key. Each one was asked on 2026-10-22 (layer fields read, and a
+# point lookup run) before it was written here. If a county moves or closes its service, the step reports the
+# failed lookups and carries on; set `enabled: false` for it, or fix its `url`. Nothing is paid for.
+#
+# How a county is described:
+#   url          the layer (the address ends in /MapServer/<n> or /FeatureServer/<n>; the app adds /query)
+#   enabled      false = never asked (the county then uses the older statewide data if that is on)
+#   owners       field(s) holding the owner of record's name (a county may split one owner over several fields)
+#   owner_fallback  used only when every `owners` field is blank
+#   taxpayers    field(s) holding the name on the tax bill / contact name (saved as "other", never as the owner)
+#   mailing      the tax mailing address, best first. Each choice is {name: <addressee field>, lines: [...]}.
+#                `lines` are fields joined with ", "; a line written as a list ([STATE, ZIP]) joins with a space.
+#                A choice with no street line is passed over, and so is one whose addressee is a tax-bill
+#                service (settings.tax_service_names below), because a letter there never reaches the owner.
+#   parcel_id    field with the parcel number (shown in the DRILL note)
+#   note         why it is set up this way (for people; the app does not read it)
+#
+# Field names are the county's own. Some are odd (Madison's layer has its owner fields shifted: the NAME is in
+# Owner_Co_3 and the street in Owner_Cont) - they are written here as the county serves them today.
+
+settings:
+  concurrency: 5                  # most lookups at once (be polite to the counties' small servers)
+  pause_seconds: 0.1              # each worker waits this long after a call
+  timeout_seconds: 25
+  max_retries: 2                  # tries again after a timeout, a busy server (HTTP 429/5xx) or an ArcGIS server error
+  retry_backoff_seconds: 1.0      # doubles on each try
+  stop_after_errors: 5            # a layer that fails this many times in a row is left alone for the rest of the run
+  chunk_size: 25                  # properties looked up, then saved, at a time (progress and Cancel work between chunks)
+  coordinate_decimals: 5          # a point is rounded to about a metre before it is asked or looked up in the cache
+  statewide_fallback: true        # counties with no live source of their own use the statewide data (older)
+  # Names that only mean "the tax bill goes to a tax service". They are not saved as people, and an address
+  # addressed to one is passed over for the next choice.
+  tax_service_names: [CORELOGIC, CORE LOGIC, LERETA, FIRST AMERICAN, TAX SERVICE, TAX SERVICES, REAL ESTATE TAX SERVICE,
+                      CLARITY TAX, ARMADA, TRANSAMERICA, WELLS FARGO TAX, TAX DEPT, TAX DEPARTMENT]
+  # Values that mean "nothing here".
+  ignore_values: ["0", "NONE", "N/A", "NA", "NOT ON FILE", "UNKNOWN", "UNKNOWN OWNER", "NULL", "-", "."]
+
+counties:
+  OH:
+    FRANKLIN:
+      name: Franklin
+      enabled: true
+      url: https://gis.franklincountyohio.gov/hosting/rest/services/ParcelFeatures/Parcel_Features/MapServer/0
+      parcel_id: PARCELID
+      owners: [OWNERNME1, OWNERNME2, OWNERNME3]
+      taxpayers: [PSTLNME1]
+      mailing:
+        - {name: PSTLNME1, lines: [PSTLADDRES]}
+        - {lines: [MAILNME1, MAILNME2]}
+      note: PSTL* is where the tax bill goes (often a tax service, then MAILNME1-2, the owner's own mailing lines, is used). A condo building can return one parcel per unit.
+    GREENE:
+      name: Greene
+      enabled: true
+      url: https://gis.greenecountyohio.gov/webgis2/rest/services/OpenData/OpenData/MapServer/1
+      parcel_id: Parcel_Number
+      owners: [Owner_Name]
+      taxpayers: [Taxpayer_Contact]
+      mailing:
+        - {name: Taxpayer_Contact, lines: [Tax_Mailing_Address, Tax_Mailing_City_St_Zip]}
+      note: A long taxpayer name can spill into the first line of the mailing address.
+    DELAWARE:
+      name: Delaware
+      enabled: true
+      url: https://services2.arcgis.com/ziXVKVy3BiopMCCU/arcgis/rest/services/Parcel/FeatureServer/0
+      owners: [OWNER1, OWNER2]
+      taxpayers: [MAILNAME1, MAILNAME2]
+      mailing:
+        - {name: MAILNAME1, lines: [MAILADDR1, MAILADDR2]}
+      note: MAILADDR2 is already "CITY, ST ZIP". A 0 in OWNER2 means no second owner.
+    CHAMPAIGN:
+      name: Champaign
+      enabled: true
+      url: https://services5.arcgis.com/HBIN2hfRscrws7eM/arcgis/rest/services/parcel_joined/FeatureServer/0
+      parcel_id: Parcel
+      owners: [PPOwner]
+      taxpayers: [PPTaxPayer]
+      mailing:
+        - {name: PPTaxPayer, lines: [PPTaxPayerAddress]}
+        - {name: PPOwner, lines: [PPOwnerAddress]}
+      note: The address fields are one line each ("DUGAN ST URBANA OH 43078").
+    MADISON:
+      name: Madison
+      enabled: true
+      url: https://services8.arcgis.com/HCOT30BFUWvevW8A/arcgis/rest/services/Parcels_Engineer/FeatureServer/13
+      parcel_id: TAXPIN
+      owners: [Owner_Co_3]
+      owner_fallback: [NAME]
+      taxpayers: [Taxpayer_3]
+      mailing:
+        - {name: Taxpayer_3, lines: [Taxpayer_C, Taxpayer_1, [Taxpayer_4, Taxpayer_5]]}
+        - {name: Owner_Co_3, lines: [Owner_Cont, Owner_Co_1, [Owner_Co_4, Owner_Co_5]]}
+      note: This layer's owner and taxpayer fields are shifted (name in Owner_Co_3/Taxpayer_3, street in Owner_Cont/Taxpayer_C, city in Owner_Co_1/Taxpayer_1, state and ZIP in Owner_Co_4-5/Taxpayer_4-5). Re-check if the county re-publishes it.
+    LOGAN:
+      name: Logan
+      enabled: true
+      url: https://services9.arcgis.com/mFxO7gBbusFBQ5o9/arcgis/rest/services/Logan_County_Parcels/FeatureServer/12
+      parcel_id: Parcel_Num
+      owners: [Owner_Cont]
+      owner_fallback: [Listed_Nam]
+      taxpayers: [Taxpayer_C]
+      mailing:
+        - {name: Taxpayer_C, lines: [Taxpayer_1, Taxpayer_2, [Taxpayer_3, Taxpayer_4]]}
+        - {name: Owner_Cont, lines: [Owner_Co_1, Owner_Co_2, [Owner_Co_3, Owner_Co_4]]}
+      note: The county writes NOT ON FILE when it has no mailing address; that is passed over.
+    FAYETTE:
+      name: Fayette
+      enabled: true
+      url: https://services8.arcgis.com/CJpiu5T88EYxY793/arcgis/rest/services/Fayette_County_Ohio_GIS_Tax_Parcels/FeatureServer/0
+      parcel_id: Parcel_N_1
+      owners: [Owner_Cont]
+      owner_fallback: [Listed_Nam]
+      taxpayers: [Taxpayer_C]
+      mailing:
+        - {name: Taxpayer_C, lines: [Taxpayer_1, Taxpayer_2, [Taxpayer_3, Taxpayer_4]]}
+        - {name: Owner_Cont, lines: [Owner_Co_1, Owner_Co_2, [Owner_Co_3, Owner_Co_4]]}
+    CLINTON:
+      name: Clinton
+      enabled: true
+      url: https://services1.arcgis.com/tAhcHWpOD9ygNPbJ/arcgis/rest/services/cntyparcelsRealPropData_gdb/FeatureServer/0
+      parcel_id: Parcel_Number
+      owners: [Listed_Name]
+      owner_fallback: [Owner_Contact_Name]
+      taxpayers: [Taxpayer_Contact_Name]
+      mailing:
+        - {name: Taxpayer_Contact_Name, lines: [Taxpayer_Contact_Address, Taxpayer_Contact_City, [Taxpayer_Contact_State, Taxpayer_Contact_ZipCode]]}
+        - {name: Owner_Contact_Name, lines: [Owner_Contact_Address, Owner_Contact_City, [Owner_Contact_State, Owner_Contact_ZipCode]]}
+    SHELBY:
+      name: Shelby
+      enabled: true
+      url: https://services6.arcgis.com/fzPZZJiNVtryYcsC/arcgis/rest/services/Parcels/FeatureServer/0
+      parcel_id: Parcel_Number
+      owners: [Listed_Name]
+      owner_fallback: [Owner_Contact_Name]
+      taxpayers: [Taxpayer_Contact_Name]
+      mailing:
+        - {name: Taxpayer_Contact_Name, lines: [Taxpayer_Contact_Address, Taxpayer_Contact_City, [Taxpayer_Contact_State, Taxpayer_Contact_ZipCode]]}
+        - {name: Owner_Contact_Name, lines: [Owner_Contact_Address, Owner_Contact_City, [Owner_Contact_State, Owner_Contact_ZipCode]]}
+    CLARK:
+      name: Clark
+      enabled: true
+      url: https://ago.clarkcountyohio.gov/ccoarcgis/rest/services/Pivot/Parcel_CAMA_State_Plane/MapServer/14
+      parcel_id: PIN
+      owners: [Own1]
+      taxpayers: [MailingName]
+      mailing:
+        - {name: MailingName, lines: [MailingAddress, CityStateZip]}
+      note: Owner name only today; the mailing fields are in the layer but empty, so no mailing address comes from Clark.
+    UNION:
+      name: Union
+      enabled: true
+      url: https://www7.co.union.oh.us/unioncountyohio/rest/services/parcel/MapServer/0
+      parcel_id: ACCOUNT
+      owners: [Owner]
+      owner_fallback: [OwnerCurrent]
+      note: Owner name only (no mailing address in this layer).
+    MIAMI:
+      name: Miami
+      enabled: false
+      url: https://services3.arcgis.com/wCWf4EGMg4PzHwzA/arcgis/rest/services/parcel_joined/FeatureServer/0
+      parcel_id: PARCEL
+      owners: [PPOwner]
+      mailing:
+        - {lines: [TaxPAddr, TaxPCity, [TaxPState, TaxPZip]]}
+      note: OFF on purpose. This layer answers, but Miami County has not published it as open data (it is not on the county's open-data list), so it is not used until the county says it is public. Miami uses the older statewide data meanwhile.
+
+# Any other Ohio county (Montgomery, Warren, Preble, Darke, Butler, Hamilton...), and any county above that is
+# switched off, uses two statewide services. Their data is dated (about 2023-24): everything saved from them says
+# "older statewide data", and the DRILL's county auditor stage stays open so you can confirm the owner by hand.
+# The mailing layer has no owner name; the owner layer (ODNR) has none for some counties (Montgomery).
+statewide:
+  enabled: true
+  label: older statewide data
+  mailing_layer:
+    name: OGRIP statewide parcels
+    url: https://services2.arcgis.com/MlJ0G8iWUyC7jAmu/arcgis/rest/services/OhioStatewidePacels_full_view/FeatureServer/0
+    parcel_id: LocalParcelID
+    as_of: CurrentTo
+    mailing:
+      - {lines: [MailAddressAll]}
+  owner_layer:
+    name: ODNR statewide parcels
+    url: https://gis.ohiodnr.gov/arcgis/rest/services/OIT_Services/odnr_landbase_v2/MapServer/4
+    parcel_id: PIN
+    as_of: CurrentTo
+    owners: [OWNER1, OWNER2]

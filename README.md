@@ -110,7 +110,9 @@ The same from the Terminal (`--market` can be left out for apartments; `self-sto
 uv run run.py estimate            # what every step would do and cost; nothing is called
 uv run run.py all --limit 5       # test run
 uv run run.py all                 # everything; paid steps over 50 properties ask "Go ahead? [y/N]"
-uv run run.py rent                # one step: owners | drive | rent | photos | classify | score | drill | research
+uv run run.py rent                # one step: owners | drive | rent | parcels | photos | classify | score | drill | research
+uv run run.py parcels --limit 5 --dry-run   # County records: what it would look up (free; nothing is asked)
+uv run run.py parcels --limit 5   # County records for 5 properties; then without --limit
 uv run run.py research --limit 5 --dry-run   # AI research: what it would do (owners, properties, minutes)
 uv run run.py research --limit 5  # AI research on 5 owners; then without --limit (asks first over 50 properties)
 uv run run.py export              # files for Brad in output/<market>/ (--dry-run: say what it would write)
@@ -123,12 +125,23 @@ uv run run.py calibrate           # re-check the photos you reviewed; updates th
 | owners | Owner type (mom-and-pop or institutional), portfolio, years owned, loan, absentee | Free |
 | drive | Drive minutes from the market's starting point | Google Routes (free estimate without a key) |
 | rent | HUD Fair Market Rents by ZIP compared with Brad's rent scale | Free (HUD's map service) |
+| parcels | County records: the owner of record and the tax mailing address from each Ohio county's own free public parcel map (see below) | Free |
 | photos | 3 Street View photos and 1 satellite photo per buy-box property | Google, after the free monthly calls |
 | classify | Claude reads the photos (your Claude plan through Claude Code) | No per-call bill |
 | score | Buy box, colors, Blue Moon score and rank | Free |
 | drill | DRILL automatic stages and contact levels | Free |
 | calibrate | Re-checks every property you answered in Photo review and updates the Scorecard | Your Claude plan |
 | research | AI research: Claude searches the web for each buy-box owner's business filing, officers and agent, website, business phone and email (web search and page reads only; people-search sites and Crexi are blocked). Everything it finds is saved "not tested yet" (level 2 at most) with the link where it was seen | Your Claude plan, no per-call bill; asks first over 50 properties |
+
+**County records** (Run screen: **County records**, after Score; `uv run run.py parcels`) asks each county's free public parcel map who owns the parcel under each property's map point. Test it with `uv run run.py parcels --limit 5 --dry-run`, then `--limit 5`, then the whole market. It is free, so it needs no OK, and it is part of `all`. It looks up buy-box properties first (best score first), then the rest, and only properties with a map location (the drive step places them). What it fills in, per property:
+
+- the **owner(s) on the county tax record** (people, role "owner of record") and the taxpayer or contact name (role "other");
+- the **tax mailing address** as a mailing contact, "not tested yet" (an address on your do-not-contact list comes in as do-not-contact; one already on the property is not added twice);
+- the DRILL's **County auditor** stage is checked off as found, by "auto", with a note naming the county and the owner on the tax record. If that owner is not the Crexi owner the note says so, the owner's DRILL notes get a line, and the property gets the flag **County owner differs** (shown on the property). Crexi's owner name is never overwritten and no new DRILL pass starts. Contact level 3 is never set here; only a conversation confirms an owner.
+
+When a county finds nothing, nothing is checked off, so that owner still waits in the County auditor queue and you can look it up by hand with the same links as before. A county owner on a shared parcel (a condo building with several owners) is left alone for you to check. Do-not-contact owners are skipped.
+
+Counties with their own live service: Franklin, Greene, Delaware, Champaign, Madison, Logan, Fayette, Clinton, Shelby, Clark and Union (Clark and Union give the owner name only; Clark's and Union's layers have no usable mailing address). Any other Ohio county (Montgomery, Warren, Preble, Darke, Butler, Hamilton...) uses **older statewide data**: ODNR's owner names and the state's mailing addresses, mostly from 2023-24 (ODNR has no owners for Montgomery). Those results are saved the same way but marked "older statewide data" and do **not** check the County auditor stage off, so you still confirm the owner on the auditor page. Miami's layer is switched off (the county has not published it as open data), so Miami uses the statewide data too. Indiana properties are skipped (no source). Every answer is saved in the database, so a re-run asks nobody again; a county that fails is reported and tried again next run. Counties, web addresses, field names and the polite pace (5 at a time) are in `config/parcels.yaml`.
 
 AI research is not part of `all` or **Run everything**: run it on its own (Run screen: **AI research (owners)**, or `uv run run.py research`). It asks up to `ai_research: max_calls_per_run` (100) owners per run, about 2 minutes each, and its estimate says how many owners and properties are left and how many this run covers. Each owner's answer is saved for `refresh_after_days` (180), so a re-run doesn't ask again. Settings are in `config/drill.yaml` under `ai_research:`; `backend: mock` gives made-up offline test answers (example names, 555 numbers) that are written into the market like real ones and never saved as Claude's, so use it only on a test copy.
 
@@ -149,7 +162,7 @@ Running drive, rent, photos or classify on its own updates the buy box, scores a
 
 | Thing | Cost |
 |---|---|
-| HUD rents, Census geocoding, county and state record links | Free |
+| HUD rents, Census geocoding, county and state record links, county parcel lookups (County records step) | Free |
 | Google drive times, Street View and satellite photos | Free up to Google's monthly allowance (about 10,000 of each); a few dollars beyond. Every paid run shows the estimate first. |
 | Photo check | Your Claude plan through Claude Code on the Mac Mini; no per-call bill. If the plan hits a usage limit, the run stops cleanly and resumes next time. |
 | AI research | Your Claude plan through Claude Code; no per-call bill. About 2 minutes of plan time per owner; runs over 50 properties ask first. |

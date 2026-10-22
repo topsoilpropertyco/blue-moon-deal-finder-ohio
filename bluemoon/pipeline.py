@@ -2,9 +2,10 @@
 
 `all` runs the steps in this order (free first; paid last, and only on what survives the filters):
 
-    owners -> drive -> rent -> score -> photos -> classify -> score -> drill
+    owners -> drive -> rent -> score -> parcels -> photos -> classify -> score -> drill
 
-- Free: owners, rent (HUD), score, drill, and drive without a Google key (straight-line estimate).
+- Free: owners, rent (HUD), score, parcels (county records: free county websites, buy box first), drill, and
+  drive without a Google key (straight-line estimate).
 - Paid: drive with a Google key (Routes), photos (Street View + satellite), classify (Claude).
 - research (AI web research on the owners, your Claude plan) runs on its own, never inside `all`. It has no
   per-call bill but takes plan usage and time, so it asks for the same OK as a paid step.
@@ -31,7 +32,7 @@ from .config import get_settings, has_secret
 from .db import market_by_slug, now_iso, one, rows, scalar, upsert
 from .drill import engine
 from .drill import research as drill_research
-from .enrich import drive, geo, owners, rent
+from .enrich import drive, geo, owners, parcels, rent
 from .imagery import calibrate as imagery_calibrate
 from .imagery import (
     classify_estimate,
@@ -49,11 +50,12 @@ Progress = Callable[[float, str], None] | None
 PathArg = str | Path | Iterable[str | Path] | None
 
 # The steps Seth can run, in the order the dashboard lists them.
-STEPS: list[str] = ["import", "owners", "drive", "rent", "photos", "classify", "score", "drill", "research", "all"]
+STEPS: list[str] = ["import", "owners", "drive", "rent", "parcels", "photos", "classify", "score", "drill", "research", "all"]
 # Also runnable (CLI commands and background jobs), but not part of `all`.
 EXTRA_STEPS: list[str] = ["calibrate", "export", "estimate", "after_import"]
 STEP_LABELS: dict[str, str] = {
-    "import": "Import", "owners": "Owners", "drive": "Drive times", "rent": "Rent check", "photos": "Photos",
+    "import": "Import", "owners": "Owners", "drive": "Drive times", "rent": "Rent check",
+    "parcels": "County records", "photos": "Photos",
     "classify": "Photo check", "score": "Scores", "drill": "DRILL automatic stages", "research": "AI research",
     "all": "Everything",
     "calibrate": "Calibrate the photo check", "export": "Export files", "estimate": "Cost estimate",
@@ -63,7 +65,7 @@ STEP_LABELS: dict[str, str] = {
 STEP_ALIASES: dict[str, str] = {
     "visual_fetch": "photos", "imagery": "photos", "visual_classify": "classify", "vision": "classify",
     "drive_times": "drive", "scores": "score", "rank": "score", "auto": "drill", "everything": "all",
-    "ai_research": "research", "web_research": "research",
+    "ai_research": "research", "web_research": "research", "county_records": "parcels", "county": "parcels",
 }
 # Steps that stop for an OK on big runs. research has no per-call bill, but it uses your Claude plan for hours.
 PAID_STEPS: frozenset[str] = frozenset({"drive", "photos", "classify", "calibrate", "research"})
@@ -72,8 +74,8 @@ PAID_STEPS: frozenset[str] = frozenset({"drive", "photos", "classify", "calibrat
 RESCORE_AFTER: frozenset[str] = frozenset({"drive", "rent", "photos", "classify", "calibrate"})
 # (step, share of the progress bar) for `all` and for the free steps after an import.
 ALL_PLAN: tuple[tuple[str, float], ...] = (
-    ("owners", 0.04), ("drive", 0.16), ("rent", 0.18), ("score", 0.04),
-    ("photos", 0.26), ("classify", 0.24), ("score", 0.04), ("drill", 0.04),
+    ("owners", 0.04), ("drive", 0.14), ("rent", 0.14), ("score", 0.04), ("parcels", 0.10),
+    ("photos", 0.24), ("classify", 0.22), ("score", 0.04), ("drill", 0.04),
 )
 AFTER_IMPORT_PLAN: tuple[tuple[str, float], ...] = (
     ("owners", 0.2), ("drive_estimate", 0.1), ("score", 0.3), ("drill", 0.4),
@@ -84,6 +86,8 @@ COUNT_KEYS: dict[str, tuple[str, ...]] = {
     "drive": ("properties", "google", "estimated", "cached", "fetched", "to_fetch", "elements",
               "missing_coordinates", "beyond_range", "no_route", "errors"),
     "rent": ("properties", "with_location", "saved", "fits", "no_data", "errors"),
+    "parcels": ("properties", "found", "older", "no_parcel", "no_data", "ambiguous", "owner_differs", "fetched",
+                "cached", "people_added", "contacts_added", "skipped_dnc", "errors"),
     "photos": ("properties", "to_fetch", "cached", "fetched", "no_imagery", "errors", "street_view_images",
                "satellite_images"),
     "classify": ("properties", "calls", "cached", "classified", "needs_review", "colors", "errors"),
@@ -100,7 +104,7 @@ KEY_NAMES: dict[str, str] = {
 SKU_LABELS: dict[str, str] = {
     "route_matrix_element": "Google Routes (drive times)", "geocoding": "Google Geocoding",
     "street_view_static": "Street View photos", "static_maps": "Satellite photos",
-    "street_view_metadata": "Street View lookups (free)",
+    "street_view_metadata": "Street View lookups (free)", "county_gis": "County records (free county websites)",
     "vision_claude_cli": "Photo checks (your Claude plan)", "research_claude_cli": "AI research (your Claude plan)",
 }
 
@@ -233,6 +237,7 @@ def estimate(conn: sqlite3.Connection, market_slug: str, limit: int | None = Non
         _estimate_local(conn, market, "owners"),
         _estimate_or_note("drive", lambda: _estimate_drive(conn, market_slug, limit)),
         _estimate_or_note("rent", lambda: _estimate_rent(conn, market_slug, limit)),
+        _estimate_or_note("parcels", lambda: _estimate_parcels(conn, market_slug, limit)),
         photos,
         _estimate_or_note("classify", lambda: _estimate_classify(conn, market_slug, limit, photos)),
         _estimate_local(conn, market, "score"),
@@ -293,6 +298,9 @@ def layer_status(conn: sqlite3.Connection, market_slug: str) -> list[dict]:
         layers.append(_layer("photos", "Photos", c.get(f"photos{box}"), photo_total, "buy box only"))
         layers.append(_layer("visual", "Photo check", c.get(f"checked{box}"), photo_total, "buy box only"))
     layers.append(_layer("score", "Scores", c.get("scored"), total))
+    done, ohio = parcels.layer_counts(conn, market["id"])
+    if ohio:   # county records: Ohio properties with a map point
+        layers.append(_layer("parcels", "County records", done, ohio, "free county websites"))
     return layers
 
 
@@ -498,6 +506,11 @@ def _run_rent(run: StepRun) -> dict:
     return _from_module("rent", raw)
 
 
+def _run_parcels(run: StepRun) -> dict:
+    raw = parcels.lookup_parcels(run.conn, run.market, limit=run.limit, dry_run=run.dry_run, progress=run.progress)
+    return _from_module("parcels", raw)
+
+
 def _run_photos(run: StepRun) -> dict:
     if not run.dry_run:
         _fresh_scores(run.conn, run.market)
@@ -606,7 +619,7 @@ def _is_failure(result: dict) -> bool:
 
 RUNNERS: dict[str, Callable[[StepRun], dict]] = {
     "import": _run_import, "owners": _run_owners, "drive": _run_drive, "drive_estimate": _run_drive_estimate,
-    "rent": _run_rent, "photos": _run_photos, "classify": _run_classify, "score": _run_score,
+    "rent": _run_rent, "parcels": _run_parcels, "photos": _run_photos, "classify": _run_classify, "score": _run_score,
     "drill": _run_drill, "research": _run_research, "all": _run_all_steps, "calibrate": _run_calibrate,
     "export": _run_export,
     "estimate": _run_estimate, "after_import": _run_after_import,
@@ -688,6 +701,15 @@ def _estimate_rent(conn: sqlite3.Connection, slug: str, limit: int | None) -> di
     est = rent.compute_rent_fits(conn, slug, limit=limit, dry_run=True)
     return _estimate_line("rent", paid=False, properties=est.get("properties", 0),
                           to_do=est.get("with_location", est.get("properties", 0)), message=est["message"])
+
+
+def _estimate_parcels(conn: sqlite3.Connection, slug: str, limit: int | None) -> dict:
+    """County records: free (county websites, no key). Properties with a map point to look up, and how many answers
+    are already saved."""
+    est = parcels.parcel_estimate(conn, slug, limit)
+    return _estimate_line("parcels", paid=False, properties=est["properties"], to_do=est["to_look_up"],
+                          message=est["message"], requests=est["requests"], cached=est["cached"],
+                          to_fetch=est["to_fetch"])
 
 
 def _estimate_photos(conn: sqlite3.Connection, slug: str, limit: int | None) -> dict:

@@ -30,6 +30,8 @@ Crexi CSV/XLSX ─► ingest ─► properties (master list, every original colu
 - **DRILL stage** (`config/drill.yaml: stages`): ordered; each has goal, automation, cost, applies_to (owner
   types), optional asset_classes/states filters, sources, method, hit_rate (starting guess).
 - **Sources** (`config/sources.yaml`): link templates and the county table.
+- **County records** (`config/parcels.yaml`): the free county parcel services the County records step reads (see
+  `enrich/parcels.py`): URL, field map and on/off switch per county, plus the statewide fallback.
 
 ## Rules (from CLAUDE.md)
 
@@ -39,7 +41,7 @@ Crexi CSV/XLSX ─► ingest ─► properties (master list, every original colu
 - Buy-box decisions made by hand live in `buybox_overrides` (every change in `buybox_override_log`) and are
   applied only in `rank.compute_scores`, so `scores.in_buybox` / `exclusion_reasons` are the final answer and
   `in_buybox == (exclusion_reasons == [])` holds for every row. `scores.rule_reasons` keeps what the rules said.
-- Cache every external API result (`bluemoon.cache.cached`) and record every billable call (`record_call`).
+- Cache every external API result (`bluemoon.cache.cached`) and record every call actually sent (`record_call`; the free county parcel services are recorded too, provider `county_gis`, so a count of `api_calls` is not a count of paid calls).
 - Paid steps support `dry_run=True` (count + cost, no calls) and `limit`. Runs over
   `safety.confirm_over_properties` need `confirm=True` from the caller (CLI asks; web shows the estimate first).
 - Exact visual labels from the asset class config (apartments: EXTERIOR_CORRIDOR, DIRECT_ENTRY,
@@ -131,6 +133,35 @@ Every function that writes commits its own transaction.
   absentee: mailing state != property state -> outofstate; same state, different city -> instate; else local.
   years_owned from sale_date. debt: no lender/loan -> free_and_clear when years_owned >= 10 else unknown;
   maturity within 18 months -> maturing_soon; else active.
+
+- `parcels.py`: **County records** (free, no key). `lookup_parcels(conn, market_slug, limit=None, dry_run=False,
+  progress=None, *, client=None, settings=None) -> dict` and `parcel_estimate(conn, slug, limit=None)`;
+  `load_config()` reads `config/parcels.yaml` (pydantic: per county `url`, `enabled`, `owners`, `owner_fallback`,
+  `taxpayers`, `mailing` choices, `parcel_id`, `note`; `settings:` pace, retries, tax-service names, ignored values;
+  `statewide:` the OGRIP mailing layer and the ODNR owner layer). `Settings.parcels` holds the raw YAML.
+  Per property with a map point (buy box first, best score first; then the rest; `settings.scope: buybox` limits it)
+  one point-in-parcel query goes to the county's layer (`<url>/query?geometry=<lng>,<lat>&geometryType=esriGeometryPoint
+  &inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=*&returnGeometry=false&f=json`), at most
+  `settings.concurrency` (5) at a time with a pause, timeouts and retries (`geo.send_with_retry`; 429/5xx and ArcGIS
+  error codes >= 500 retry, other errors do not), and a layer that fails `stop_after_errors` times in a row is left
+  alone for the rest of the run. Every answer (including "no parcel") is saved in `api_cache` (provider `county_gis`,
+  key = layer URL + point rounded to `coordinate_decimals`) and counted in `api_calls` (provider and sku
+  `county_gis`, cache hits are not); errors are never saved. An Ohio county with no enabled layer (or `enabled:
+  false`, like Miami) uses the statewide layers; Indiana has no source. `parcel_lookups(property_id, source, status
+  found|older|no_parcel|no_data|ambiguous, owner_differs, detail, checked_at)` remembers who was looked up (an error
+  leaves no row, so it is tried again) and feeds the `parcels` progress layer (`layer_counts`).
+  What it writes, in one transaction per property, with the engine's helpers (`_add_person`, `_add_contact`,
+  `_insert_attempt`, `_refresh`): owner names -> people (`owner_of_record`, source `county_gis`), taxpayer or
+  contact names -> people (`other`), the tax mailing address -> a `mail` contact (untested; do-not-contact
+  addresses come in as `dnc`; a tax service as addressee is passed over); from a live county layer with an
+  owner, the DRILL stage `county_auditor` is checked off `found` by actor `auto` (detail: county, parcel, owner,
+  mailing address, and "not the owner in the Crexi export" when it differs, which also adds the property flag
+  `county_owner_differs` to `flags_json` and a line in the owner's DRILL notes). `county_auditor` stays `assisted`
+  (hands-on queue unchanged); a lookup that finds nothing writes no attempt so the stage stays open; statewide
+  data writes people and the address but no attempt (it is 2023-24 data, marked "older statewide data").
+  Owners whose family (same portfolio or owner name, any market) is do-not-contact are skipped and never asked;
+  confirmed owners and properties whose `county_auditor` stage is already checked off are skipped. Never level 3.
+  `stats.counts_by_market` leaves out `auto` check-offs of `county_auditor`, so the hands-on hit rate is not inflated.
 
 ### imagery (`bluemoon/imagery/`)
 - `streetview.py`: `imagery_estimate(conn, market_slug, limit=None) -> dict`;
@@ -256,7 +287,10 @@ Every function that writes commits its own transaction.
   `crm_handoff_rows(conn, market_slug) -> list[dict]`.
 
 ### pipeline + jobs + exports
-- `bluemoon/pipeline.py`: `STEPS = ["import","owners","drive","rent","photos","classify","score","drill","all"]`
+- `bluemoon/pipeline.py`: `STEPS = ["import","owners","drive","rent","parcels","photos","classify","score","drill","research","all"]`
+  (`parcels`, label "County records", is free and not in `PAID_STEPS`; it runs inside `all` after the first `score`,
+  so the buy box is known, and before the paid steps; `after_import` does not run it because it uses the network;
+  aliases `county_records` and `county`)
   (old names visual_fetch/visual_classify still work as aliases);
   `run_step(conn, market_slug, step, limit=None, dry_run=False, confirm=False, progress=None) -> dict`
   (drive, rent, photos, classify and calibrate re-score right after a real run; export honours dry_run);
@@ -275,7 +309,7 @@ Every function that writes commits its own transaction.
   are http(s) only.
 - `run.py` CLI: `uv run run.py <command> [--market SLUG] [--limit N] [--dry-run] [--yes]` with commands
   `import <files...> [--force]` (a folder: oldest first, files already imported in any market skipped),
-  `owners`, `drive`, `rent`, `photos`, `classify`, `score`, `drill`, `all`, `estimate`, `export`, `calibrate`,
+  `owners`, `drive`, `rent`, `parcels`, `photos`, `classify`, `score`, `drill`, `all`, `estimate`, `export`, `calibrate`,
   `serve` (a wildcard host without APP_PASSWORD runs on 127.0.0.1 only), `status`.
 
 ## Team link (`bluemoon/share.py`)
@@ -313,7 +347,7 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 |---|---|---|
 | GET | `/api/health` | `{ok, version, keys:{google:bool, anthropic:bool, hud:bool, census:bool}, vision_backend, claude_cli:bool, auth_required, authenticated, signed_in_as, login_email, share}` |
 | GET | `/api/markets` | `[{slug, name, asset_class, asset_label, geography, properties, in_buybox, confirmed}]` |
-| GET | `/api/m/{slug}/summary` | `{market:{slug,name,geography,origin_label,origin_lat,origin_lng,max_drive_minutes}, asset_class:{key,label,size_metric,visual_enabled,rent_enabled,visual_question,target_word}, properties, in_buybox, blue_moon_10, needs_review, penetration, levels, levels_in_buybox, credits, set_aside:{total, several, multi, reasons:[{key,label,count,only,explain,still_aside,added,kept,waived,buckets:[{key,label,count,only,still_aside,added,kept,waived,clearable,estimated}]}], drive_estimated, drive_close_calls, close_call_minutes, max_drive_minutes, by_hand:{added,set_aside}}, last_import, layers:[{key,label,done,total}], drill_waiting, drill_waiting_detail:{total,validate,stages,basis}}` (drill_waiting = buy-box owners whose next step is reach-out or a hands-on stage) |
+| GET | `/api/m/{slug}/summary` | `{market:{slug,name,geography,origin_label,origin_lat,origin_lng,max_drive_minutes}, asset_class:{key,label,size_metric,visual_enabled,rent_enabled,visual_question,target_word}, properties, in_buybox, blue_moon_10, needs_review, penetration, levels, levels_in_buybox, credits, set_aside:{total, several, multi, reasons:[{key,label,count,only,explain,still_aside,added,kept,waived,buckets:[{key,label,count,only,still_aside,added,kept,waived,clearable,estimated}]}], drive_estimated, drive_close_calls, close_call_minutes, max_drive_minutes, by_hand:{added,set_aside}}, last_import, layers:[{key,label,done,total,enabled,pct,note}] (owners, drive, rent, photos, photo_check, score, parcels, drill), drill_waiting, drill_waiting_detail:{total,validate,stages,basis}}` (drill_waiting = buy-box owners whose next step is reach-out or a hands-on stage) |
 | GET | `/api/m/{slug}/properties?view=&q=&sort=&limit=&offset=&include_excluded=&bucket=` | `{total, items:[PropertyRow], review}`; `bucket` = one set-aside group (in or out of the buy box), `review:{bucket,reason,reason_label,label,explain,count,still_aside,added,kept,waived,clearable,only}` (waived = still set aside, but you said this rule doesn't count; only = still set aside for this reason alone, after the decisions; clearable = members with a decision the group's clear takes off) |
 | POST | `/api/m/{slug}/buybox/decide` | body `{bucket, decision: add_only\|add_all\|keep\|clear, note?}` -> `{batch_id, changed, total, now_in, still_out:[{reason,label,count}], message, set_aside, in_buybox}` (re-scores first) |
 | POST | `/api/m/{slug}/buybox/undo` | body `{batch_id}` -> same shape as decide |

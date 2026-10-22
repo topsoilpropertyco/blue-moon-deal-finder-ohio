@@ -255,7 +255,9 @@ def test_all_waits_on_paid_steps_but_runs_the_free_ones(loaded, market_slug, fak
     assert by_step["rent"]["ok"] and by_step["drill"]["ok"]
     assert res["estimate"]["needs_confirm"] and "steps" in res["estimate"]
     assert "Waiting for your OK before: drive times, photos, photo check" in res["message"]
-    assert count(loaded, "api_calls") == 0 and count(loaded, "scores") == 11
+    # nothing was charged (the free county websites of the County records step are counted but cost nothing)
+    assert count(loaded, "api_calls WHERE provider != 'county_gis'") == 0 and count(loaded, "scores") == 11
+    assert by_step["parcels"]["ok"] and not by_step["parcels"]["needs_confirm"]   # free: runs while the paid steps wait
 
 
 def test_all_reports_a_failing_step_and_carries_on(loaded, market_slug, fake_hud, monkeypatch):
@@ -287,8 +289,10 @@ def test_all_dry_run_is_the_estimate(loaded, market_slug):
 
 def test_estimate_lists_every_step_with_costs(ranked, market_slug, google_key):
     est = pipeline.estimate(ranked, market_slug)
-    assert [s["step"] for s in est["steps"]] == ["owners", "drive", "rent", "photos", "classify", "score", "drill",
-                                                 "research"]
+    assert [s["step"] for s in est["steps"]] == ["owners", "drive", "rent", "parcels", "photos", "classify", "score",
+                                                 "drill", "research"]
+    parcels = next(s for s in est["steps"] if s["step"] == "parcels")
+    assert parcels["usd"] == 0 and parcels["skus"] == [] and not parcels["paid"] and "Free" in parcels["message"]
     research = next(s for s in est["steps"] if s["step"] == "research")
     assert research["usd"] == 0 and research["skus"] == [] and "Claude plan" in research["message"]
     assert est["total_usd"] == round(sum(s["usd"] for s in est["steps"]), 2)

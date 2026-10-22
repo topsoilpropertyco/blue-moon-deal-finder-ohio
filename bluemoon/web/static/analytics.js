@@ -21,6 +21,7 @@
     street_view_static: 'Street View photos',
     static_maps: 'Satellite photos',
     street_view_metadata: 'Street View lookups (free)',
+    county_gis: 'County records (free county websites)',
     vision_claude_cli: 'Photo check on your Claude plan',
     vision_anthropic_api: 'Photo check on the Anthropic API',
   };

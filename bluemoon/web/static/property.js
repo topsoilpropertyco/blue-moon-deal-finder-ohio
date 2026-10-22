@@ -32,6 +32,7 @@
     year_unknown: 'Year built unknown', year_invalid: 'Year built looked wrong, so it is ignored', units_unknown: 'Unit count unknown',
     units_from_addresses: 'Units estimated from the number of addresses', shared_apn: 'Shares a parcel number with another row',
     no_owner_name: 'No owner name in the export', no_coordinates: 'No map location yet', no_address: 'No street address',
+    county_owner_differs: 'The county tax record shows a different owner than the Crexi export',
   };
   const RENT_FIT = {in: ['g', 'Area rents match the scale'], near: ['y', 'Area rents are close to the scale'], out: ['r', 'Area rents are off the scale'], na: ['n', 'No HUD rent for this area']};
   const RENT_SOURCE = {hud_arcgis: 'HUD Fair Market Rents (HUD map service)', hud_file: 'HUD Fair Market Rents (downloaded file)', hud_api: 'HUD Fair Market Rents (HUD API)'};

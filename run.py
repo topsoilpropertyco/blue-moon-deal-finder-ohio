@@ -45,11 +45,13 @@ STEP_HELP = {
     "owners": "Owner type, portfolio, years owned, debt, absentee (free).",
     "drive": "Drive times from the market's origin (Google with a key, else a free estimate).",
     "rent": "HUD rents compared with the rent scale (free).",
+    "parcels": "County records: the owner and the tax mailing address from each Ohio county's free public parcel "
+               "map, buy box first. Fills the DRILL's county auditor stage (free). Try --limit 5 --dry-run, then --limit 5.",
     "photos": "Street View + satellite photos for buy-box properties (Google, paid).",
     "classify": "Claude looks at the photos (your Claude plan).",
     "score": "Buy box, colors, Blue Moon score and rank (free).",
     "drill": "DRILL automatic stages and contact levels (free).",
-    "all": "Every step in order: owners, drive, rent, score, photos, classify, score, drill.",
+    "all": "Every step in order: owners, drive, rent, score, county records, photos, classify, score, drill.",
     "calibrate": "Re-check the photos you reviewed and report the photo check's accuracy.",
     "research": "AI research: Claude searches the web for each buy-box owner's business filing, officers and agent, "
                 "website, business phone and email, and social pages (your Claude plan; never people-search sites "

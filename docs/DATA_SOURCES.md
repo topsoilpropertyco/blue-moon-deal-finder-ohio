@@ -209,7 +209,8 @@ These work in your browser but refuse computer programs, so the app only links t
 - **Links that will age:** Warren's link holds a tax-year code that may change next year. Wayne's record-card link has 2026 in it.
 - **Not checked:** Clark's auditor map and municipal court search; Greene's probate search; Hamilton's probate search; Hardin's probate search (no answer on port 8888); whether Marion's court search includes estates; several municipal courts (Xenia, Fairborn, Beavercreek, Bellefontaine, Kettering, Vandalia, Miamisburg, Hamilton, Middletown, Fairfield, Oxford, Greenfield); Indiana sheriff sales.
 - **City rental and code programs** were only researched for the county seats. Springfield and Sidney run rental registries with no public search. Other cities may have programs we did not find.
-- **Statewide parcel map** data is mostly from 2023, so mailing addresses can be stale.
+- **Statewide parcel map** data is mostly from 2023, so mailing addresses can be stale. (The County records step uses it only for counties with no live service of their own, and marks what it takes from it "older statewide data".)
+- **County parcel map services are now read automatically** by the County records step (`config/parcels.yaml`, checked 2026-10-22): the owner and tax mailing address for Franklin, Greene, Delaware, Champaign, Madison, Logan, Fayette, Clinton, Shelby, Clark and Union come from each county's free ArcGIS layer, with no key. Miami's layer is switched off because it is not published as open data. The auditor pages themselves are still links only.
 - **HUD USER (huduser.gov)** answered earlier in the day, then returned errors (503). HUD's map service (what the app uses by default) still answered.
 - **Indiana sales disclosure** site failed a security check from our server; download it in your browser.
 - **Ohio voter file** rules for business use were not checked.

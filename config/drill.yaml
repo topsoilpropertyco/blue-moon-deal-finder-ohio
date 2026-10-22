@@ -53,7 +53,7 @@ stages:
     cost: free
     applies_to: [all]
     sources: [county_auditor, county_gis]
-    method: Open the parcel page by parcel number. Confirm the current owner, the tax mailing address and the last transfer date.
+    method: Open the parcel page by parcel number. Confirm the current owner, the tax mailing address and the last transfer date. (The County records step already did this by itself for most Ohio counties; what is left here is the owners it found nothing for.)
     hit_rate: 0.85
     learn: Tax records give the legal owner of record and catch recent sales Crexi missed.
 

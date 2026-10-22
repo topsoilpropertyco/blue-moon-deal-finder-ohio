@@ -97,6 +97,7 @@ class Settings:
         ac_raw = _load_yaml(self.root / "config" / "asset_classes.yaml")
         self.drill: dict = _load_yaml(self.root / "config" / "drill.yaml")
         self.sources: dict = _load_yaml(self.root / "config" / "sources.yaml")
+        self.parcels: dict = _load_yaml(self.root / "config" / "parcels.yaml")
 
         defaults = ac_raw.get("default_signals", {})
         self.asset_classes: dict[str, AssetClass] = {}

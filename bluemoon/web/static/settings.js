@@ -28,6 +28,7 @@
     street_view_static: 'Street View photos',
     static_maps: 'Satellite photos',
     street_view_metadata: 'Street View lookups',
+    county_gis: 'County records (free county websites)',
   };
   const BACKENDS = {
     claude_cli: 'Your Claude plan, through Claude Code on the Mac Mini (no per-call bill)',

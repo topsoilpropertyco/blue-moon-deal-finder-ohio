@@ -233,6 +233,17 @@ CREATE INDEX IF NOT EXISTS ix_findings_property ON research_findings(property_id
 CREATE INDEX IF NOT EXISTS ix_findings_contact ON research_findings(contact_point_id);
 CREATE INDEX IF NOT EXISTS ix_findings_run ON research_findings(run_id);
 
+-- County records (enrich/parcels.py): which properties were looked up in the county's parcel service, and what
+-- came of it. An error is not recorded (it is tried again). status: found | older | no_parcel | no_data | ambiguous.
+CREATE TABLE IF NOT EXISTS parcel_lookups (
+  property_id INTEGER PRIMARY KEY REFERENCES properties(id) ON DELETE CASCADE,
+  source TEXT NOT NULL,            -- OH:GREENE | OH:statewide
+  status TEXT NOT NULL,
+  owner_differs INTEGER NOT NULL DEFAULT 0,
+  detail TEXT,
+  checked_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS credit_ledger (
   id INTEGER PRIMARY KEY,
   property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,

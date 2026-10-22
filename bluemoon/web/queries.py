@@ -27,6 +27,7 @@ from ..config import AssetClass, Settings, get_settings, has_secret
 from ..db import loads, market_by_slug, one, pending_rescore, rows, scalar, this_month
 from ..drill import engine
 from ..drill import links as drill_links
+from ..enrich import parcels
 from ..enrich.owners import OWNER_TYPE_LABELS as OWNER_TYPES
 from ..imagery import explain_prior, images_for, map_links, queue_counts
 from ..scoring import buckets as B
@@ -631,6 +632,7 @@ def _layers(conn: sqlite3.Connection, mc: MarketCtx, c: Mapping[str, int]) -> li
                                "JOIN properties p ON p.id = a.property_id WHERE p.market_id = ? "
                                "AND a.stage_key = ?", (mc.id, engine.RECORDS_STAGE)) or 0)
     n, box = c["properties"], c["in_buybox"]
+    parcel_done, parcel_total = parcels.layer_counts(conn, mc.id)
     visual = mc.ac.visual_enabled
     return [
         _layer("owners", "Owners", c["owners_done"], n),
@@ -640,6 +642,8 @@ def _layers(conn: sqlite3.Connection, mc: MarketCtx, c: Mapping[str, int]) -> li
         _layer("photos", "Photos", c["photos_done"], box, enabled=visual, note="Buy-box properties only"),
         _layer("photo_check", "Photo check", c["photo_checked"], box, enabled=visual, note="Buy-box properties only"),
         _layer("score", "Score", c["scored"], n),
+        _layer("parcels", "County records", parcel_done, parcel_total, enabled=parcel_total > 0,
+               note="Free county websites; Ohio properties with a map location"),
         _layer("drill", "DRILL auto stages", drilled, n),
     ]
 
@@ -1101,6 +1105,8 @@ def api_usage(conn: sqlite3.Connection, settings: Settings) -> list[dict]:
                         usd=round(billable * float(price.get("per_1000") or 0) / 1000.0, 2))
         elif r["sku"] == "vision_anthropic_api":
             item.update(billable=units, usd=round(units * per_call, 2), note="Estimated from config.yaml")
+        elif r["sku"] == "county_gis":
+            item.update(note="Free county websites (no bill)")
         elif r["sku"] in ("vision_claude_cli", "research_claude_cli"):
             item.update(note="Runs on your Claude plan (no per-call bill)")
         out.append(item)
