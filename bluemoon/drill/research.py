@@ -3,10 +3,14 @@
 One Claude call per owner: an owner's properties share one answer (grouped by portfolio, else by owner name),
 buy-box owners first. Claude may only search the web and read pages. People-search, background-check and
 data-broker sites, and Crexi, are blocked twice:
-  1. in Claude Code itself (a deny rule per site, for the site and every subdomain), and
+  1. in Claude Code itself: page reads have a deny rule per site (the site and every subdomain), archive,
+     translation and page-reader sites can't be read at all (they would show a blocked site's pages), and every
+     web search gets those sites added to its blocked_domains by a hook (websearch_guard.py), and
   2. here, after the answer comes back: every finding needs the exact link where it was seen, and a finding whose
-     link (or value) is on one of those sites, or isn't a web link at all, is dropped. This second check is the
-     real guarantee; the prompt's own rules are only a first layer.
+     link (or value) is on one of those sites, carries one's address (an archive or translation copy), or isn't
+     a plain web link at all, is dropped. Claude's free text (summary, reasons) is never kept when anything was
+     dropped or it names a blocked site, and phone numbers and emails are taken out of it. This second check is
+     the real guarantee; the prompt's own rules are only a first layer.
 What passes is saved "not tested yet" (the yellow badge): people with source 'ai_research', contacts with the link
 in their notes. Nothing here confirms an owner (level 3 needs a conversation), and a registered-agent company's
 phone or email is never saved as a contact. Findings below `min_confidence` are kept only as leads.
@@ -25,13 +29,18 @@ import json
 import logging
 import math
 import re
+import shlex
 import sqlite3
+import sys
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -79,6 +88,11 @@ DEFAULT_BLOCKED = (
     "searchpeoplefree.com", "cyberbackgroundchecks.com", "advancedbackgroundchecks.com", "familytreenow.com",
     "peekyou.com", "pipl.com", "checkpeople.com", "voterrecords.com", "officialusa.com", "zoominfo.com",
 )
+# Sites that show other sites' pages (archives, translators, page readers). Claude Code may not read them at all:
+# a blocked site's page read through one of them would get past that site's own deny rule.
+READ_THROUGH_SITES = ("archive.org", "archive.ph", "archive.today", "archive.is", "archive.li", "archive.md",
+                      "translate.goog", "r.jina.ai")
+WEBSEARCH_GUARD = Path(__file__).with_name("websearch_guard.py")   # the PreToolUse hook on every web search
 DEFAULT_AGENT_SERVICES = (
     "CT Corporation", "Corporation Service Company", "CSC", "Northwest Registered Agent", "Registered Agents Inc",
     "InCorp Services", "Cogency Global", "National Registered Agents", "Harbor Compliance", "LegalZoom",
@@ -92,6 +106,9 @@ ROLE_WORDS = {"member": "Member", "manager_of_llc": "LLC manager", "officer": "O
               "organizer": "Organizer (filed the paperwork; may be a lawyer)", "registered_agent": "Statutory agent",
               "property_manager": "Property manager", "other": "Named in a filing"}
 CHANNEL_WORDS = {"phone": "phone", "email": "email", "social": "social page"}
+# The label a finding from a blocked site keeps (nothing Claude wrote about it is stored).
+KIND_WORDS = {"entity": "Business filing", "person": "Person", "website": "Website", "phone": "Phone",
+              "email": "Email", "social": "Social page", "contact": "Contact"}
 
 
 # --- settings -----------------------------------------------------------------------------------
@@ -122,7 +139,7 @@ class ResearchConfig(BaseModel):
     est_seconds_per_owner: float = Field(120, gt=0)
     max_people: int = Field(6, ge=0)
     max_contacts: int = Field(8, ge=0)
-    blocked_domains: list[str] = Field(default_factory=list)
+    blocked_domains: list[str] = Field(default_factory=list, validate_default=True)   # the defaults always apply
     registered_agent_services: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENT_SERVICES))
     confirm_over_properties: int = Field(50, ge=0)
 
@@ -155,7 +172,8 @@ def research_config(settings: Settings | None = None) -> ResearchConfig:
 # --- blocked sites ------------------------------------------------------------------------------
 
 def url_host(url: Any) -> str | None:
-    """The host of an http(s) link ('www.example.com'), or None when it isn't one."""
+    """The host of an http(s) link ('www.example.com'), or None when it isn't one. A link whose site part a
+    browser could read differently from Python (a backslash, '@', '%' or a non-ASCII letter in it) isn't one."""
     text = clean_str(url)
     if not text:
         return None
@@ -165,21 +183,91 @@ def url_host(url: Any) -> str | None:
         return None
     if parts.scheme.lower() not in ("http", "https"):
         return None
+    if not parts.netloc.isascii() or any(c in parts.netloc for c in "\\@%"):
+        return None
     host = (parts.hostname or "").strip(".").lower()
-    return host or None
+    if not re.fullmatch(r"[a-z0-9_.:-]+", host):
+        return None
+    try:
+        host.encode("idna")
+    except UnicodeError:
+        return None
+    return host
+
+
+def _as_browser_reads(text: str) -> str:
+    """Text with percent codes decoded (a few times over), full-width letters made plain, and lower case: how
+    a browser reads the site names in a link."""
+    for _ in range(3):
+        decoded = unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return unicodedata.normalize("NFKC", text).replace("\u3002", ".").lower()   # U+3002 counts as a dot
+
+
+@lru_cache(maxsize=8)
+def _sites_pattern(domains: tuple[str, ...]) -> re.Pattern:
+    alts = "|".join(re.escape(d) for d in sorted(domains, key=len, reverse=True))
+    return re.compile(rf"(?<![a-z0-9-])({alts})(?![a-z0-9-])")
+
+
+def named_site(text: Any, domains: list[str]) -> str | None:
+    """The first blocked site whose address appears anywhere in a link or a piece of text, or None
+    ('https://web.archive.org/web/2024/https://www.spokeo.com/x' -> 'spokeo.com')."""
+    t = clean_str(text)
+    if not t or not domains:
+        return None
+    m = _sites_pattern(tuple(domains)).search(_as_browser_reads(t))
+    return m.group(1) if m else None
+
+
+def _translated_host(host: str | None) -> str | None:
+    """'www-spokeo-com.translate.goog' (a Google Translate copy of a page) -> 'www.spokeo.com'."""
+    if not host or not host.endswith(".translate.goog"):
+        return None
+    return host.removesuffix(".translate.goog").replace("--", "\0").replace("-", ".").replace("\0", "-")
 
 
 def blocked_by(url: Any, domains: list[str]) -> str | None:
-    """The blocked site this link is on (the site itself or any subdomain), or None."""
-    host = url_host(url)
-    if host is None:
+    """The blocked site a link is on or carries, or None: the site itself or any subdomain, a copy of one of its
+    pages on another site (an archive, translation or page-reader link with the blocked site's address in it), or
+    a link written so a browser reads it as the blocked site."""
+    if not clean_str(url):
         return None
-    return next((d for d in domains if host == d or host.endswith("." + d)), None)
+    host = url_host(url)
+    for h in (host, _translated_host(host)):
+        hit = next((d for d in domains if h and (h == d or h.endswith("." + d))), None)
+        if hit:
+            return hit
+    return named_site(url, domains)
 
 
 def deny_rules(domains: list[str]) -> list[str]:
-    """Claude Code deny rules: 'WebFetch(domain:x.com)' covers only x.com, so each site also gets '*.x.com'."""
-    return [rule for d in domains for rule in (f"WebFetch(domain:{d})", f"WebFetch(domain:*.{d})")]
+    """Claude Code deny rules: 'WebFetch(domain:x.com)' covers only x.com, so each site also gets '*.x.com'.
+    The archive, translation and page-reader sites are always denied too."""
+    sites = list(dict.fromkeys([*domains, *READ_THROUGH_SITES]))
+    return [rule for d in sites for rule in (f"WebFetch(domain:{d})", f"WebFetch(domain:*.{d})")]
+
+
+def websearch_settings(domains: list[str]) -> dict:
+    """Claude Code settings (--settings) with the hook that adds the blocked sites to every web search."""
+    command = shlex.join([sys.executable, "-I", str(WEBSEARCH_GUARD), json.dumps(list(domains))])
+    return {"hooks": {"PreToolUse": [{"matcher": "WebSearch",
+                                      "hooks": [{"type": "command", "command": command, "timeout": 30}]}]}}
+
+
+_EMAIL_IN_TEXT = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_PHONE_IN_TEXT = re.compile(r"(?<![\d])(?:\+?1[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)")
+
+
+def safe_text(text: str, cfg: ResearchConfig, blocked: int = 0) -> str:
+    """Claude's free text (summary, not-found reason, match reason, label) as it may be stored and shown: nothing
+    when anything in the answer came from a blocked site or the text names one, and never a phone number or
+    email address (those belong in contacts, with the page they were seen on)."""
+    if not text or blocked or named_site(text, cfg.blocked_domains):
+        return ""
+    return _PHONE_IN_TEXT.sub("[phone removed]", _EMAIL_IN_TEXT.sub("[email removed]", text))
 
 
 # --- the answer ---------------------------------------------------------------------------------
@@ -418,7 +506,7 @@ and the city or the business match, and say why in match_reason.
 
 Rules:
 - Never use or cite people-search, background-check or data-broker sites. That includes: {sites}. Never use \
-crexi.com either.
+crexi.com either, and never read or cite copies of those sites' pages (archive, translation or page-reader links).
 - Never give home addresses, relatives, ages, or anything about health, religion, ethnicity or other personal traits.
 - Never guess an email address or phone number from a pattern. Give only what you saw written on a page.
 - Every item needs source_url: the exact page where you saw it. Give a confidence: high (the page names this owner \
@@ -470,6 +558,7 @@ class ResearchCLI(ClaudeCLIBackend):
                 "--allowedTools", "WebSearch", "WebFetch",      # in print mode both need permission, or they're denied
                 "--permission-mode", "dontAsk",                 # anything else that would ask is denied
                 "--strict-mcp-config",                          # none of your connectors (mail, drive...)
+                "--settings", json.dumps(websearch_settings(self.blocked_domains), separators=(",", ":")),
                 "--disallowedTools", *deny_rules(self.blocked_domains),   # deny beats allow
                 "--json-schema", json.dumps(schema or research_schema(), separators=(",", ":")),
                 "--no-session-persistence",
@@ -596,7 +685,7 @@ def _source_problem(item: _Found, cfg: ResearchConfig) -> tuple[str, str] | None
 def screen(answer: ResearchAnswer, cfg: ResearchConfig) -> list[Finding]:
     """Every item of an answer as a Finding with its status. Pure: nothing is written here.
 
-    blocked: the source (or the value, for a link) is on a blocked site; the value itself is not kept.
+    blocked: the source (or the value, for a link) is on a blocked site; nothing Claude wrote about it is kept.
     rejected: no usable source link, a value that isn't a real phone, email or web link, or a registered-agent
       company's contact. lead: below min_confidence, or past max_people / max_contacts. kept: everything else."""
     out: list[Finding] = []
@@ -606,12 +695,13 @@ def screen(answer: ResearchAnswer, cfg: ResearchConfig) -> list[Finding]:
     def add(f: Finding, item: _Found, value_url: str | None = None) -> None:
         problem = _source_problem(item, cfg)
         site = blocked_by(value_url, cfg.blocked_domains) if value_url else None
-        if site and not problem:
+        if site and (not problem or problem[0] != "blocked"):
             problem = ("blocked", f"A page on {site}, a site that is never used.")
+        f.match_reason = safe_text(f.match_reason, cfg)
         if problem:
             f.status, f.why = problem
-            if f.status == "blocked":
-                f.value, f.person_name = "", None      # nothing from a blocked site is kept
+            if f.status == "blocked":                  # nothing from a blocked site is kept, not even its wording
+                f.value, f.person_name, f.label, f.match_reason = "", None, KIND_WORDS[f.kind], ""
         elif f.status == "kept" and _rank(f.confidence) < bar:
             f.status, f.why = "lead", f"Confidence {f.confidence or 'low'}: kept as a lead, not added as a contact."
         out.append(f)
@@ -640,7 +730,7 @@ def screen(answer: ResearchAnswer, cfg: ResearchConfig) -> list[Finding]:
     for c in answer.contacts:
         ch = c.channel.lower() if c.channel.lower() in CHANNEL_WORDS else None
         f = Finding(ch or "contact", c.value, c.source_url, c.confidence, c.match_reason,
-                    label=c.label or CHANNEL_WORDS.get(ch or "", "contact").capitalize(),
+                    label=safe_text(c.label, cfg) or CHANNEL_WORDS.get(ch or "", "contact").capitalize(),
                     person_name=clean_str(c.person_name), channel=ch)
         agentish = c.belongs_to == "registered_agent" and (
             not clean_str(c.person_name) or L.looks_like_entity(c.person_name))
@@ -662,18 +752,27 @@ def screen(answer: ResearchAnswer, cfg: ResearchConfig) -> list[Finding]:
 
 def without_blocked(answer: ResearchAnswer, cfg: ResearchConfig) -> tuple[ResearchAnswer, int]:
     """The answer minus every item seen on (or pointing to) a blocked site, and how many were taken out. This
-    is what gets cached: nothing from a people-search site is ever stored."""
+    is what gets cached: nothing from a people-search site is ever stored, and the free text goes through
+    safe_text (none at all when something was taken out)."""
     def ok(item: _Found, value_url: str | None = None) -> bool:
         return not blocked_by(item.source_url, cfg.blocked_domains) and not (
             value_url and blocked_by(value_url, cfg.blocked_domains))
 
+    def tidy(item: Any) -> Any:
+        update = {"match_reason": safe_text(item.match_reason, cfg)}
+        if isinstance(item, FoundContact):
+            update["label"] = safe_text(item.label, cfg)
+        return item.model_copy(update=update)
+
     clean = answer.model_copy(update={
-        "entities": [e for e in answer.entities if ok(e)],
-        "people": [p for p in answer.people if ok(p)],
-        "websites": [w for w in answer.websites if ok(w, w.url)],
-        "contacts": [c for c in answer.contacts if ok(c, c.value if c.channel == "social" else None)]})
+        "entities": [tidy(e) for e in answer.entities if ok(e)],
+        "people": [tidy(p) for p in answer.people if ok(p)],
+        "websites": [tidy(w) for w in answer.websites if ok(w, w.url)],
+        "contacts": [tidy(c) for c in answer.contacts if ok(c, c.value if c.channel == "social" else None)]})
     dropped = sum(len(getattr(answer, k)) - len(getattr(clean, k)) for k in ("entities", "people", "websites",
                                                                             "contacts"))
+    clean.summary = safe_text(answer.summary, cfg, dropped)
+    clean.not_found_reason = safe_text(answer.not_found_reason, cfg, dropped)
     return clean, dropped
 
 
@@ -771,6 +870,9 @@ def apply_answer(conn: sqlite3.Connection, market_id: int, g: OwnerGroup, answer
     do-not-contact), one ai_research check-off per property (found | nothing, actor 'ai') and the new state."""
     dcfg = E.drill_config(settings)
     found = screen(answer, cfg)
+    blocked = sum(1 for f in found if f.status == "blocked")
+    answer = answer.model_copy(update={"summary": safe_text(answer.summary, cfg, blocked),   # what may be shown
+                                       "not_found_reason": safe_text(answer.not_found_reason, cfg, blocked)})
     with E._tx(conn):
         dnc = E._dnc_keys(conn)
         found_ids: set[int] = set()
@@ -785,7 +887,8 @@ def apply_answer(conn: sqlite3.Connection, market_id: int, g: OwnerGroup, answer
             for i, f in enumerate(found):
                 if f.status != "kept" or f.kind != "person":
                     continue
-                person_id, created = E._add_person(conn, pid, f.value, role=f.role, source=SOURCE, notes=_note(f))
+                person_id, created = E._add_person(conn, pid, f.value, role=f.role, source=SOURCE, notes=_note(f),
+                                                   upgrade_role=False)
                 person_ids[E._name_key(f.value)] = person_id
                 links[i] = (None, person_id)
                 if created and f.role != "agent" and not L.looks_like_entity(f.value):
@@ -823,7 +926,7 @@ def apply_answer(conn: sqlite3.Connection, market_id: int, g: OwnerGroup, answer
              for pid, _, f, cp_id, person_id in rows_out])
         for ctx in E.load_contexts(conn, property_ids=g.property_ids):   # found: an exhausted owner reopens
             E._save_state(conn, ctx, E.evaluate(ctx, dcfg, new_info=ctx.id in found_ids))
-    res.blocked = sum(1 for f in found if f.status == "blocked")
+    res.blocked = blocked
     res.leads = sum(1 for f in found if f.status == "lead")
     return res
 
@@ -1199,5 +1302,6 @@ def research_quality(conn: sqlite3.Connection, market_slug: str) -> dict:
 
 __all__ = ["MockResearchBackend", "ResearchAnswer", "ResearchCLI", "ResearchConfig", "apply_answer", "blocked_by",
            "build_prompt", "cached_answer", "contact_marked", "deny_rules", "get_research_backend", "mark_finding",
-           "owner_groups", "parse_answer", "property_research", "research_config", "research_estimate",
-           "research_owners", "research_quality", "research_schema", "screen", "url_host"]
+           "named_site", "owner_groups", "parse_answer", "property_research", "research_config", "research_estimate",
+           "research_owners", "research_quality", "research_schema", "safe_text", "screen", "url_host",
+           "websearch_settings"]

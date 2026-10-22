@@ -191,6 +191,9 @@ def test_built_in_blocklist_always_applies(tmp_root, settings):
     set_research(tmp_root, blocked_domains=[])
     rc = R.research_config()
     assert "crexi.com" in rc.blocked_domains and "truepeoplesearch.com" in rc.blocked_domains
+    set_research(tmp_root, blocked_domains=None)                 # a missing or empty key still blocks them
+    assert "truepeoplesearch.com" in R.research_config().blocked_domains
+    assert "crexi.com" in R.ResearchConfig().blocked_domains and R.deny_rules(R.ResearchConfig().blocked_domains)
 
 
 def test_blocked_sites_match_subdomains_only():
@@ -199,9 +202,44 @@ def test_blocked_sites_match_subdomains_only():
     assert R.blocked_by("http://TruePeopleSearch.com", domains) == "truepeoplesearch.com"
     assert R.blocked_by("https://www.crexi.com/properties/1", domains) == "crexi.com"
     assert R.blocked_by("https://nottruepeoplesearch.com", domains) is None
-    assert R.blocked_by("https://www.example.org/truepeoplesearch.com", domains) is None
+    assert R.blocked_by("https://not-truepeoplesearch.com/x", domains) is None
+    assert R.blocked_by("https://www.example.org/oh-sos/filing/4455", domains) is None
     assert R.url_host("ftp://example.org/x") is None and R.url_host("javascript:alert(1)") is None
     assert R.normalize_domain("https://www.Spokeo.com/x") == "spokeo.com" and R.normalize_domain("*.a.com") == "a.com"
+
+
+@pytest.mark.parametrize("url", [
+    "https://web.archive.org/web/2024/https://www.truepeoplesearch.com/find/person/x",   # an archive copy
+    "https://archive.ph/www.truepeoplesearch.com/find/x",
+    "https://web.archive.org/web/2024/https://WWW.TruePeopleSearch.COM/find/x",           # any letter case
+    "https://r.jina.ai/https://www.truepeoplesearch.com/find/x",                         # a page reader
+    "https://www-truepeoplesearch-com.translate.goog/find/x",                            # a translated copy
+    "https://www.google.com/url?q=https%253A%252F%252Fwww.truepeoplesearch.com%252Fx",   # a redirect, encoded twice
+    "https://www.example.org/truepeoplesearch.com",                                      # carries the address
+    "https://truepeoplesearch.com\\@example.org/x",                                     # browsers open the first site
+    "https://%74ruepeoplesearch.com/x",                                                  # percent-coded letter
+    "https://\uff54\uff52\uff55\uff45peoplesearch.com/x",                                  # full-width letters
+])
+def test_copies_and_disguised_links_of_blocked_sites_are_blocked(url):
+    assert R.blocked_by(url, ["truepeoplesearch.com", "crexi.com"]) == "truepeoplesearch.com"
+
+
+def test_links_a_browser_could_read_differently_are_not_web_links():
+    for url in ("https://example.org\\@example.com/x", "https://user@example.org/x", "https://%65xample.org/x",
+                "https://\uff45xample.org/x", "https://exa mple.org/x"):
+        assert R.url_host(url) is None, url
+    assert R.url_host("https://Maplerow.Example.com:443/contact") == "maplerow.example.com"
+
+
+def test_screen_blocks_findings_seen_on_a_copy_of_a_blocked_site(settings):
+    wrapped = "https://web.archive.org/web/2024/https://www.whitepages.com/name/Robin-Sample/Springfield-OH"
+    raw = answer(contacts=[{"channel": "phone", "value": "(937) 555-0199", "label": "Cell", "belongs_to": "owner",
+                            "person_name": "Robin Sample", "source_url": wrapped, "confidence": "high",
+                            "match_reason": ""}])
+    found = [f for f in R.screen(R.ResearchAnswer.model_validate(raw), R.research_config()) if f.kind == "phone"]
+    assert [(f.status, f.value) for f in found] == [("blocked", "")]
+    clean, dropped = R.without_blocked(R.ResearchAnswer.model_validate(raw), R.research_config())
+    assert dropped == 1 and "0199" not in clean.model_dump_json()
 
 
 # --- the Claude Code command ---------------------------------------------------------------------
@@ -228,9 +266,12 @@ def test_cli_argv_has_every_safety_flag_and_no_keys(settings, monkeypatch):
                                                                    "summary", "not_found_reason"]
     deny = cmd[i("--disallowedTools") + 1:i("--json-schema")]
     for rule in ("WebFetch(domain:truepeoplesearch.com)", "WebFetch(domain:*.truepeoplesearch.com)",
-                 "WebFetch(domain:crexi.com)", "WebFetch(domain:*.crexi.com)", "WebFetch(domain:spokeo.com)"):
+                 "WebFetch(domain:crexi.com)", "WebFetch(domain:*.crexi.com)", "WebFetch(domain:spokeo.com)",
+                 "WebFetch(domain:*.archive.org)", "WebFetch(domain:*.translate.goog)", "WebFetch(domain:r.jina.ai)"):
         assert rule in deny
     assert all(r.startswith("WebFetch(domain:") for r in deny)
+    hook = json.loads(cmd[i("--settings") + 1])["hooks"]["PreToolUse"][0]
+    assert hook["matcher"] == "WebSearch" and "websearch_guard.py" in hook["hooks"][0]["command"]
     joined = " ".join(cmd[3:])
     for bad in ("--bare", "bypassPermissions", "--dangerously-skip-permissions", "--add-dir", "Bash", "Read",
                 "Write", "Edit"):
@@ -242,6 +283,36 @@ def test_cli_argv_has_every_safety_flag_and_no_keys(settings, monkeypatch):
     assert call["cwd"].endswith("bluemoon-research") and "blue-moon-deal-finder" not in call["cwd"]
     assert call["timeout"] == 420 and call["stdin"] == subprocess.DEVNULL
     assert be.last_result.num_turns == 7
+
+
+def test_every_web_search_gets_the_blocked_sites(settings):
+    """The --settings hook really runs (through the shell, as Claude Code runs it) and adds the blocked list."""
+    from bluemoon.drill import websearch_guard as G
+    cfg = R.research_config()
+    command = R.websearch_settings(cfg.blocked_domains)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+    def run_hook(tool_input) -> subprocess.CompletedProcess:
+        event = {"hook_event_name": "PreToolUse", "tool_name": "WebSearch", "tool_input": tool_input}
+        return subprocess.run(command, shell=True, input=json.dumps(event), capture_output=True, text=True,
+                              timeout=30)
+
+    done = run_hook({"query": "Maple Row Holdings LLC Springfield OH", "mode": "extended"})
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "allow" and out["hookEventName"] == "PreToolUse"
+    new = out["updatedInput"]
+    assert new["query"] == "Maple Row Holdings LLC Springfield OH" and new["mode"] == "extended"
+    assert "truepeoplesearch.com" in new["blocked_domains"] and "crexi.com" in new["blocked_domains"]
+    assert "allowed_domains" not in new
+    # A search limited to some sites: blocked ones are taken out of that list (both lists can't be sent).
+    out = G.guard({"query": "x", "allowed_domains": ["www.spokeo.com", "ohiosos.gov"], "blocked_domains": ["a.com"]},
+                  cfg.blocked_domains)
+    assert out["updatedInput"]["allowed_domains"] == ["ohiosos.gov"] and "blocked_domains" not in out["updatedInput"]
+    assert G.guard({"query": "x", "allowed_domains": ["spokeo.com"]}, cfg.blocked_domains)["permissionDecision"] == \
+        "deny"
+    # Anything unexpected refuses the search instead of letting it through unguarded.
+    bad = subprocess.run(command, shell=True, input="not json", capture_output=True, text=True, timeout=30)
+    assert bad.returncode == 2 and "Web search stopped" in bad.stderr
 
 
 @pytest.mark.parametrize("stderr", ["error: unknown option '--allowedTools'",
@@ -286,8 +357,8 @@ def test_screen_drops_blocked_unsourced_and_agent_findings(settings):
     office = found[("phone", "Office line")]
     assert office.status == "kept" and office.value == "(937) 555-0142"
     assert found[("email", "Office email")].value == "leasing@maplerow.example.com"
-    cell = found[("phone", "Cell")]
-    assert cell.status == "blocked" and cell.value == "" and cell.person_name is None
+    cell = found[("phone", "Phone")]                                # its own label ("Cell") isn't kept either
+    assert cell.status == "blocked" and cell.value == "" and cell.person_name is None and cell.match_reason == ""
     assert found[("phone", "Agent line")].status == "rejected"
     assert found[("email", "Guess")].status == "rejected" and "No link" in found[("email", "Guess")].why
     assert found[("social", "Facebook page")].status == "lead"
@@ -317,6 +388,42 @@ def test_screen_rules_for_values_and_roles(settings):
 def test_cached_answers_never_hold_blocked_findings(settings):
     clean, dropped = R.without_blocked(R.ResearchAnswer.model_validate(answer()), R.research_config())
     assert dropped == 1 and "truepeoplesearch" not in clean.model_dump_json() and "0199" not in clean.model_dump_json()
+
+
+def test_nothing_claude_wrote_about_a_blocked_site_is_stored_or_shown(conn, settings):
+    pid = owner_prop(conn, "MAPLE ROW HOLDINGS LLC")
+    raw = answer(
+        people=[{"name": "Robin Sample", "role": "member", "source_url": "https://www.spokeo.com/Robin-Sample",
+                 "confidence": "high", "match_reason": "Spokeo: age 71, lives at 12 Elm St, relatives Ann and Bob"}],
+        contacts=[{"channel": "phone", "value": "(937) 555-0199", "label": "Home phone 937-555-0199 (Whitepages)",
+                   "belongs_to": "owner", "person_name": "Robin Sample",
+                   "source_url": "https://www.whitepages.com/name/Robin-Sample", "confidence": "high",
+                   "match_reason": "Whitepages lists 937-555-0199 at 12 Elm St"}],
+        summary="Whitepages shows the owner's cell 937-555-0199, age 71.")
+    res = R.research_owners(conn, MARKET, backend=Scripted({"MAPLE ROW HOLDINGS LLC": raw}))
+    assert res["blocked_dropped"] == 2
+    for table in ("research_findings", "research_runs", "api_cache", "drill_attempts", "people", "contact_points"):
+        dump = json.dumps(rows(conn, f"SELECT * FROM {table}"))
+        for bit in ("0199", "Elm St", "age 71", "Ann and Bob", "Whitepages", "Spokeo"):
+            assert bit not in dump, (table, bit)
+    blocked = rows(conn, "SELECT label, match_reason FROM research_findings WHERE status='blocked'")
+    assert sorted(b["label"] for b in blocked) == ["Person", "Phone"] and not any(b["match_reason"] for b in blocked)
+    shown = json.dumps(E.property_drill(conn, pid)["research"])
+    assert "0199" not in shown and "Elm St" not in shown
+
+
+def test_free_text_never_keeps_a_phone_or_email(conn, settings):
+    owner_prop(conn, "MAPLE ROW HOLDINGS LLC")
+    raw = answer(contacts=[], summary="Office line is 937-555-0142; write to leasing@maplerow.example.com.",
+                 entities=[{"name": "MAPLE ROW HOLDINGS LLC", "state": "OH", "status": "Active", "filing_id": "4455",
+                            "source_url": SRC, "confidence": "high",
+                            "match_reason": "Same name; a search result also showed (937) 555-0177."}])
+    R.research_owners(conn, MARKET, backend=Scripted({"MAPLE ROW HOLDINGS LLC": raw}))
+    run = one(conn, "SELECT summary FROM research_runs")
+    assert run["summary"] == "Office line is [phone removed]; write to [email removed]."
+    for table in ("research_findings", "research_runs", "api_cache"):
+        dump = json.dumps(rows(conn, f"SELECT * FROM {table}"))
+        assert "0142" not in dump and "0177" not in dump and "leasing@" not in dump, table
 
 
 # --- a run -------------------------------------------------------------------------------------
@@ -559,6 +666,31 @@ def test_marking_a_person_wrong_rejects_them(conn, settings):
         R.mark_finding(conn, blocked["id"], "kept")
     with pytest.raises(ValueError, match="wrong or kept"):
         R.mark_finding(conn, f["id"], "verified")
+
+
+@pytest.mark.parametrize("role", ["previous_owner", "other"])
+def test_research_never_changes_the_role_of_someone_it_did_not_add(conn, settings, role):
+    pid = owner_prop(conn, "MAPLE ROW HOLDINGS LLC")
+    E.run_auto_stages(conn, MARKET)
+    E.add_person(conn, pid, "Robin Sample", role=role, source="you")
+
+    def guess() -> str | None:
+        return E.best_guess_person(E.load_contexts(conn, property_ids=[pid])[0])
+
+    before = guess()
+    R.research_owners(conn, MARKET, backend=Scripted({"MAPLE ROW HOLDINGS LLC": answer()}))
+    person = one(conn, "SELECT role, source FROM people WHERE property_id=? AND name='Robin Sample'", (pid,))
+    assert (person["role"], person["source"]) == (role, "you")
+    assert scalar(conn, "SELECT COUNT(*) FROM people WHERE name='Robin Sample'") == 1 and guess() == before
+    f = one(conn, "SELECT * FROM research_findings WHERE kind='person' AND status='kept'")
+    R.mark_finding(conn, f["id"], "wrong", actor="team")
+    assert one(conn, "SELECT role FROM people WHERE property_id=? AND name='Robin Sample'", (pid,))["role"] == role
+    assert guess() == before
+    # A person research added itself still gets the better role.
+    pid2 = owner_prop(conn, "OAK LANE PROPERTIES LLC")
+    E._add_person(conn, pid2, "Casey Example", role="other", source="ai_research")
+    E._add_person(conn, pid2, "Casey Example", role="member", source="ai_research", upgrade_role=False)
+    assert one(conn, "SELECT role FROM people WHERE property_id=?", (pid2,))["role"] == "member"
 
 
 def test_findings_route_records_who(tmp_root, settings, conn):

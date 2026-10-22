@@ -889,16 +889,22 @@ def _insert_attempt(conn: sqlite3.Connection, property_id: int, stage_key: str, 
 
 
 def _add_person(conn: sqlite3.Connection, property_id: int, name: str, role: str | None = None,
-                source: str | None = None, notes: str | None = None) -> tuple[int, bool]:
-    """Add a person (deduped by name). Returns (person_id, created)."""
+                source: str | None = None, notes: str | None = None, *,
+                upgrade_role: bool = True) -> tuple[int, bool]:
+    """Add a person (deduped by name). Returns (person_id, created).
+
+    A person already there with no real role (none, 'other', 'previous_owner') takes the new role. With
+    upgrade_role=False that only happens to a person added by the same source: AI research never changes the
+    role of someone you or another stage added."""
     nm = clean_str(name)
     if not nm:
         raise ValueError("The person's name is blank.")
     key = _name_key(nm)
     role = clean_str(role)
-    for p in rows(conn, "SELECT id, name, role FROM people WHERE property_id=?", (property_id,)):
+    for p in rows(conn, "SELECT id, name, role, source FROM people WHERE property_id=?", (property_id,)):
         if _name_key(p["name"]) == key:
-            if role and (p["role"] in (None, "", "other", "previous_owner")) and role != "other":
+            if (role and (p["role"] in (None, "", "other", "previous_owner")) and role != "other"
+                    and (upgrade_role or p["source"] == clean_str(source))):
                 conn.execute("UPDATE people SET role=? WHERE id=?", (role, p["id"]))
             return int(p["id"]), False
     cur = conn.execute("INSERT INTO people(property_id, name, role, source, notes, created_at) VALUES(?,?,?,?,?,?)",
