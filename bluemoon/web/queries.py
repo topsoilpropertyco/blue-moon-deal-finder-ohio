@@ -41,6 +41,7 @@ from ..scoring.buybox import (
     apply_overrides,
     evaluate,
     scoring_config,
+    shown_minutes,
     visual_color,
 )
 from ..scoring.learn import OUTCOME_LABELS
@@ -841,25 +842,31 @@ SELECT s.in_buybox, s.exclusion_reasons AS reasons, COALESCE(s.rule_reasons, s.e
        (SELECT group_concat(o.reason) FROM buybox_overrides o
          WHERE o.property_id = p.id AND o.decision = 'keep') AS kept,
        (SELECT group_concat(o.reason) FROM buybox_overrides o
-         WHERE o.property_id = p.id AND o.decision = 'include' AND o.reason != '*') AS waived
+         WHERE o.property_id = p.id AND o.decision = 'include' AND o.reason != '*') AS waived,
+       (SELECT COALESCE(o.bucket, '') FROM buybox_overrides o
+         WHERE o.property_id = p.id AND o.reason = '*' AND o.decision = 'include') AS whole_in
 FROM properties p JOIN scores s ON s.property_id = p.id
 LEFT JOIN drive_times dt ON dt.property_id = p.id
 WHERE p.market_id = ? AND (s.in_buybox = 0 OR COALESCE(s.rule_reasons, s.exclusion_reasons) != '[]')
 """
-_TALLY = ("count", "only", "still_aside", "added", "kept", "waived", "estimated")
+_TALLY = ("count", "only", "still_aside", "added", "kept", "waived", "clearable", "estimated")
 
 
 def set_aside(conn: sqlite3.Connection, mc: MarketCtx) -> dict:
     """The Why? panel: why properties are out of the buy box (they are never deleted).
 
     total = how many are set aside now. Each reason (one property can have several) has `count` (the rules said
-    so, or set aside by hand), `only` (set aside for this reason alone), `still_aside`, `added` (in the buy box
-    by hand anyway), `kept` (Keep set aside), `waived` (still set aside, but you said this rule doesn't count:
-    other reasons keep them out), a plain `explain`, and its groups (`buckets`, same numbers plus
-    `estimated` drive times). A reason's groups add up to its count. Drive times that are straight-line
-    estimates are counted, and so are "close calls": set aside only for an estimated drive within
-    web.drive_close_call_minutes of the limit, which may come back once Google measures real drives.
-    One query and one pass over the rows (the summary is asked for often)."""
+    so, or set aside by hand), `only` (still set aside for this reason alone, after the decisions: a rule you
+    stopped counting is not another reason, and a property already in the buy box is not counted), `still_aside`,
+    `added` (in the buy box by hand anyway), `kept` (Keep set aside), `waived` (still set aside, but you said this
+    rule doesn't count: other reasons keep them out), a plain `explain`, and its groups (`buckets`, same numbers
+    plus `estimated` drive times and `clearable`: members with a decision the group's "Undo my decisions" takes
+    off). A reason's groups add up to its count. Drive times that are straight-line estimates are counted, and so
+    are "close calls": set aside only for an estimated drive within web.drive_close_call_minutes of the limit
+    (in whole minutes, the way the screens and the drive groups round them), which may come back once Google
+    measures real drives. `multi` = properties in the counts with more than one reason (the counts also take in
+    the ones added by hand, `by_hand.added`). One query and one pass over the rows (the summary is asked for
+    often)."""
     found = rows(conn, _SET_ASIDE_SQL, (mc.id,))
     spec = B.group_spec(mc.market, mc.ac, mc.settings)
     max_minutes = mc.market.get("max_drive_minutes")
@@ -867,7 +874,7 @@ def set_aside(conn: sqlite3.Connection, mc: MarketCtx) -> dict:
     by_reason: dict[str, Counter[str]] = {}
     by_group: dict[str, Counter[str]] = {}
     samples: dict[str, str] = {}
-    total = several = estimated = close = added = by_hand_aside = also_far = 0
+    total = several = multi = estimated = close = added = by_hand_aside = also_far = 0
     parsed: dict[Any, list[str]] = {}
 
     def as_list(raw: Any) -> list[str]:
@@ -884,6 +891,7 @@ def set_aside(conn: sqlite3.Connection, mc: MarketCtx) -> dict:
             [f"{x}:{B.OTHER}" for x in sorted(everything, key=_reason_order)]
         kept = set((r.get("kept") or "").split(",")) - {""}
         waived = set((r.get("waived") or "").split(",")) - {""}
+        whole_in = r.get("whole_in")       # None: no whole-property add; '': added with no group; else its group
         drive_estimate = r.get("method") == "estimate"
         if aside:
             total += 1
@@ -892,23 +900,26 @@ def set_aside(conn: sqlite3.Connection, mc: MarketCtx) -> dict:
                 estimated += 1
                 minutes = r.get("minutes")
                 if final == {"drive_time"} and max_minutes and minutes is not None \
-                        and float(minutes) <= float(max_minutes) + close_window:
+                        and shown_minutes(float(minutes)) <= float(max_minutes) + close_window:
                     close += 1
         else:
             added += 1 if rules else 0
         by_hand_aside += MANUAL_REASON in final
         also_far += "skip_county" in everything and "drive_time" in everything
+        multi += len(groups) > 1
         for key in groups:
             reason = key.split(":", 1)[0]
-            tally = {"count": 1, "only": everything == {reason}, "still_aside": aside, "added": not aside,
-                     "kept": reason in kept, "waived": aside and reason in waived,
+            clearable = (MANUAL_REASON in final) if reason == MANUAL_REASON else (
+                reason in kept or reason in waived or whole_in in ("", key))
+            tally = {"count": 1, "only": aside and final == {reason}, "still_aside": aside, "added": not aside,
+                     "kept": reason in kept, "waived": aside and reason in waived, "clearable": clearable,
                      "estimated": reason == "drive_time" and drive_estimate}
             by_group.setdefault(key, Counter()).update({k: int(v) for k, v in tally.items()})
             by_reason.setdefault(reason, Counter()).update({k: int(v) for k, v in tally.items()})
             if reason == "property_type" and key not in samples and r.get("property_type"):
                 samples[key] = str(r["property_type"]).strip()
     order = sorted((k for k in by_reason if by_reason[k]["count"]), key=lambda k: (-by_reason[k]["count"], k))
-    return {"total": total, "several": several,
+    return {"total": total, "several": several, "multi": multi,
             "reasons": [_reason_entry(k, by_reason[k], by_group, samples, spec, mc, also_far) for k in order],
             "drive_estimated": estimated, "drive_close_calls": close,
             "close_call_minutes": close_window, "max_drive_minutes": max_minutes,
@@ -935,7 +946,7 @@ def _reason_entry(reason: str, tally: Counter[str], by_group: Mapping[str, Count
 
 def review_block(conn: sqlite3.Connection, mc: MarketCtx, bucket: str) -> dict:
     """What the Review list shows above one group: {bucket, reason, reason_label, label, explain, count,
-    still_aside, added, kept, waived, only}."""
+    still_aside, added, kept, waived, clearable, only}."""
     reason, _ = B.parse_key(bucket)
     info = set_aside(conn, mc)
     entry = next((x for x in info["reasons"] if x["key"] == reason), None)
@@ -944,7 +955,8 @@ def review_block(conn: sqlite3.Connection, mc: MarketCtx, bucket: str) -> dict:
     return {"bucket": bucket, "reason": reason, "reason_label": _set_aside_label(reason, mc),
             "label": group["label"] if group else B.label_for(bucket, spec),
             "explain": entry["explain"] if entry else B.explain(reason, mc.market, mc.ac, mc.settings),
-            **{f: int((group or {}).get(f) or 0) for f in ("count", "still_aside", "added", "kept", "waived", "only")}}
+            **{f: int((group or {}).get(f) or 0)
+               for f in ("count", "still_aside", "added", "kept", "waived", "clearable", "only")}}
 
 
 def filter_funnel(base: list[dict], mc: MarketCtx) -> list[dict]:

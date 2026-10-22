@@ -328,6 +328,9 @@ def test_add_only_add_all_keep_clear_and_undo(client, built):
     res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "keep"})
     entry = groups_of(res["set_aside"])[group]
     assert entry["kept"] == len(members) and entry["still_aside"] == len(members) and res["now_in"] == 0
+    # Keep takes back the 'add only these' made before, and the message says how many left the buy box.
+    left = len(members) - len(multi)
+    assert f" {left} you had added {'is' if left == 1 else 'are'} out of the buy box again" in res["message"]
 
     res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "clear"})
     assert res["now_in"] == 0 and "rules decide again" in res["message"]
@@ -386,6 +389,73 @@ def test_keep_after_add_all_takes_the_group_back_out(client, built):
     assert res["now_in"] == 1 and "is still in the buy box because you added it by hand another way" in res["message"]
     assert overrides.for_property(built, one_of)["*"]["decision"] == "include"
     check_invariant(built)
+
+
+def test_group_undo_also_takes_back_a_row_add(client, built):
+    group = "drive_time:76-90"
+    members = sorted(overrides.group_property_ids(built, market_by_slug(built, MARKET)["id"], group))
+    assert len(members) >= 2
+    added, aside = members[0], members[1]
+    # Add to buy box on a Review row (or in the drawer, or from a spreadsheet) has no group of its own.
+    post(client, f"/api/m/{MARKET}/properties/{added}/buybox", {"decision": "include"})
+    entry = groups_of(set_aside_info(built))[group]
+    assert entry["added"] == 1 and entry["clearable"] == 1
+    assert api(client, f"/api/m/{MARKET}/properties", bucket=group)["review"]["clearable"] == 1
+    res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "clear"})
+    assert res["changed"] == 1 and res["now_in"] == 0 and "rules decide again" in res["message"]
+    assert overrides.for_property(built, added) == {}
+    entry = groups_of(res["set_aside"])[group]
+    assert entry["added"] == 0 and entry["clearable"] == 0
+    # A set-aside by hand belongs to the 'Set aside by hand' group: this group's undo leaves it.
+    post(client, f"/api/m/{MARKET}/properties/{aside}/buybox", {"decision": "exclude"})
+    res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "clear"})
+    assert res["changed"] == 0 and "no decisions to clear" in res["message"]
+    assert overrides.for_property(built, aside)["*"]["decision"] == "exclude"
+    # An add made from another group is that group's to undo: here it counts as added, with nothing to clear.
+    post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": "size:201-up", "decision": "add_all"})
+    entry = groups_of(set_aside_info(built))["drive_time:61-75"]
+    assert entry["added"] == 1 and entry["clearable"] == 0
+    check_invariant(built)
+
+
+def test_only_counts_what_is_still_set_aside_for_that_reason_alone(client, built):
+    group = "drive_time:61-75"       # 3 members: one too far only, one also too big, one also too old and small
+    assert groups_of(set_aside_info(built))[group]["only"] == 1
+    # The big one's size rule stops counting: it is now set aside only for its drive.
+    post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": "size:201-up", "decision": "add_only"})
+    info = set_aside_info(built)
+    assert groups_of(info)[group]["only"] == 2 and groups_of(info)["size:201-up"]["only"] == 0
+    # 'Add the 2 set aside only for this' brings in exactly those 2.
+    res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "add_only"})
+    assert res["now_in"] == 2
+    entry = groups_of(res["set_aside"])[group]
+    assert entry["only"] == 0 and entry["added"] == 2 and entry["still_aside"] == 1
+    # Every group's 'only' = still set aside, and the reasons left after the decisions are just this one.
+    info = set_aside_info(built)
+    expect: dict[str, int] = {}
+    for r in rows(built, "SELECT in_buybox, exclusion_reasons, aside_buckets FROM scores"):
+        final = set(json.loads(r["exclusion_reasons"]))
+        for key in json.loads(r["aside_buckets"] or "[]"):
+            if not r["in_buybox"] and final == {key.split(":", 1)[0]}:
+                expect[key] = expect.get(key, 0) + 1
+    assert {k: g["only"] for k, g in groups_of(info).items()} == {k: expect.get(k, 0) for k in groups_of(info)}
+    # The bars also count the 2 added by hand; 'multi' counts each property with more than one reason.
+    assert info["by_hand"]["added"] == 2 and info["multi"] == 4 and info["several"] == 3
+
+
+def test_close_calls_round_like_the_drive_groups(client, built):
+    # 75.4 min shows as "75 min" and sits in 61-75; 75.5 shows as "76 min" and sits in 76-90.
+    edge, over = pid_of(built, "DR-0060"), pid_of(built, "A01-0001-0003")
+    built.execute("UPDATE drive_times SET minutes = 75.4 WHERE property_id = ?", (edge,))
+    built.execute("UPDATE drive_times SET minutes = 75.5 WHERE property_id = ?", (over,))
+    built.commit()
+    compute_scores(built, MARKET)
+    info = set_aside_info(built)
+    groups = groups_of(info)
+    assert "drive_time:61-75" in json.loads(scalar(built, "SELECT aside_buckets FROM scores WHERE property_id = ?", (edge,)))
+    assert "drive_time:76-90" in json.loads(scalar(built, "SELECT aside_buckets FROM scores WHERE property_id = ?", (over,)))
+    # The close-call note (61-75 min, estimated, drive only) and the 61-75 group's 'only' agree.
+    assert info["drive_close_calls"] == groups["drive_time:61-75"]["only"] == 1
 
 
 def test_undo_leaves_a_newer_decision_alone(client, built):

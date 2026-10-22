@@ -85,17 +85,21 @@ const summary = {
     year_built_min: 1970, visual_enabled: false, rent_enabled: false},
   properties: 11, in_buybox: 6, levels: {1: 2, 2: 4, 3: 0}, levels_in_buybox: {1: 2, 2: 4, 3: 0}, credits: {left: 500},
   thresholds: {moon_score: 0.1, funnel_score: 0.05, long_owned_years: 15}, views: [], sorts: ['rank', 'score'],
-  set_aside: {total: 5, several: 3, drive_estimated: 0, drive_close_calls: 0, close_call_minutes: 15, max_drive_minutes: 60,
-    by_hand: {added: 1, set_aside: 0},
+  set_aside: {total: 8, several: 3, multi: 5, drive_estimated: 0, drive_close_calls: 0, close_call_minutes: 15, max_drive_minutes: 60,
+    by_hand: {added: 4, set_aside: 0},
     reasons: [
-      {key: 'drive_time', label: 'More than 60 min drive', count: 5, only: 2, still_aside: 4, added: 1, kept: 0,
+      {key: 'drive_time', label: 'More than 60 min drive', count: 11, only: 3, still_aside: 7, added: 4, kept: 0,
         explain: "More than 60 minutes' drive from Downtown Testville.",
         buckets: [
-          {key: 'drive_time:61-75', label: '61–75 min', count: 2, only: 0, still_aside: 2, added: 0, kept: 0, estimated: 0},
-          {key: KEY, label: '76–90 min', count: 3, only: 2, still_aside: 2, added: 1, kept: 0, estimated: 0}]},
+          {key: 'drive_time:61-75', label: '61–75 min', count: 2, only: 0, still_aside: 2, added: 0, kept: 0, clearable: 0, estimated: 0},
+          {key: KEY, label: '76–90 min', count: 3, only: 2, still_aside: 2, added: 1, kept: 0, clearable: 1, estimated: 0},
+          // 1 added from another group (nothing here to undo); of the 3 still set aside, 2 also fail another rule.
+          {key: 'drive_time:91-120', label: '91–120 min', count: 4, only: 1, still_aside: 3, added: 1, kept: 0, clearable: 0, estimated: 0},
+          // All already in the buy box.
+          {key: 'drive_time:121-up', label: 'Over 120 min', count: 2, only: 0, still_aside: 0, added: 2, kept: 0, clearable: 2, estimated: 0}]},
       {key: 'skip_county', label: 'County on the skip list', count: 1, only: 0, still_aside: 1, added: 0, kept: 0, waived: 1,
         explain: 'Counties Brad said to skip, even inside the drive limit: Sampleton (OH).',
-        buckets: [{key: 'skip_county:oh-sampleton', label: 'Sampleton County, OH', count: 1, only: 0, still_aside: 1, added: 0, kept: 0, waived: 1, estimated: 0}]},
+        buckets: [{key: 'skip_county:oh-sampleton', label: 'Sampleton County, OH', count: 1, only: 0, still_aside: 1, added: 0, kept: 0, waived: 1, clearable: 1, estimated: 0}]},
     ]},
 };
 function row(id, extra) {
@@ -159,6 +163,11 @@ const out = {};
   await click(why, {'data-decide-open': 'skip_county:oh-sampleton'});
   out.waivedSheet = why.innerHTML;
   await click(why, {'data-decide-open': 'skip_county:oh-sampleton'});
+  await click(why, {'data-decide-open': 'drive_time:91-120'});
+  out.otherSheet = why.innerHTML;
+  await click(why, {'data-decide-open': 'drive_time:121-up'});
+  out.allInSheet = why.innerHTML;
+  await click(why, {'data-decide-open': 'drive_time:121-up'});
   await click(why, {'data-review-group': KEY});
   out.hashAfterReview = window.location.hash;
 
@@ -222,7 +231,7 @@ def ui(tmp_path_factory) -> dict:
 
 def test_why_panel_lists_each_reason_with_its_groups(ui):
     panel = ui["panel"]
-    assert "(1 added by you)" in panel
+    assert "(4 added by you)" in panel
     assert "More than 60 minutes&#39; drive from Downtown Testville." in panel     # the plain explanation
     for key in ("drive_time:61-75", "drive_time:76-90", "skip_county:oh-sampleton"):
         assert f'data-review-group="{key}"' in panel and f'data-decide-open="{key}"' in panel
@@ -232,14 +241,39 @@ def test_why_panel_lists_each_reason_with_its_groups(ui):
 
 def test_decide_offers_the_choices_and_says_how_to_change_the_rule(ui):
     sheet = ui["sheet"]
-    assert "Add the 2 set aside only for this" in sheet
-    assert "The other 1 also have another reason, so they stay set aside" in sheet
-    assert "Add all 3 (also the 1 with other reasons)" in sheet
-    assert "Keep them set aside" in sheet and "Any Add you made from this group is taken back." in sheet
+    # 3 in the group, 1 already added: the choices count the 2 still set aside (both for this rule alone).
+    assert "Add the 2 still set aside only for this" in sheet and "All of them come into the buy box." in sheet
+    assert "Add the 2 still set aside, whatever the rules say" in sheet
+    assert "with other reasons" not in sheet and "The other 1" not in sheet
+    assert "Keep them set aside" in sheet
+    assert "What you added from this group leaves the buy box again; ones you added one at a time stay in." in sheet
     assert "Nothing else changes" not in sheet
     assert "Undo my decisions for this group" in sheet            # the group has a decision already
     assert "photos, photo checks and Crexi credits" in sheet
     assert "<code>max_drive_minutes: 60</code>" in sheet
+
+
+def test_decide_counts_only_the_ones_still_set_aside(ui):
+    # 4 in the group: 1 already in the buy box, 1 set aside for this rule alone, 2 that also fail another rule.
+    sheet = ui["otherSheet"]
+    assert "Add the 1 still set aside only for this" in sheet
+    assert "The other 2 also have another reason, so they stay set aside" in sheet
+    assert "Add the 3 still set aside (also the 2 with other reasons)" in sheet
+    # The one in the buy box was added from another group, so this group has nothing of yours to undo.
+    assert "Undo my decisions for this group" not in sheet
+    # Every one already in the buy box: nothing to add, only keep or undo.
+    sheet = ui["allInSheet"]
+    assert "All 2 are in the buy box now." in sheet
+    assert 'data-decide="add_only" data-bucket="drive_time:121-up"' not in sheet
+    assert 'data-decide="add_all" data-bucket="drive_time:121-up"' not in sheet
+    assert 'data-decide="keep" data-bucket="drive_time:121-up"' in sheet
+    assert 'data-decide="clear" data-bucket="drive_time:121-up"' in sheet
+
+
+def test_the_counts_note_says_what_the_bars_take_in(ui):
+    panel = ui["panel"]
+    assert ("The counts add up to more than the 8 set aside: 5 have more than one reason, and the 4 you added to the "
+            "buy box are still counted under their reasons.") in panel
 
 
 def test_a_waived_rule_shows_in_the_panel_and_can_be_cleared(ui):
@@ -249,6 +283,9 @@ def test_a_waived_rule_shows_in_the_panel_and_can_be_cleared(ui):
     assert "this rule no longer counts, still set aside for other reasons" in sheet
     assert 'data-decide="clear" data-bucket="skip_county:oh-sampleton"' in sheet
     assert "Undo my decisions for this group" in sheet
+    # The rule already stopped counting for the one there: no second 'Stop counting this rule'.
+    assert 'data-decide="add_only" data-bucket="skip_county:oh-sampleton"' not in sheet
+    assert "Marks them as looked at. This rule counts for them again." in sheet
 
 
 def test_a_decision_posts_the_group_and_can_be_undone(ui):
@@ -269,7 +306,7 @@ def test_review_lists_one_group_with_its_own_header(ui):
     assert "Decide for all 3" in head
     assert ui["reviewWhy"] == ""                                   # the panel steps aside while reviewing
     assert "in this group" in ui["status"]
-    assert "Add the 2 set aside only for this" in ui["reviewSheet"]
+    assert "Add the 2 still set aside only for this" in ui["reviewSheet"]
     assert ui["hashAfterExit"] == "#deals"
 
 

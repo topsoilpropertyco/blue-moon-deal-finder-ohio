@@ -648,6 +648,53 @@ def test_mock_backend_runs_offline(conn, settings):
     assert "0199" not in json.dumps(rows(conn, "SELECT value FROM contact_points"))
 
 
+def test_test_answers_are_never_saved_or_served_as_claudes(conn, settings):
+    for name in ("ELM STREET RENTALS LLC", "BIRCH COURT LLC", "CEDAR WAY HOMES LLC"):
+        owner_prop(conn, name)
+    res = R.research_owners(conn, MARKET, backend="mock")
+    assert res["researched"] == 3 and res["contacts_added"] >= 1
+    assert scalar(conn, "SELECT COUNT(*) FROM api_cache") == 0                  # made-up answers are never saved
+    notes = [r["notes"] for r in rows(conn, "SELECT notes FROM contact_points WHERE source='ai_research'")]
+    assert notes and all("offline test answer" in n for n in notes)             # easy to tell apart
+    # The owners come up again (a new pass): Claude is asked, never handed the made-up answers.
+    conn.execute("DELETE FROM drill_attempts WHERE stage_key='ai_research'")
+    conn.commit()
+    runner = FakeRunner((cli_result(answer()), "", 0))
+    est = R.research_owners(conn, MARKET, backend=research_cli(runner), dry_run=True)
+    assert est["cached"] == 0 and est["calls"] == 3
+    # A made-up answer an older version saved under Claude's key isn't served either; Claude's own answer is.
+    from bluemoon.cache import cache_put
+    g = R.owner_groups(conn, market_by_slug(conn, MARKET), R.research_config(settings), settings).groups[0]
+    saved = R.ResearchAnswer.model_validate(answer()).model_dump()
+    cache_put(conn, g.cache_key, R.CACHE_PROVIDER, 200, {"answer": saved, "meta": {"model": R.MOCK_MODEL}})
+    assert R.cached_answer(conn, g, R.research_config(settings)) is None
+    cache_put(conn, g.cache_key, R.CACHE_PROVIDER, 200, {"answer": saved, "meta": {"model": "sonnet"}})
+    assert R.cached_answer(conn, g, R.research_config(settings)) is not None
+    # Another backend's answers are kept under their own key.
+    assert R._cache_key(g, R.research_config(settings), "scripted") != g.cache_key
+
+
+def test_test_answers_also_wait_for_your_ok_over_50_properties(conn, settings):
+    ids = [owner_prop(conn, "BIG TEST PORTFOLIO LLC") for _ in range(51)]
+    est = R.research_owners(conn, MARKET, backend="mock", dry_run=True)
+    assert est["needs_confirm"] and "made up" in est["message"] and "555" in est["message"]
+    waiting = R.research_owners(conn, MARKET, backend="mock")
+    assert waiting["message"].startswith("Waiting for your OK") and not any(contacts_of(conn, i) for i in ids)
+    assert R.research_owners(conn, MARKET, backend="mock", confirm=True)["researched"] == 1
+
+
+def test_estimate_names_every_owners_properties_and_what_this_run_covers(conn, settings, tmp_root):
+    set_research(tmp_root, max_calls_per_run=2)
+    for i in range(4):                       # owner i has i + 1 properties: 10 in all
+        for _ in range(i + 1):
+            owner_prop(conn, f"CAPPED OWNER {i} LLC", score=0.9 - i / 20)
+    est = R.research_owners(conn, MARKET, backend=Scripted(), dry_run=True)
+    assert est["owners"] == 4 and est["properties_total"] == 10 and est["capped"]
+    assert est["calls"] == 2 and est["properties"] == 3                 # this run: the first 2 owners
+    assert "4 buy-box owners (10 properties) to research" in est["message"]
+    assert "this run covers 2 owners (3 properties); run it again for the rest" in est["message"]
+
+
 # --- the DRILL around it -------------------------------------------------------------------------
 
 def walk(conn, pid, stop_at=None) -> dict:

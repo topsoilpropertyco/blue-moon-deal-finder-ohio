@@ -165,7 +165,9 @@ Every function that writes commits its own transaction.
   decision include|exclude ('*' only)|keep (a rule only); and the append-only `buybox_override_log`).
   `load(conn, market_ids)`, `for_property`, `history`, `set_decision(conn, ids, reason, decision, actor, ...)`,
   `clear(...)`, `undo_batch(conn, batch_id, actor)` (a decision changed again after the batch is left alone);
-  and the web's `decide_group` (keep also takes back an add_all made from the same group, in the same batch),
+  and the web's `decide_group` (keep also takes back an add_all made from the same group, in the same batch, and
+  its message says how many you had added left the buy box; clear also takes off whole-property adds made with
+  no group: a row, the drawer or a spreadsheet; hand set-asides stay),
   `decide_property`, `undo` (they re-score the market before returning). Who: `auth.signed_in_as()` on the web, `cli` from the CLI.
 - `buckets.py`: the Why? panel's set-aside groups. Keys `<reason>:<id>` (e.g. `drive_time:76-90`, `size:1-4`,
   `year:1960s`, `skip_county:oh-clermont`, `state:ky`, `property_type:retail`, `manual:by-hand`;
@@ -224,6 +226,19 @@ Every function that writes commits its own transaction.
   updates its finding and copies like `set_contact_status`; taking a wrong mark back puts back the copies it
   reached; a verified AI contact carries to the owner's other properties (untested ones never do). A set-aside
   owner (scope buybox) is never held open waiting for research.
+  `research_owners(conn, slug, limit=None, dry_run=False, backend=None, progress=None, confirm=False) -> dict`
+  (CLI `run.py research`, pipeline step `research`, not part of `all`): the estimate has `owners` and
+  `properties_total` (everyone left) and `properties` / `calls` / `cached` (this run, capped at
+  `max_calls_per_run`); over `safety.confirm_over_properties` properties it waits for `confirm`, the offline
+  `mock` backend too (its made-up answers are written into the market). Answers are saved in `api_cache` per
+  owner (Claude Code: provider `research:claude_cli`; another backend has its name in the key and provider
+  `research:<name>`); mock answers are never saved, and an old saved mock answer is never served.
+  Tables: `research_runs(id, market_id, owner_key, owner_name, cache_key, model, prompt_version, outcome
+  found|nothing|error, from_cache, summary, error, num_turns, seconds, property_ids, actor, created_at)` (one row
+  per owner asked or answered from the cache) and `research_findings(id, run_id, property_id, kind
+  entity|person|website|phone|email|social, value, label, person_name, role, source_url, confidence,
+  match_reason, status kept|lead|blocked|rejected|wrong, why, contact_point_id, person_id, marked_by, marked_at,
+  created_at)`. `mark_finding(conn, finding_id, status wrong|kept, actor)` backs the PATCH route below.
 - `credits.py`: `credit_status(conn) -> {month, per_month, used, left, used_today, days_left, daily_pace,
   today_left, ...}` (the pace comes from the credits left when the day began, so it holds all day; the plan gives
   today `today_left` credits and every later day `daily_pace`), `use_credit(conn, property_id,
@@ -298,14 +313,15 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 |---|---|---|
 | GET | `/api/health` | `{ok, version, keys:{google:bool, anthropic:bool, hud:bool, census:bool}, vision_backend, claude_cli:bool, auth_required, authenticated, signed_in_as, login_email, share}` |
 | GET | `/api/markets` | `[{slug, name, asset_class, asset_label, geography, properties, in_buybox, confirmed}]` |
-| GET | `/api/m/{slug}/summary` | `{market:{slug,name,geography,origin_label,origin_lat,origin_lng,max_drive_minutes}, asset_class:{key,label,size_metric,visual_enabled,rent_enabled,visual_question,target_word}, properties, in_buybox, blue_moon_10, needs_review, penetration, levels, levels_in_buybox, credits, set_aside:{total, several, reasons:[{key,label,count,only,explain,still_aside,added,kept,waived,buckets:[{key,label,count,only,still_aside,added,kept,waived,estimated}]}], drive_estimated, drive_close_calls, close_call_minutes, max_drive_minutes, by_hand:{added,set_aside}}, last_import, layers:[{key,label,done,total}], drill_waiting, drill_waiting_detail:{total,validate,stages,basis}}` (drill_waiting = buy-box owners whose next step is reach-out or a hands-on stage) |
-| GET | `/api/m/{slug}/properties?view=&q=&sort=&limit=&offset=&include_excluded=&bucket=` | `{total, items:[PropertyRow], review}`; `bucket` = one set-aside group (in or out of the buy box), `review:{bucket,reason,reason_label,label,explain,count,still_aside,added,kept,waived,only}` (waived = still set aside, but you said this rule doesn't count) |
+| GET | `/api/m/{slug}/summary` | `{market:{slug,name,geography,origin_label,origin_lat,origin_lng,max_drive_minutes}, asset_class:{key,label,size_metric,visual_enabled,rent_enabled,visual_question,target_word}, properties, in_buybox, blue_moon_10, needs_review, penetration, levels, levels_in_buybox, credits, set_aside:{total, several, multi, reasons:[{key,label,count,only,explain,still_aside,added,kept,waived,buckets:[{key,label,count,only,still_aside,added,kept,waived,clearable,estimated}]}], drive_estimated, drive_close_calls, close_call_minutes, max_drive_minutes, by_hand:{added,set_aside}}, last_import, layers:[{key,label,done,total}], drill_waiting, drill_waiting_detail:{total,validate,stages,basis}}` (drill_waiting = buy-box owners whose next step is reach-out or a hands-on stage) |
+| GET | `/api/m/{slug}/properties?view=&q=&sort=&limit=&offset=&include_excluded=&bucket=` | `{total, items:[PropertyRow], review}`; `bucket` = one set-aside group (in or out of the buy box), `review:{bucket,reason,reason_label,label,explain,count,still_aside,added,kept,waived,clearable,only}` (waived = still set aside, but you said this rule doesn't count; only = still set aside for this reason alone, after the decisions; clearable = members with a decision the group's clear takes off) |
 | POST | `/api/m/{slug}/buybox/decide` | body `{bucket, decision: add_only\|add_all\|keep\|clear, note?}` -> `{batch_id, changed, total, now_in, still_out:[{reason,label,count}], message, set_aside, in_buybox}` (re-scores first) |
 | POST | `/api/m/{slug}/buybox/undo` | body `{batch_id}` -> same shape as decide |
 | POST | `/api/m/{slug}/properties/{id}/buybox` | body `{decision: include\|exclude\|rules, reason?: '*'\|rule key, note?}` -> `{row: PropertyRow, buybox, message, batch_id, in_buybox}` |
 | GET | `/api/m/{slug}/properties/{id}` | `PropertyDetail` |
 | POST | `/api/m/{slug}/properties/{id}/attempt` | body `{stage_key, outcome, detail?, person?, person_role?, contacts?}` |
 | POST | `/api/m/{slug}/properties/{id}/contacts` | body `{channel, value, source?, person_name?, notes?}` |
+| PATCH | `/api/research/findings/{fid}` | body `{status: wrong\|kept}` -> mark an AI research finding wrong, or take that back (records who) |
 | PATCH | `/api/contacts/{cid}` | body `{status, allow_contact?}` (taking a contact off do-not-contact needs `allow_contact: true`) |
 | POST | `/api/m/{slug}/properties/{id}/outreach` | body `{channel, outcome, contact_point_id?, notes?}` |
 | POST | `/api/m/{slug}/properties/{id}/level` | body `{action, person?, note?}` |

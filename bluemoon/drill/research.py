@@ -19,8 +19,9 @@ phone or email is never saved as a contact. Findings below `min_confidence` are 
     research_owners(conn, slug, limit=5)           # Test on 5 = 5 owners
     research_owners(conn, slug, confirm=True)      # a run covering more than 50 properties needs the OK
 
-Answers are cached per owner (model, prompt version, owner name, state, mailing city) for
-`refresh_after_days`, "nothing found" included, so re-runs don't ask again. Errors are never cached.
+Answers are cached per owner (backend, model, prompt version, owner name, state, mailing city) for
+`refresh_after_days`, "nothing found" included, so re-runs don't ask again. Errors and the offline test answers
+(`backend: mock`) are never cached.
 Settings: the `ai_research:` block in config/drill.yaml.
 """
 from __future__ import annotations
@@ -70,7 +71,8 @@ STAGE = "ai_research"
 SOURCE = E.AI_SOURCE          # contact_points.source and people.source of everything research adds
 ACTOR = "ai"                  # drill_attempts.actor of research check-offs
 PROMPT_VERSION = "1"          # part of the cache key: bump it to ask every owner again
-CACHE_PROVIDER = "research:claude_cli"
+CACHE_PROVIDER = "research:claude_cli"   # api_cache.provider of Claude's answers (other backends: research:<name>)
+MOCK_MODEL = "mock-1"         # the offline test answers: never saved as answers, never served as Claude's
 CONFIDENCES = ("high", "medium", "low")
 FINDING_STATUSES = ("kept", "lead", "blocked", "rejected", "wrong")
 KINDS = ("entity", "person", "website", "phone", "email", "social")
@@ -485,9 +487,12 @@ def owner_groups(conn: sqlite3.Connection, market: dict, cfg: ResearchConfig,
     return Targets(groups=out, skipped_dnc=skipped, no_name=no_name)
 
 
-def _cache_key(g: OwnerGroup, cfg: ResearchConfig) -> str:
+def _cache_key(g: OwnerGroup, cfg: ResearchConfig, backend_name: str = "claude_cli") -> str:
+    """The saved-answer key of one owner. Claude Code's key is the one it always had (saved answers stay good);
+    any other backend has its own name in the key, so its answers are never served as Claude's."""
     p = g.best.prop
-    return make_key("ai_research", cfg.model, PROMPT_VERSION, normalize_owner(g.name) or g.name.upper(),
+    who = () if backend_name == "claude_cli" else (backend_name,)
+    return make_key("ai_research", *who, cfg.model, PROMPT_VERSION, normalize_owner(g.name) or g.name.upper(),
                     (clean_str(p.get("state")) or "").upper(), (clean_str(p.get("mailing_city")) or "").upper())
 
 
@@ -606,7 +611,9 @@ _BAD_CHOICE = re.compile(r"option\s+'(--[\w-]+)[^']*'\s+argument\s+.*?\s+is inva
 
 class MockResearchBackend:
     """Offline answers made up from the owner name (tests and demos, `ai_research.backend: mock`). One answer in
-    three finds nothing; the others include a contact from a blocked people-search site, which the filter drops."""
+    three finds nothing; the others include a contact from a blocked people-search site, which the filter drops.
+    Every label and match reason says "offline test answer", so the made-up rows are easy to tell apart. They are
+    never saved as answers (no cache), and a run over the safety limit asks first, like Claude's."""
     name = "mock"
     provider = ""
     sku = ""
@@ -618,7 +625,7 @@ class MockResearchBackend:
 
     @property
     def model(self) -> str:
-        return "mock-1"
+        return MOCK_MODEL
 
     def check(self) -> None:
         """Always ready."""
@@ -635,15 +642,16 @@ class MockResearchBackend:
         src = f"https://www.example.org/filings/{slug}"
         return json.dumps({
             "entities": [{"name": owner, "state": "OH", "status": "Active", "filing_id": str(1000 + n),
-                          "source_url": src, "confidence": "high", "match_reason": "Same name in the state filing."}],
+                          "source_url": src, "confidence": "high",
+                          "match_reason": "Offline test answer: same name in the state filing."}],
             "people": [{"name": "Pat Example", "role": "member", "source_url": src, "confidence": "medium",
-                        "match_reason": "Named as member in the filing."}],
+                        "match_reason": "Offline test answer: named as member in the filing."}],
             "websites": [{"url": f"https://{slug}.example.com", "source_url": src, "confidence": "medium",
-                          "match_reason": "Linked from the filing."}],
+                          "match_reason": "Offline test answer: linked from the filing."}],
             "contacts": [
-                {"channel": "phone", "value": f"(937) 555-{n % 10000:04d}", "label": "Office line",
+                {"channel": "phone", "value": f"(937) 555-{n % 10000:04d}", "label": "Office line (offline test answer)",
                  "belongs_to": "business", "person_name": "", "source_url": f"https://{slug}.example.com/contact",
-                 "confidence": "medium", "match_reason": "On the company's contact page."},
+                 "confidence": "medium", "match_reason": "Offline test answer: on the company's contact page."},
                 {"channel": "phone", "value": "(937) 555-0199", "label": "Home phone", "belongs_to": "owner",
                  "person_name": "Pat Example", "source_url": "https://www.truepeoplesearch.com/find/person/x",
                  "confidence": "high", "match_reason": "Mock people-search result (always dropped)."}],
@@ -973,14 +981,18 @@ def _age_days(created_at: str | None) -> float:
 
 
 def cached_answer(conn: sqlite3.Connection, g: OwnerGroup, cfg: ResearchConfig) -> tuple[ResearchAnswer, dict] | None:
-    """The saved answer for this owner, while it is younger than refresh_after_days."""
+    """The saved answer for this owner, while it is younger than refresh_after_days. An offline test answer
+    saved by an older version (under Claude's key) is never served."""
     row = one(conn, "SELECT status, body, created_at FROM api_cache WHERE key = ?", (g.cache_key,))
     if not row or (row["status"] or 0) >= 400 or _age_days(row["created_at"]) > cfg.refresh_after_days:
         return None
     body = loads(row["body"], {}) or {}
     try:
-        return ResearchAnswer.model_validate(body.get("answer") or {}), dict(body.get("meta") or {})
-    except (ValidationError, AttributeError):
+        meta = dict(body.get("meta") or {})
+        if meta.get("model") == MOCK_MODEL:
+            return None
+        return ResearchAnswer.model_validate(body.get("answer") or {}), meta
+    except (ValidationError, AttributeError, TypeError, ValueError):
         return None
 
 
@@ -1023,7 +1035,9 @@ def _plan(conn: sqlite3.Connection, groups: list[OwnerGroup], cfg: ResearchConfi
 
 def _estimate(conn: sqlite3.Connection, slug: str, t: Targets, groups: list[OwnerGroup], backend: Any,
               cfg: ResearchConfig) -> dict:
+    """properties = what this run covers (the OK goes by it); properties_total = every owner's properties."""
     cached, calls, props, capped = _plan(conn, groups, cfg)
+    total_props = sum(len(g.members) for g in groups)
     minutes = math.ceil(calls * cfg.est_seconds_per_owner / 60) if calls else 0
     ready, why = True, None
     try:
@@ -1033,22 +1047,29 @@ def _estimate(conn: sqlite3.Connection, slug: str, t: Targets, groups: list[Owne
     who = "buy-box owners" if cfg.scope == "buybox" else "owners"
     on_plan = backend.name == "claude_cli"
     msg = (f"AI research with {'Claude Code' if on_plan else 'the offline test answers'} ({backend.model}): "
-           f"{len(groups):,} {who} ({props:,} properties), {cached:,} already answered, {calls:,} to ask Claude.")
+           f"{len(groups):,} {who} ({total_props:,} properties) to research, {cached:,} already answered, "
+           f"{calls:,} to ask Claude.")
     if not groups:
         msg = f"AI research: nothing to research. Every {who.removesuffix('s')} with a name has been researched."
     elif on_plan:
         msg += f" No per-call bill: uses your Claude plan, about {minutes:,} min."
+    elif backend.name == "mock":
+        msg += (" The offline test answers are made up (example names and 555 phone numbers) and are added to "
+                "this market's DRILL lists like real findings.")
     if capped:
-        msg += f" Capped at {cfg.max_calls_per_run:,} owners per run (ai_research.max_calls_per_run)."
+        msg += (f" Capped at {cfg.max_calls_per_run:,} owners per run (ai_research.max_calls_per_run): this run "
+                f"covers {cached + calls:,} owners ({props:,} properties); run it again for the rest.")
     if t.skipped_dnc:
         msg += f" Left out {t.skipped_dnc:,} propert{'y' if t.skipped_dnc == 1 else 'ies'} of do-not-contact owners."
     if not ready and calls:
         msg += f" {why}"
     over = cfg.confirm_over_properties
     return {"dry_run": True, "enabled": True, "backend": backend.name, "model": backend.model, "scope": cfg.scope,
-            "owners": len(groups), "properties": props, "cached": cached, "calls": calls, "to_ask": calls,
-            "capped": capped, "est_minutes": minutes, "est_cost_usd": 0.0, "ready": ready, "not_ready_reason": why,
-            "needs_confirm": backend.name != "mock" and (props > over or calls > over),
+            "owners": len(groups), "properties": props, "properties_total": total_props, "cached": cached,
+            "calls": calls, "to_ask": calls, "capped": capped, "est_minutes": minutes, "est_cost_usd": 0.0,
+            "ready": ready, "not_ready_reason": why,
+            # The offline test answers cost nothing, but they write made-up contacts into this market: same OK.
+            "needs_confirm": props > over or calls > over,
             "skipped_dnc": t.skipped_dnc, "no_name": t.no_name, "market": slug, "message": msg}
 
 
@@ -1083,7 +1104,8 @@ def research_owners(conn: sqlite3.Connection, market_slug: str, limit: int | Non
 
     limit: at most this many owners (Test on 5 = 5 Claude calls). dry_run: the estimate only.
     backend: a backend object or name (claude_cli | mock); default ai_research.backend.
-    confirm: needed when the run covers more than safety.confirm_over_properties properties (not for mock).
+    confirm: needed when the run covers more than safety.confirm_over_properties properties (mock too: its
+    made-up answers are written into the market).
     A cancel (raised inside `progress`) lands between owners; what was already written stays."""
     settings = get_settings()
     cfg = research_config(settings)
@@ -1094,6 +1116,8 @@ def research_owners(conn: sqlite3.Connection, market_slug: str, limit: int | Non
                 "needs_confirm": False, "market": market_slug,
                 "message": "AI research is switched off (the ai_research stage in config/drill.yaml)."}
     be = backend if backend is not None and not isinstance(backend, str) else get_research_backend(cfg, backend)
+    for g in t.groups:                     # saved answers are kept apart per backend
+        g.cache_key = _cache_key(g, cfg, be.name)
     groups = t.groups[:max(0, int(limit))] if limit is not None else t.groups
     estimate = _estimate(conn, market_slug, t, groups, be, cfg)
     if dry_run:
@@ -1174,7 +1198,9 @@ def _run(conn: sqlite3.Connection, market: dict, groups: list[OwnerGroup], be: A
             clean, dropped = without_blocked(answer, cfg)
             meta = {"asked_at": now_iso(), "model": be.model, "num_turns": getattr(last, "num_turns", None),
                     "seconds": round(time.monotonic() - started, 1), "blocked": dropped}
-            cache_put(conn, g.cache_key, CACHE_PROVIDER, 200, {"answer": clean.model_dump(), "meta": meta})
+            if be.name != "mock":          # made-up answers are never saved, so they can't come back as Claude's
+                provider = CACHE_PROVIDER if be.name == "claude_cli" else f"research:{be.name}"
+                cache_put(conn, g.cache_key, provider, 200, {"answer": clean.model_dump(), "meta": meta})
         done = apply_answer(conn, market["id"], g, answer, cfg, be, from_cache=from_cache, meta=meta,
                             settings=settings)
         if done.skipped_dnc:

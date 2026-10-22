@@ -182,11 +182,12 @@ def set_decision(conn: sqlite3.Connection, property_ids: Iterable[int], reason: 
 
 def clear(conn: sqlite3.Connection, property_ids: Iterable[int], actor: str, *, reasons: Iterable[str] | None = None,
           whole_from_bucket: str | None = None, whole_decision: str | None = None, batch_id: str | None = None,
-          note: str | None = None) -> dict:
+          note: str | None = None, unbucketed_includes: bool = False) -> dict:
     """Follow the rules again: delete decisions, logging each one as 'cleared'.
     reasons: only these reasons (None = every decision of these properties). whole_from_bucket: also the
-    whole-property decisions made from that group. whole_decision: only whole-property rows with that decision.
-    Returns {batch_id, changed, unchanged}."""
+    whole-property decisions made from that group. unbucketed_includes: also the whole-property adds made with
+    no group (a row's or the drawer's Add to buy box, a spreadsheet); hand set-asides stay. whole_decision: only
+    whole-property rows with that decision. Returns {batch_id, changed, unchanged}."""
     ids = sorted({int(i) for i in property_ids})
     wanted = None if reasons is None else set(reasons)
     batch = batch_id or new_batch_id()
@@ -199,6 +200,8 @@ def clear(conn: sqlite3.Connection, property_ids: Iterable[int], actor: str, *, 
         for (pid, reason), row in sorted(current.items()):
             hit = wanted is None or reason in wanted
             if reason == WHOLE and whole_from_bucket is not None and row.get("bucket") == whole_from_bucket:
+                hit = True
+            if reason == WHOLE and unbucketed_includes and row.get("bucket") is None and row["decision"] == "include":
                 hit = True
             if reason == WHOLE and whole_decision is not None:
                 hit = hit and row["decision"] == whole_decision
@@ -333,9 +336,11 @@ def decide_group(conn: sqlite3.Connection, market_slug: str, bucket: str, decisi
     """The Why? panel's Decide button for one group. The members are looked up now, on the server.
     - add_only: the group's rule no longer counts for its members (some may stay out for other reasons);
     - add_all:  every member is added to the buy box by hand, whatever the rules say;
-    - keep:     the rule stands; the members are marked as looked at, and an add_all made from this group is
-                taken back (members added by hand another way stay in);
-    - clear:    the decisions made for this rule (and from this group) are removed: the rules decide again.
+    - keep:     the rule stands; the members are marked as looked at, and what was added from this group (add_all
+                or add_only) is taken back; the message says how many left the buy box (members added by hand
+                another way stay in);
+    - clear:    the decisions made for this rule, from this group, and the whole-property adds made with no
+                group (a row, the drawer, a spreadsheet) are removed: the rules decide again.
     For the 'Set aside by hand' group, add_only and clear both take the hand set-aside off.
     Then the market is re-scored. Returns {batch_id, changed, total, now_in, still_out, message, bucket}."""
     s = settings or get_settings()
@@ -360,9 +365,11 @@ def decide_group(conn: sqlite3.Connection, market_slug: str, bucket: str, decisi
     if decision == "keep" and manual:
         raise ValueError("These are already set aside by hand.")
     clearing = decision == "clear" or (manual and decision == "add_only")
+    before_in = status_of(conn, ids)["now_in"] if decision == "keep" else 0
     if clearing:
         res = clear(conn, ids, actor, reasons=[WHOLE] if manual else [reason], note=note,
-                    whole_from_bucket=None if manual else bucket, whole_decision="exclude" if manual else None)
+                    whole_from_bucket=None if manual else bucket, whole_decision="exclude" if manual else None,
+                    unbucketed_includes=not manual)
     else:
         target = WHOLE if decision == "add_all" else reason
         details = rule_details(conn, market, ids, s)
@@ -381,14 +388,18 @@ def decide_group(conn: sqlite3.Connection, market_slug: str, bucket: str, decisi
     total = len(ids)
     if decision == "add_all":
         msg = f"Added all {total:,} in '{group}' to the buy box by hand, whatever the rules say."
-    elif decision == "keep" and st["now_in"]:
-        n = st["now_in"]
-        msg = (f"Marked the {total:,} in '{group}' as looked at. {st['out']:,} stay set aside; {n:,} "
-               f"{'is' if n == 1 else 'are'} still in the buy box because you added "
-               f"{'it' if n == 1 else 'them'} by hand another way (one at a time, from another group or from a "
-               f"spreadsheet).")
     elif decision == "keep":
-        msg = f"Kept {total:,} in '{group}' set aside. They're marked as looked at."
+        n, left = st["now_in"], max(0, before_in - st["now_in"])
+        if n:
+            msg = (f"Marked the {total:,} in '{group}' as looked at. {st['out']:,} stay set aside; {n:,} "
+                   f"{'is' if n == 1 else 'are'} still in the buy box because you added "
+                   f"{'it' if n == 1 else 'them'} by hand another way (one at a time, from another group or from a "
+                   f"spreadsheet).")
+        else:
+            msg = f"Kept {total:,} in '{group}' set aside. They're marked as looked at."
+        if left:
+            msg += (f" {left:,} you had added {'is' if left == 1 else 'are'} out of the buy box "
+                    f"again (Undo puts {'it' if left == 1 else 'them'} back).")
     elif decision == "clear" or manual:
         msg = (f"The rules decide again for the {total:,} in '{group}': {st['now_in']:,} in the buy box, "
                f"{st['out']:,} set aside.")

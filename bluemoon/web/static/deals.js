@@ -148,7 +148,15 @@
     const opened = openReasons(sa);
     const rows = sa.reasons.map((r) => reasonHtml(s, ctx, r, max, opened.has(r.key))).join('');
     const notes = [];
-    if (sa.several) notes.push(fmt.num(sa.several) + ' have more than one reason, so the counts add up to more than ' + fmt.num(sa.total) + '.');
+    // The bars count every property a rule set aside, also the ones added to the buy box by hand since.
+    const multi = sa.multi !== undefined ? Number(sa.multi) || 0 : Number(sa.several) || 0;
+    const extra = [];
+    if (multi) extra.push(fmt.num(multi) + ' have more than one reason');
+    if (hand.added) {
+      extra.push(hand.added === 1 ? 'the 1 you added to the buy box is still counted under its reasons'
+        : 'the ' + fmt.num(hand.added) + ' you added to the buy box are still counted under their reasons');
+    }
+    if (extra.length) notes.push('The counts add up to more than the ' + fmt.num(sa.total) + ' set aside: ' + extra.join(', and ') + '.');
     if (sa.drive_estimated) {
       let t = 'Drive times are straight-line estimates until the Google key is in.';
       if (sa.drive_close_calls) {
@@ -193,7 +201,8 @@
       '<span class="why-l">' + esc(r.label) + '</span>' +
       '<span class="why-bar" aria-hidden="true"><i style="width:' + Math.round((100 * r.count) / max) + '%"></i></span>' +
       '<span class="why-n num">' + fmt.num(r.count) + '</span>' +
-      '<span class="why-only note">' + (r.only ? fmt.num(r.only) + ' for this reason alone' : 'always with another reason') + '</span>' +
+      '<span class="why-only note">' + (r.only ? fmt.num(r.only) + ' for this reason alone'
+        : Number(r.still_aside) === 0 ? 'none set aside now' : 'always with another reason') + '</span>' +
       (r.explain ? '<span class="why-ex">' + esc(r.explain) + '</span>' : '') +
       (decided ? '<span class="why-st">' + esc(decided) + '</span>' : '') +
       '<span class="why-more"><span class="show">Show ' + (n === 1 ? 'the group' : 'the ' + n + ' groups') + '</span>' +
@@ -236,35 +245,50 @@
       '<b>' + esc(title) + '</b>' + (text ? '<span>' + esc(text) + '</span>' : '') + '</button>';
   }
 
-  /** The Decide choices for one group g ({key, reason, label, count, only, added, kept, ...}). */
+  /** The Decide choices for one group g ({key, reason, label, count, only, still_aside, added, kept, waived,
+      clearable, ...}). The numbers count the ones still set aside: those already in the buy box need no Add, and
+      `only` (set aside for this rule alone) never counts a rule you already stopped counting. */
   function decideHtml(s, g) {
     const n = Number(g.count) || 0;
-    const only = Math.min(n, Number(g.only) || 0);
-    const other = n - only;
+    const aside = g.still_aside === undefined ? n : Math.min(n, Number(g.still_aside) || 0);
+    const open = Math.max(0, aside - (Number(g.waived) || 0));   // still set aside and this rule still counts
+    const only = Math.min(open, Number(g.only) || 0);
+    const other = aside - only;
+    const still = aside < n ? ' still' : '';
+    const clearable = g.clearable === undefined ? (g.added || g.kept || g.waived) : Number(g.clearable) || 0;
     const choices = [];
+    let lead = '';
     if (g.reason === 'manual') {
       choices.push(choiceHtml(g.key, 'clear', 'Let the rules decide again for all ' + fmt.num(n),
         'Takes off the set-aside by hand. Each one is in or out by the rules again.', true));
       choices.push(choiceHtml(g.key, 'add_all', 'Add all ' + fmt.num(n) + ' to the buy box', 'Whatever the rules say.'));
     } else {
       if (only) {
-        choices.push(choiceHtml(g.key, 'add_only', 'Add the ' + fmt.num(only) + ' set aside only for this',
+        choices.push(choiceHtml(g.key, 'add_only', 'Add the ' + fmt.num(only) + still + ' set aside only for this',
           other ? 'The other ' + fmt.num(other) + ' also have another reason, so they stay set aside. This rule stops counting for them.'
             : 'All of them come into the buy box.', true));
-      } else {
-        choices.push(choiceHtml(g.key, 'add_only', 'Stop counting this rule for all ' + fmt.num(n),
+      } else if (open) {
+        choices.push(choiceHtml(g.key, 'add_only', 'Stop counting this rule for ' + (open < n ? 'the ' + fmt.num(open) + ' it still counts for' : 'all ' + fmt.num(n)),
           'Every one of them also has another reason, so they stay set aside for now.', false));
       }
-      choices.push(choiceHtml(g.key, 'add_all', other ? 'Add all ' + fmt.num(n) + ' (also the ' + fmt.num(other) + ' with other reasons)'
-        : 'Add all ' + fmt.num(n) + ', whatever the rules say', 'In the buy box by hand, whatever any rule says.'));
-      choices.push(choiceHtml(g.key, 'keep', 'Keep them set aside', 'Marks them as looked at. Any Add you made from this group is taken back.'));
-      if (g.added || g.kept || g.waived) {
+      if (aside) {
+        const which = aside < n ? 'the ' + fmt.num(aside) + ' still set aside' : 'all ' + fmt.num(n);
+        choices.push(choiceHtml(g.key, 'add_all', only && other ? 'Add ' + which + ' (also the ' + fmt.num(other) + ' with other reasons)'
+          : 'Add ' + which + ', whatever the rules say', 'In the buy box by hand, whatever any rule says.'));
+      } else {
+        lead = '<p class="note">All ' + esc(fmt.num(n)) + ' are in the buy box now.</p>';
+      }
+      const keepText = g.added ? 'Marks them as looked at. What you added from this group leaves the buy box again; ones you added one at a time stay in.'
+        : g.waived ? 'Marks them as looked at. This rule counts for them again.'
+          : 'Marks them as looked at. Nothing else changes.';
+      choices.push(choiceHtml(g.key, 'keep', 'Keep them set aside', keepText));
+      if (clearable) {
         choices.push(choiceHtml(g.key, 'clear', 'Undo my decisions for this group', 'The rules decide again for these ' + fmt.num(n) + '.'));
       }
     }
     const hint = ruleHint(s, g.reason);
     return '<div class="dec-sheet" data-sheet="' + esc(g.key) + '" role="group" aria-label="' + esc('Decide about ' + g.label) + '">' +
-      '<p class="dec-q">What should happen to the ' + esc(fmt.num(n)) + ' in “' + esc(g.label) + '”?</p>' +
+      '<p class="dec-q">What should happen to the ' + esc(fmt.num(n)) + ' in “' + esc(g.label) + '”?</p>' + lead +
       '<div class="dec-opts">' + choices.join('') + '</div>' +
       '<p class="note">Properties you add get photos, photo checks and Crexi credits when those steps run. ' +
       'Properties you import later' + (g.reason === 'manual' ? '' : ' into this group') + ' are still checked by the rules.' +
@@ -291,6 +315,7 @@
       explain: rv.explain || old.explain || (r && r.explain) || '',
       count: pick('count'), only: pick('only'), still_aside: pick('still_aside'), added: pick('added'), kept: pick('kept'),
       waived: pick('waived'),
+      clearable: [b, rv, old].some((x) => x && x.clearable !== undefined) ? pick('clearable') : undefined,
     };
   }
 

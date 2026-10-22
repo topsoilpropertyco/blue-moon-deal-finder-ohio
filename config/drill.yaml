@@ -236,7 +236,7 @@ validate:
 # `uv run run.py research --limit 5`. Runs that cover more than safety.confirm_over_properties properties
 # (config.yaml) wait for your OK. Everything it finds is saved "not tested yet", with the link where it was seen.
 ai_research:
-  backend: claude_cli            # claude_cli = your Claude plan | mock = offline test answers
+  backend: claude_cli            # claude_cli = your Claude plan | mock = made-up offline test answers (test copy only)
   model: sonnet
   timeout_seconds: 420           # one owner's search may take a few minutes
   max_turns: 20                  # searches and page reads Claude may make for one owner
