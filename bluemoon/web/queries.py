@@ -839,12 +839,14 @@ _SET_ASIDE_SQL = """
 SELECT s.in_buybox, s.exclusion_reasons AS reasons, COALESCE(s.rule_reasons, s.exclusion_reasons) AS rules,
        s.aside_buckets AS groups, p.property_type, dt.method, dt.minutes,
        (SELECT group_concat(o.reason) FROM buybox_overrides o
-         WHERE o.property_id = p.id AND o.decision = 'keep') AS kept
+         WHERE o.property_id = p.id AND o.decision = 'keep') AS kept,
+       (SELECT group_concat(o.reason) FROM buybox_overrides o
+         WHERE o.property_id = p.id AND o.decision = 'include' AND o.reason != '*') AS waived
 FROM properties p JOIN scores s ON s.property_id = p.id
 LEFT JOIN drive_times dt ON dt.property_id = p.id
 WHERE p.market_id = ? AND (s.in_buybox = 0 OR COALESCE(s.rule_reasons, s.exclusion_reasons) != '[]')
 """
-_TALLY = ("count", "only", "still_aside", "added", "kept", "estimated")
+_TALLY = ("count", "only", "still_aside", "added", "kept", "waived", "estimated")
 
 
 def set_aside(conn: sqlite3.Connection, mc: MarketCtx) -> dict:
@@ -852,7 +854,8 @@ def set_aside(conn: sqlite3.Connection, mc: MarketCtx) -> dict:
 
     total = how many are set aside now. Each reason (one property can have several) has `count` (the rules said
     so, or set aside by hand), `only` (set aside for this reason alone), `still_aside`, `added` (in the buy box
-    by hand anyway), `kept` (Keep set aside), a plain `explain`, and its groups (`buckets`, same numbers plus
+    by hand anyway), `kept` (Keep set aside), `waived` (still set aside, but you said this rule doesn't count:
+    other reasons keep them out), a plain `explain`, and its groups (`buckets`, same numbers plus
     `estimated` drive times). A reason's groups add up to its count. Drive times that are straight-line
     estimates are counted, and so are "close calls": set aside only for an estimated drive within
     web.drive_close_call_minutes of the limit, which may come back once Google measures real drives.
@@ -880,6 +883,7 @@ def set_aside(conn: sqlite3.Connection, mc: MarketCtx) -> dict:
         groups = as_list(r["groups"]) if r.get("groups") is not None else \
             [f"{x}:{B.OTHER}" for x in sorted(everything, key=_reason_order)]
         kept = set((r.get("kept") or "").split(",")) - {""}
+        waived = set((r.get("waived") or "").split(",")) - {""}
         drive_estimate = r.get("method") == "estimate"
         if aside:
             total += 1
@@ -897,7 +901,8 @@ def set_aside(conn: sqlite3.Connection, mc: MarketCtx) -> dict:
         for key in groups:
             reason = key.split(":", 1)[0]
             tally = {"count": 1, "only": everything == {reason}, "still_aside": aside, "added": not aside,
-                     "kept": reason in kept, "estimated": reason == "drive_time" and drive_estimate}
+                     "kept": reason in kept, "waived": aside and reason in waived,
+                     "estimated": reason == "drive_time" and drive_estimate}
             by_group.setdefault(key, Counter()).update({k: int(v) for k, v in tally.items()})
             by_reason.setdefault(reason, Counter()).update({k: int(v) for k, v in tally.items()})
             if reason == "property_type" and key not in samples and r.get("property_type"):
@@ -923,13 +928,14 @@ def _reason_entry(reason: str, tally: Counter[str], by_group: Mapping[str, Count
     return {"key": reason, "label": _set_aside_label(reason, mc), "count": tally["count"], "only": tally["only"],
             "explain": B.explain(reason, mc.market, mc.ac, mc.settings, also_far=also_far),
             "still_aside": tally["still_aside"], "added": tally["added"], "kept": tally["kept"],
+            "waived": tally["waived"],
             "buckets": [{"key": k, "label": B.label_for(k, spec, samples.get(k)),
                          **{f: by_group[k][f] for f in _TALLY}} for k in keys]}
 
 
 def review_block(conn: sqlite3.Connection, mc: MarketCtx, bucket: str) -> dict:
     """What the Review list shows above one group: {bucket, reason, reason_label, label, explain, count,
-    still_aside, added, kept, only}."""
+    still_aside, added, kept, waived, only}."""
     reason, _ = B.parse_key(bucket)
     info = set_aside(conn, mc)
     entry = next((x for x in info["reasons"] if x["key"] == reason), None)
@@ -938,7 +944,7 @@ def review_block(conn: sqlite3.Connection, mc: MarketCtx, bucket: str) -> dict:
     return {"bucket": bucket, "reason": reason, "reason_label": _set_aside_label(reason, mc),
             "label": group["label"] if group else B.label_for(bucket, spec),
             "explain": entry["explain"] if entry else B.explain(reason, mc.market, mc.ac, mc.settings),
-            **{f: int((group or {}).get(f) or 0) for f in ("count", "still_aside", "added", "kept", "only")}}
+            **{f: int((group or {}).get(f) or 0) for f in ("count", "still_aside", "added", "kept", "waived", "only")}}
 
 
 def filter_funnel(base: list[dict], mc: MarketCtx) -> list[dict]:

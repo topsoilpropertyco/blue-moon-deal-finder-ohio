@@ -371,7 +371,7 @@
     if (!done) return;
     BM.toast(S.result.provider === 'bluemoon' ? (S.result.message || 'Imported your edits.')
       : 'Imported: ' + num(S.result.rows_new) + ' new, ' + num(S.result.rows_updated) + ' updated.');
-    BM.refreshSummary().catch(() => {});
+    BM.refreshSummary({fresh: true}).catch(() => {});
     S.history = null;
     loadHistory();
   }
@@ -403,7 +403,7 @@
       S.undone = true;
       result.message = (res && res.message) || 'Undone.';
       BM.toast(result.message);
-      BM.refreshSummary().catch(() => {});
+      BM.refreshSummary({fresh: true}).catch(() => {});
     });
   }
 

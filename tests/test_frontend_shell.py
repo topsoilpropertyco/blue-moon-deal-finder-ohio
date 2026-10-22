@@ -155,3 +155,54 @@ def test_ui_helpers(helpers):
     assert '<div class="v num">392</div>' in helpers["stat"]
     assert "Import &lt;a file&gt;" in helpers["empty"] and "<button>Go</button>" in helpers["empty"]
     assert helpers["booted"] == "function"     # boots on DOMContentLoaded, after every view registered
+
+
+SUMMARY_HARNESS = r"""
+const listeners = {};
+const emitted = [];
+const pending = [];
+global.window = {location: {hash: '', hostname: 'localhost'}, localStorage: {getItem: () => null, setItem: () => {}}};
+global.CustomEvent = class { constructor(type, o) { this.type = type; this.detail = o && o.detail; } };
+global.document = {readyState: 'loading', addEventListener: (k, f) => { listeners[k] = f; },
+  dispatchEvent: (ev) => { if (ev.type === 'bm:summary') emitted.push(ev.detail.n); }, querySelector: () => null};
+global.history = {replaceState: () => {}};
+global.fetch = (path) => new Promise((resolve) => pending.push({path, resolve}));
+const answer = (n) => ({type: 'basic', ok: true, status: 200, headers: {get: () => 'application/json'},
+  json: async () => ({n})});
+const flush = () => new Promise((r) => setTimeout(r, 0));
+require(process.argv[2]);
+const BM = window.BM;
+BM.state.market = 'apartments-test';
+(async () => {
+  const out = {};
+  const a = BM.refreshSummary();                 // e.g. a tab tap, still loading when a decision lands
+  out.reused = BM.refreshSummary() === a;        // a plain refresh shares the request in flight
+  const b = BM.refreshSummary({fresh: true});    // after the decision: must not reuse the old request
+  out.freshIsNew = b !== a;
+  out.requestsBefore = pending.length;
+  pending[0].resolve(answer(1));                 // the old answer (from before the decision)
+  await a; await flush(); await flush();
+  out.emittedAfterOld = emitted.slice();
+  out.requestsAfter = pending.length;
+  pending[1].resolve(answer(2));
+  out.got = (await b).n;
+  out.emitted = emitted.slice();
+  out.state = BM.state.summary.n;
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+def test_a_refresh_after_a_write_never_shows_an_older_summary(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is not installed")
+    script = tmp_path / "summary.js"
+    script.write_text(SUMMARY_HARNESS, encoding="utf-8")
+    result = subprocess.run([node, str(script), str(STATIC / "core.js")], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["reused"] and out["freshIsNew"] and out["requestsBefore"] == 1
+    assert out["emittedAfterOld"] == []          # the answer from before the write is not shown
+    assert out["requestsAfter"] == 2             # a new request starts once the old one is done
+    assert out["got"] == 2 and out["emitted"] == [2] and out["state"] == 2

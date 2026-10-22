@@ -156,8 +156,9 @@ Every function that writes commits its own transaction.
 - `overrides.py`: decisions by hand (tables `buybox_overrides`, keyed (property_id, reason '*' or a rule key),
   decision include|exclude ('*' only)|keep (a rule only); and the append-only `buybox_override_log`).
   `load(conn, market_ids)`, `for_property`, `history`, `set_decision(conn, ids, reason, decision, actor, ...)`,
-  `clear(...)`, `undo_batch(conn, batch_id, actor)`; and the web's `decide_group`, `decide_property`, `undo`
-  (they re-score the market before returning). Who: `auth.signed_in_as()` on the web, `cli` from the CLI.
+  `clear(...)`, `undo_batch(conn, batch_id, actor)` (a decision changed again after the batch is left alone);
+  and the web's `decide_group` (keep also takes back an add_all made from the same group, in the same batch),
+  `decide_property`, `undo` (they re-score the market before returning). Who: `auth.signed_in_as()` on the web, `cli` from the CLI.
 - `buckets.py`: the Why? panel's set-aside groups. Keys `<reason>:<id>` (e.g. `drive_time:76-90`, `size:1-4`,
   `year:1960s`, `skip_county:oh-clermont`, `state:ky`, `property_type:retail`, `manual:by-hand`;
   `<reason>:other` = not grouped). Edges from `config.yaml set_aside` and `asset_classes.yaml size.set_aside_*`.
@@ -278,8 +279,8 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 |---|---|---|
 | GET | `/api/health` | `{ok, version, keys:{google:bool, anthropic:bool, hud:bool, census:bool}, vision_backend, claude_cli:bool, auth_required, authenticated, signed_in_as, login_email, share}` |
 | GET | `/api/markets` | `[{slug, name, asset_class, asset_label, geography, properties, in_buybox, confirmed}]` |
-| GET | `/api/m/{slug}/summary` | `{market:{slug,name,geography,origin_label,origin_lat,origin_lng,max_drive_minutes}, asset_class:{key,label,size_metric,visual_enabled,rent_enabled,visual_question,target_word}, properties, in_buybox, blue_moon_10, needs_review, penetration, levels, levels_in_buybox, credits, set_aside:{total, several, reasons:[{key,label,count,only,explain,still_aside,added,kept,buckets:[{key,label,count,only,still_aside,added,kept,estimated}]}], drive_estimated, drive_close_calls, close_call_minutes, max_drive_minutes, by_hand:{added,set_aside}}, last_import, layers:[{key,label,done,total}], drill_waiting, drill_waiting_detail:{total,validate,stages,basis}}` (drill_waiting = buy-box owners whose next step is reach-out or a hands-on stage) |
-| GET | `/api/m/{slug}/properties?view=&q=&sort=&limit=&offset=&include_excluded=&bucket=` | `{total, items:[PropertyRow], review}`; `bucket` = one set-aside group (in or out of the buy box), `review:{bucket,reason,reason_label,label,explain,count,still_aside,added,kept,only}` |
+| GET | `/api/m/{slug}/summary` | `{market:{slug,name,geography,origin_label,origin_lat,origin_lng,max_drive_minutes}, asset_class:{key,label,size_metric,visual_enabled,rent_enabled,visual_question,target_word}, properties, in_buybox, blue_moon_10, needs_review, penetration, levels, levels_in_buybox, credits, set_aside:{total, several, reasons:[{key,label,count,only,explain,still_aside,added,kept,waived,buckets:[{key,label,count,only,still_aside,added,kept,waived,estimated}]}], drive_estimated, drive_close_calls, close_call_minutes, max_drive_minutes, by_hand:{added,set_aside}}, last_import, layers:[{key,label,done,total}], drill_waiting, drill_waiting_detail:{total,validate,stages,basis}}` (drill_waiting = buy-box owners whose next step is reach-out or a hands-on stage) |
+| GET | `/api/m/{slug}/properties?view=&q=&sort=&limit=&offset=&include_excluded=&bucket=` | `{total, items:[PropertyRow], review}`; `bucket` = one set-aside group (in or out of the buy box), `review:{bucket,reason,reason_label,label,explain,count,still_aside,added,kept,waived,only}` (waived = still set aside, but you said this rule doesn't count) |
 | POST | `/api/m/{slug}/buybox/decide` | body `{bucket, decision: add_only\|add_all\|keep\|clear, note?}` -> `{batch_id, changed, total, now_in, still_out:[{reason,label,count}], message, set_aside, in_buybox}` (re-scores first) |
 | POST | `/api/m/{slug}/buybox/undo` | body `{batch_id}` -> same shape as decide |
 | POST | `/api/m/{slug}/properties/{id}/buybox` | body `{decision: include\|exclude\|rules, reason?: '*'\|rule key, note?}` -> `{row: PropertyRow, buybox, message, batch_id, in_buybox}` |

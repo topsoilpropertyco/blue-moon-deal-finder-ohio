@@ -170,12 +170,17 @@
       '<button type="button" class="btn quiet" data-why-view="everything">See all ' + fmt.num(s.properties) + '</button></div></details>';
   }
 
-  /** '12 added by you · kept set aside' for a reason or a group. */
+  /** '12 added by you · kept set aside' for a reason or a group. waived = still set aside, but this rule no
+      longer counts for them (Stop counting this rule): other reasons keep them out. */
   function decidedText(x) {
     const parts = [];
     if (x.added) parts.push(fmt.num(x.added) + ' added by you');
     if (x.kept) parts.push(x.kept >= x.count ? 'kept set aside' : fmt.num(x.kept) + ' kept set aside');
     if (x.added && x.still_aside) parts.push(fmt.num(x.still_aside) + ' still set aside');
+    if (x.waived) {
+      parts.push((x.waived >= x.count ? 'this rule no longer counts' : fmt.num(x.waived) + ' with this rule not counting') +
+        ', still set aside for other reasons');
+    }
     return parts.join(' · ');
   }
 
@@ -252,8 +257,8 @@
       }
       choices.push(choiceHtml(g.key, 'add_all', other ? 'Add all ' + fmt.num(n) + ' (also the ' + fmt.num(other) + ' with other reasons)'
         : 'Add all ' + fmt.num(n) + ', whatever the rules say', 'In the buy box by hand, whatever any rule says.'));
-      choices.push(choiceHtml(g.key, 'keep', 'Keep them set aside', 'Marks them as looked at. Nothing else changes.'));
-      if (g.added || g.kept) {
+      choices.push(choiceHtml(g.key, 'keep', 'Keep them set aside', 'Marks them as looked at. Any Add you made from this group is taken back.'));
+      if (g.added || g.kept || g.waived) {
         choices.push(choiceHtml(g.key, 'clear', 'Undo my decisions for this group', 'The rules decide again for these ' + fmt.num(n) + '.'));
       }
     }
@@ -285,6 +290,7 @@
       label: rv.label || old.label || (b && b.label) || key.split(':')[1],
       explain: rv.explain || old.explain || (r && r.explain) || '',
       count: pick('count'), only: pick('only'), still_aside: pick('still_aside'), added: pick('added'), kept: pick('kept'),
+      waived: pick('waived'),
     };
   }
 
@@ -404,7 +410,7 @@
       }
       refresh(ctx);
     }
-    BM.refreshSummary().catch(() => {});
+    BM.refreshSummary({fresh: true}).catch(() => {});
   }
 
   /* A toast with an Undo button (the shared #toast can't be clicked). */
@@ -454,7 +460,7 @@
       afterDecision(active, Object.assign({}, res, {batch_id: null}));
     } else {
       undoToast(res && res.message ? res.message : 'Undone.', null);
-      BM.refreshSummary().catch(() => {});
+      BM.refreshSummary({fresh: true}).catch(() => {});
     }
   }
 
@@ -1017,7 +1023,7 @@
         if (again) again.focus({preventScroll: true});    // keyboard users stay on the row
       }
     }
-    BM.refreshSummary().catch(() => {});
+    BM.refreshSummary({fresh: true}).catch(() => {});
   }
 
   /* ---------- drive-time rings ---------- */

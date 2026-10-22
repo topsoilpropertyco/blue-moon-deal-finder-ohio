@@ -133,6 +133,9 @@ def test_drive_time_filter(ac, settings):
     assert ev["in_buybox"] and "drive_unknown" in ev["flags"]
     ev = evaluate(prop(), enrich(minutes=75, method="estimate"), ac, MARKET, settings)
     assert ev["exclusion_reasons"] == ["drive_time"] and "about 75 min" in ev["exclusion_details"]["drive_time"]
+    # Halves round up, like the screens (and the set-aside groups): 90.5 reads "91 min", not "90 min".
+    ev = evaluate(prop(), enrich(minutes=90.5), ac, MARKET, settings)
+    assert ev["exclusion_details"]["drive_time"].startswith("91 min drive")
     # A market row from the database works as well as a config object.
     assert evaluate(prop(), enrich(minutes=61), ac, {"max_drive_minutes": 90}, settings)["in_buybox"]
 

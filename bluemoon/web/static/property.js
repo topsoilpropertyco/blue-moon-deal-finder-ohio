@@ -924,7 +924,7 @@
     const at = c || cur;
     if (!at || !at.detail) return;
     document.dispatchEvent(new CustomEvent('bm:property-changed', {detail: {id: at.id, row: at.detail}}));
-    BM.refreshSummary().catch(() => {});
+    BM.refreshSummary({fresh: true}).catch(() => {});
   }
 
   /* Merge a DRILL write's answer into the property and re-draw the owner contact section. A write that

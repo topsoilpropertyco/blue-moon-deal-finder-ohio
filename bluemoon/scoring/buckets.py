@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from ..config import AssetClass, Settings, get_settings
 from ..util import clean_str, normalize_county
-from .buybox import EXCLUSION_LABELS, MANUAL_REASON, METRIC_UNITS, SET_ASIDE_REASONS
+from .buybox import EXCLUSION_LABELS, MANUAL_REASON, METRIC_UNITS, SET_ASIDE_REASONS, shown_minutes
 
 BUCKET_KEY = re.compile(r"^[a-z_]+:[a-z0-9-]+$")
 OTHER = "other"
@@ -239,7 +239,7 @@ def _drive_id(minutes: Any, spec: GroupSpec) -> str:
     m = _number(minutes)
     if m is None or (spec.max_minutes is not None and m <= spec.max_minutes):
         return OTHER
-    shown = round(m)                       # what the screens show ("90 min")
+    shown = shown_minutes(m)               # what the screens show ("90 min"; 90.5 shows as 91)
     first = spec.drive[0]
     if first.lo is not None and shown < first.lo:
         shown = int(first.lo)              # over the limit but rounds to it: the first group

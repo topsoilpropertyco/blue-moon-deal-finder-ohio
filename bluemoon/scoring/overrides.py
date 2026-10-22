@@ -214,25 +214,36 @@ def clear(conn: sqlite3.Connection, property_ids: Iterable[int], actor: str, *, 
 
 def undo_batch(conn: sqlite3.Connection, batch_id: str, actor: str, market_id: int | None = None) -> dict:
     """Put back what every decision of one batch replaced. The undo is a batch of its own (so it can be undone
-    too). Returns {batch_id, undone_batch, changed, property_ids}. KeyError when the batch isn't found."""
+    too). A decision changed again after this batch (by anyone) is left alone, so an old Undo never wipes a
+    newer decision. Returns {batch_id, undone_batch, changed, property_ids, properties_back, left_alone}
+    (left_alone = properties none of whose decisions were put back because they changed since).
+    KeyError when the batch isn't found."""
     found = rows(conn, "SELECT l.*, p.market_id FROM buybox_override_log l JOIN properties p ON p.id = l.property_id "
                        "WHERE l.batch_id = ? ORDER BY l.id", (str(batch_id),))
     if not found or (market_id is not None and any(int(r["market_id"]) != int(market_id) for r in found)):
         raise KeyError("That change wasn't found, so there is nothing to undo.")
     first: dict[tuple[int, str], dict] = {}
+    last: dict[tuple[int, str], dict] = {}
     for r in found:
         first.setdefault((int(r["property_id"]), r["reason"]), r)
+        last[(int(r["property_id"]), r["reason"])] = r
     ids = sorted({pid for pid, _ in first})
     batch = new_batch_id()
     who = (actor or "unknown").strip()[:320] or "unknown"
     now = now_iso()
     current = _current(conn, ids)
     changed = 0
+    back: set[int] = set()
+    newer: set[int] = set()
     with conn:
         for (pid, reason), entry in sorted(first.items()):
             prev = entry["previous"]
             now_row = current.get((pid, reason))
             now_decision = now_row["decision"] if now_row else None
+            left = last[(pid, reason)]["decision"]
+            if now_decision != (None if left == "cleared" else left):
+                newer.add(pid)             # decided again since this batch: the newer decision stays
+                continue
             if prev == now_decision:
                 continue
             if prev is None:
@@ -250,7 +261,9 @@ def undo_batch(conn: sqlite3.Connection, batch_id: str, actor: str, market_id: i
             conn.execute(_LOG, (pid, entry.get("property_key"), reason, logged, now_decision, entry.get("bucket"),
                                 f"Undo of {batch_id}", batch, None, who, now))
             changed += 1
-    return {"batch_id": batch, "undone_batch": str(batch_id), "changed": changed, "property_ids": ids}
+            back.add(pid)
+    return {"batch_id": batch, "undone_batch": str(batch_id), "changed": changed, "property_ids": ids,
+            "properties_back": len(back), "left_alone": len(newer - back)}
 
 
 # --- what the rules said when deciding ----------------------------------------------------------
@@ -320,7 +333,8 @@ def decide_group(conn: sqlite3.Connection, market_slug: str, bucket: str, decisi
     """The Why? panel's Decide button for one group. The members are looked up now, on the server.
     - add_only: the group's rule no longer counts for its members (some may stay out for other reasons);
     - add_all:  every member is added to the buy box by hand, whatever the rules say;
-    - keep:     the rule stands; the members are marked as looked at;
+    - keep:     the rule stands; the members are marked as looked at, and an add_all made from this group is
+                taken back (members added by hand another way stay in);
     - clear:    the decisions made for this rule (and from this group) are removed: the rules decide again.
     For the 'Set aside by hand' group, add_only and clear both take the hand set-aside off.
     Then the market is re-scored. Returns {batch_id, changed, total, now_in, still_out, message, bucket}."""
@@ -352,13 +366,27 @@ def decide_group(conn: sqlite3.Connection, market_slug: str, bucket: str, decisi
     else:
         target = WHOLE if decision == "add_all" else reason
         details = rule_details(conn, market, ids, s)
+        batch = new_batch_id()
+        taken_back = 0
+        if decision == "keep":
+            # Keep also takes back an 'Add all' made from this group, in the same batch so one Undo restores both.
+            taken_back = clear(conn, ids, actor, reasons=[], whole_from_bucket=bucket, whole_decision="include",
+                               batch_id=batch, note=note)["changed"]
         res = set_decision(conn, ids, target, "keep" if decision == "keep" else "include", actor, note=note,
-                           bucket=bucket, details={pid: _detail_text(d, target) or "" for pid, d in details.items()})
+                           bucket=bucket, details={pid: _detail_text(d, target) or "" for pid, d in details.items()},
+                           batch_id=batch)
+        res["changed"] += taken_back
     _rescore(conn, market_slug, rescore)
     st = status_of(conn, ids)
     total = len(ids)
     if decision == "add_all":
         msg = f"Added all {total:,} in '{group}' to the buy box by hand, whatever the rules say."
+    elif decision == "keep" and st["now_in"]:
+        n = st["now_in"]
+        msg = (f"Marked the {total:,} in '{group}' as looked at. {st['out']:,} stay set aside; {n:,} "
+               f"{'is' if n == 1 else 'are'} still in the buy box because you added "
+               f"{'it' if n == 1 else 'them'} by hand another way (one at a time, from another group or from a "
+               f"spreadsheet).")
     elif decision == "keep":
         msg = f"Kept {total:,} in '{group}' set aside. They're marked as looked at."
     elif decision == "clear" or manual:
@@ -427,9 +455,17 @@ def undo(conn: sqlite3.Connection, market_slug: str, batch_id: str, actor: str, 
     _rescore(conn, market_slug, rescore)
     st = status_of(conn, res["property_ids"])
     total = len(res["property_ids"])
-    msg = (f"Undone. {total:,} {'property is' if total == 1 else 'properties are'} back the way they were: "
-           f"{st['now_in']:,} in the buy box, {st['out']:,} set aside." if res["changed"] else
-           "Nothing to undo: those decisions had already changed.")
+    back, newer = res["properties_back"], res["left_alone"]
+    if not res["changed"]:
+        msg = "Nothing to undo: those decisions had already changed."
+    elif newer:
+        msg = (f"Undone for {back:,} {'property' if back == 1 else 'properties'}. {newer:,} "
+               f"{'was' if newer == 1 else 'were'} left alone because {'it was' if newer == 1 else 'they were'} "
+               f"decided again after that change. Of all {total:,}: {st['now_in']:,} in the buy box, "
+               f"{st['out']:,} set aside.")
+    else:
+        msg = (f"Undone. {total:,} {'property is' if total == 1 else 'properties are'} back the way they were: "
+               f"{st['now_in']:,} in the buy box, {st['out']:,} set aside.")
     return {"batch_id": res["batch_id"] if res["changed"] else None, "undone_batch": res["undone_batch"],
             "changed": res["changed"], "total": total, "now_in": st["now_in"], "still_out": st["still_out"],
             "message": msg}

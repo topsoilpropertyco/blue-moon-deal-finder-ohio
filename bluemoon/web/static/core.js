@@ -39,6 +39,7 @@
   let booted = false;
   let summaryAt = 0;
   let summaryInFlight = null;
+  let summaryWrites = 0;       // bumped by refreshSummary({fresh: true}) after each write
   let loginShown = false;
   let moonSeq = 0;
 
@@ -481,12 +482,20 @@
     return state.markets;
   }
 
-  function refreshSummary() {
+  /* refreshSummary({fresh: true}) after a write (a decision, an undo, an import): a summary request that started
+     before the write may hold the old numbers, so it is not reused, and its answer is not shown. */
+  function refreshSummary(opts) {
     const slug = state.market;
     if (!slug) return Promise.resolve(null);
-    if (summaryInFlight && summaryInFlight.slug === slug) return summaryInFlight.promise;
+    if (opts && opts.fresh) summaryWrites += 1;
+    const inFlight = summaryInFlight;
+    if (inFlight && inFlight.slug === slug) {
+      if (inFlight.writes === summaryWrites) return inFlight.promise;
+      return inFlight.promise.catch(() => null).then(() => refreshSummary());
+    }
+    const writes = summaryWrites;
     const promise = api(marketPath('/summary')).then((s) => {
-      if (slug === state.market) {
+      if (slug === state.market && writes === summaryWrites) {
         state.summary = s;
         summaryAt = Date.now();
         updateMarketCount(s);
@@ -497,7 +506,7 @@
     }).finally(() => {
       if (summaryInFlight && summaryInFlight.promise === promise) summaryInFlight = null;
     });
-    summaryInFlight = {slug, promise};
+    summaryInFlight = {slug, promise, writes};
     return promise;
   }
 

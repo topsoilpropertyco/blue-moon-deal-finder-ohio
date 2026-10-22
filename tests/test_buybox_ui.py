@@ -93,9 +93,9 @@ const summary = {
         buckets: [
           {key: 'drive_time:61-75', label: '61–75 min', count: 2, only: 0, still_aside: 2, added: 0, kept: 0, estimated: 0},
           {key: KEY, label: '76–90 min', count: 3, only: 2, still_aside: 2, added: 1, kept: 0, estimated: 0}]},
-      {key: 'skip_county', label: 'County on the skip list', count: 1, only: 0, still_aside: 1, added: 0, kept: 0,
+      {key: 'skip_county', label: 'County on the skip list', count: 1, only: 0, still_aside: 1, added: 0, kept: 0, waived: 1,
         explain: 'Counties Brad said to skip, even inside the drive limit: Sampleton (OH).',
-        buckets: [{key: 'skip_county:oh-sampleton', label: 'Sampleton County, OH', count: 1, only: 0, still_aside: 1, added: 0, kept: 0, estimated: 0}]},
+        buckets: [{key: 'skip_county:oh-sampleton', label: 'Sampleton County, OH', count: 1, only: 0, still_aside: 1, added: 0, kept: 0, waived: 1, estimated: 0}]},
     ]},
 };
 function row(id, extra) {
@@ -156,6 +156,9 @@ const out = {};
   if (toastEl) await click(toastEl, {'data-undo-batch': 'b1'});
   out.undoCall = calls[0];
   out.undoneToast = toastEl ? toastEl.innerHTML : null;
+  await click(why, {'data-decide-open': 'skip_county:oh-sampleton'});
+  out.waivedSheet = why.innerHTML;
+  await click(why, {'data-decide-open': 'skip_county:oh-sampleton'});
   await click(why, {'data-review-group': KEY});
   out.hashAfterReview = window.location.hash;
 
@@ -232,10 +235,20 @@ def test_decide_offers_the_choices_and_says_how_to_change_the_rule(ui):
     assert "Add the 2 set aside only for this" in sheet
     assert "The other 1 also have another reason, so they stay set aside" in sheet
     assert "Add all 3 (also the 1 with other reasons)" in sheet
-    assert "Keep them set aside" in sheet
+    assert "Keep them set aside" in sheet and "Any Add you made from this group is taken back." in sheet
+    assert "Nothing else changes" not in sheet
     assert "Undo my decisions for this group" in sheet            # the group has a decision already
     assert "photos, photo checks and Crexi credits" in sheet
     assert "<code>max_drive_minutes: 60</code>" in sheet
+
+
+def test_a_waived_rule_shows_in_the_panel_and_can_be_cleared(ui):
+    # 'Stop counting this rule' on a group whose members all have another reason: nothing is added, so the
+    # panel says the rule no longer counts and offers the way back.
+    sheet = ui["waivedSheet"]
+    assert "this rule no longer counts, still set aside for other reasons" in sheet
+    assert 'data-decide="clear" data-bucket="skip_county:oh-sampleton"' in sheet
+    assert "Undo my decisions for this group" in sheet
 
 
 def test_a_decision_posts_the_group_and_can_be_undone(ui):

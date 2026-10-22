@@ -194,6 +194,10 @@ def test_group_definitions_follow_the_yaml(settings):
     ev = {"drive_minutes": 60.4, "size_value": 4.0}
     assert buckets.group_id("drive_time", {}, ev, spec) == "61-75"          # rounds to 60: the first group
     assert buckets.group_id("drive_time", {}, {"drive_minutes": 90.2}, spec) == "76-90"   # shown as "90 min"
+    # Halves round up, as the screens show them: 90.5 shows as "91 min", so it is in 91-120 (not 76-90).
+    assert buckets.group_id("drive_time", {}, {"drive_minutes": 90.5}, spec) == "91-120"
+    assert buckets.group_id("drive_time", {}, {"drive_minutes": 120.5}, spec) == "121-up"
+    assert buckets.group_id("drive_time", {}, {"drive_minutes": 90.4}, spec) == "76-90"
     assert buckets.group_id("drive_time", {}, {"drive_minutes": None}, spec) == "other"
     assert buckets.group_id("size", {}, ev, spec) == "1-4"
     assert buckets.group_id("size", {}, {"size_value": 81}, spec) == "81-100"
@@ -341,8 +345,71 @@ def test_add_only_add_all_keep_clear_and_undo(client, built):
 
 
 def test_skip_county_group_add_only_keeps_the_drive_rule(client, built):
-    res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": "skip_county:oh-fairfield", "decision": "add_only"})
+    group = "skip_county:oh-fairfield"
+    res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "add_only"})
     assert res["now_in"] == 0 and res["still_out"] == [{"reason": "drive_time", "label": "Too far to drive", "count": 1}]
+    # The waiver shows in the Why? panel and the Review header, so it can be seen and cleared there.
+    entry = groups_of(res["set_aside"])[group]
+    assert entry["waived"] == 1 and entry["added"] == 0 and entry["kept"] == 0 and entry["still_aside"] == 1
+    assert next(r for r in res["set_aside"]["reasons"] if r["key"] == "skip_county")["waived"] == 1
+    assert api(client, f"/api/m/{MARKET}/properties", bucket=group)["review"]["waived"] == 1
+    res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "clear"})
+    assert res["changed"] == 1 and groups_of(res["set_aside"])[group]["waived"] == 0
+    assert scalar(built, "SELECT COUNT(*) FROM buybox_overrides") == 0
+
+
+def test_keep_after_add_all_takes_the_group_back_out(client, built):
+    group = "drive_time:61-75"
+    members = set(overrides.group_property_ids(built, market_by_slug(built, MARKET)["id"], group))
+    before = api(client, f"/api/m/{MARKET}/summary")["in_buybox"]
+    res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "add_all"})
+    assert res["now_in"] == len(members)
+
+    res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "keep"})
+    assert res["now_in"] == 0 and res["in_buybox"] == before
+    assert res["message"].startswith(f"Kept {len(members)} in ") and "set aside" in res["message"]
+    entry = groups_of(res["set_aside"])[group]
+    assert entry["added"] == 0 and entry["kept"] == len(members) and entry["still_aside"] == len(members)
+    assert scalar(built, "SELECT COUNT(*) FROM buybox_overrides WHERE reason = '*'") == 0
+    check_invariant(built)
+
+    # One Undo puts the 'Add all' back (both parts of the click were one batch).
+    res = post(client, f"/api/m/{MARKET}/buybox/undo", {"batch_id": res["batch_id"]})
+    assert res["now_in"] == len(members) and "back the way they were" in res["message"]
+    assert scalar(built, "SELECT COUNT(*) FROM buybox_overrides WHERE decision = 'keep'") == 0
+
+    # A member added by hand another way (the drawer) stays in, and the message says so.
+    post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "clear"})
+    one_of = min(members)
+    post(client, f"/api/m/{MARKET}/properties/{one_of}/buybox", {"decision": "include"})
+    res = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "keep"})
+    assert res["now_in"] == 1 and "is still in the buy box because you added it by hand another way" in res["message"]
+    assert overrides.for_property(built, one_of)["*"]["decision"] == "include"
+    check_invariant(built)
+
+
+def test_undo_leaves_a_newer_decision_alone(client, built):
+    far = pid_of(built, "DR-0121")
+    first = post(client, f"/api/m/{MARKET}/properties/{far}/buybox", {"decision": "exclude"})
+    post(client, f"/api/m/{MARKET}/properties/{far}/buybox", {"decision": "include", "note": "Brad wants it"})
+    res = post(client, f"/api/m/{MARKET}/buybox/undo", {"batch_id": first["batch_id"]})
+    assert res["changed"] == 0 and "Nothing to undo" in res["message"]
+    row = overrides.for_property(built, far)["*"]
+    assert row["decision"] == "include" and row["note"] == "Brad wants it"
+    assert scalar(built, "SELECT in_buybox FROM scores WHERE property_id = ?", (far,)) == 1
+
+    # A group's Undo puts back the rest and says which one it left alone.
+    group = "drive_time:61-75"
+    members = sorted(overrides.group_property_ids(built, market_by_slug(built, MARKET)["id"], group))
+    added = post(client, f"/api/m/{MARKET}/buybox/decide", {"bucket": group, "decision": "add_all"})
+    post(client, f"/api/m/{MARKET}/properties/{members[0]}/buybox", {"decision": "exclude", "note": "bad roof"})
+    res = post(client, f"/api/m/{MARKET}/buybox/undo", {"batch_id": added["batch_id"]})
+    assert res["changed"] == len(members) - 1
+    assert f"Undone for {len(members) - 1} " in res["message"] and "1 was left alone" in res["message"]
+    row = overrides.for_property(built, members[0])["*"]
+    assert row["decision"] == "exclude" and row["note"] == "bad roof"
+    assert scalar(built, "SELECT COUNT(*) FROM buybox_overrides WHERE property_id != ?", (far,)) == 1
+    check_invariant(built)
 
 
 # --- one property ----------------------------------------------------------------------------------

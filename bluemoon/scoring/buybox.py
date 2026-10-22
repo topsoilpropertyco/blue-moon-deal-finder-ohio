@@ -116,6 +116,12 @@ def _num(v: Any) -> float | None:
         return None
 
 
+def shown_minutes(minutes: float) -> int:
+    """Whole drive minutes the way the screens show them: the API sends one decimal and the browser rounds
+    halves up (90.5 -> 91), unlike Python's round() (90.5 -> 90). Groups and texts use this so they agree."""
+    return math.floor(round(float(minutes), 1) + 0.5)
+
+
 def _flags(prop: Mapping[str, Any]) -> set[str]:
     raw = prop.get("flags_json")
     if isinstance(raw, (list, tuple, set)):
@@ -289,7 +295,7 @@ def evaluate(prop: Mapping[str, Any], enrich: Mapping[str, Any] | None, asset_cl
             flags.append("drive_estimated")
         if max_minutes is not None and minutes > max_minutes:
             approx = "about " if drive.get("method") == "estimate" else ""
-            exclude("drive_time", f"{approx}{minutes:.0f} min drive; the limit is {max_minutes:.0f} min")
+            exclude("drive_time", f"{approx}{shown_minutes(minutes)} min drive; the limit is {max_minutes:.0f} min")
 
     year = _num(prop.get("year_built"))
     if year is None:
