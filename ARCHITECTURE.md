@@ -210,7 +210,12 @@ Every function that writes commits its own transaction.
   adds the blocked list to every WebSearch) and again after the answer (`blocked_by`, `screen`,
   `without_blocked`, `safe_text`: copies and disguised links count as blocked; free text from a blocked answer is
   never stored; phones and emails are taken out of free text). Research never changes the role of a person
-  another source added.
+  another source added. One Claude call per owner name (never per portfolio: a shared mailing address can join
+  different owners); owners whose last tries failed go behind the rest; do-not-contact is checked again before
+  each owner is asked and before its answer is written. A logged reach-out (`log_outreach`) on an AI contact
+  updates its finding and copies like `set_contact_status`; taking a wrong mark back puts back the copies it
+  reached; a verified AI contact carries to the owner's other properties (untested ones never do). A set-aside
+  owner (scope buybox) is never held open waiting for research.
 - `credits.py`: `credit_status(conn) -> {month, per_month, used, left, used_today, days_left, daily_pace,
   today_left, ...}` (the pace comes from the credits left when the day began, so it holds all day; the plan gives
   today `today_left` credits and every later day `daily_pace`), `use_credit(conn, property_id,

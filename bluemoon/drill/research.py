@@ -1,8 +1,8 @@
 """AI web research: Claude Code searches the web for each owner, on your Claude plan (the ai_research stage).
 
-One Claude call per owner: an owner's properties share one answer (grouped by portfolio, else by owner name),
-buy-box owners first. Claude may only search the web and read pages. People-search, background-check and
-data-broker sites, and Crexi, are blocked twice:
+One Claude call per owner name: the properties with that name share one answer (never the properties of other
+owners at the same mailing address, even when they share a portfolio), buy-box owners first. Claude may only
+search the web and read pages. People-search, background-check and data-broker sites, and Crexi, are blocked twice:
   1. in Claude Code itself: page reads have a deny rule per site (the site and every subdomain), archive,
      translation and page-reader sites can't be read at all (they would show a blocked site's pages), and every
      web search gets those sites added to its blocked_domains by a hook (websearch_guard.py), and
@@ -387,10 +387,11 @@ def parse_answer(text: str) -> ResearchAnswer:
 @dataclass
 class OwnerGroup:
     """One owner (one Claude call) and the properties in this run that the answer is written to."""
-    key: str                   # 'pk:<portfolio key>' or 'name:<normalized owner name>'
+    key: str                   # 'name:<normalized owner name>'
     name: str                  # the owner name searched for
     members: list[E.Ctx] = field(default_factory=list)
     cache_key: str = ""
+    family: set[int] = field(default_factory=set)   # members + the owner's other properties (do-not-contact check)
 
     @property
     def best(self) -> E.Ctx:
@@ -409,14 +410,36 @@ class Targets:
     enabled: bool = True
 
 
-def _group_key(ctx: E.Ctx, name: str) -> str:
-    pk = clean_str((ctx.owner or {}).get("portfolio_key"))
-    return f"pk:{pk}" if pk else f"name:{normalize_owner(name) or name.upper()}"
+def _group_key(name: str) -> str:
+    """One group per owner name. Not per portfolio: a portfolio also joins different owners that share a mailing
+    address (often a property manager's), and one owner's answer must never be written to another owner."""
+    return f"name:{normalize_owner(name) or name.upper()}"
+
+
+def _family_dnc(conn: sqlite3.Connection, family: set[int]) -> bool:
+    """True when any property of this owner's family is marked do-not-contact (read now, not when the run began)."""
+    ids = sorted(family)
+    for i in range(0, len(ids), 900):
+        chunk = ids[i:i + 900]
+        if one(conn, f"SELECT 1 AS x FROM drill_state WHERE status='dnc' AND property_id IN "
+                     f"({','.join('?' for _ in chunk)}) LIMIT 1", chunk):
+            return True
+    return False
+
+
+def _error_counts(conn: sqlite3.Connection, market_id: int) -> dict[str, int]:
+    """{owner key: failed tries since that owner's last answer} in this market."""
+    return {r["owner_key"]: int(r["n"]) for r in rows(
+        conn, "SELECT owner_key, COUNT(*) AS n FROM research_runs r WHERE market_id = ? AND outcome = 'error' "
+              "AND id > COALESCE((SELECT MAX(id) FROM research_runs g WHERE g.market_id = r.market_id "
+              "AND g.owner_key = r.owner_key AND g.outcome != 'error'), 0) GROUP BY owner_key", (market_id,))}
 
 
 def owner_groups(conn: sqlite3.Connection, market: dict, cfg: ResearchConfig,
                  settings: Settings | None = None) -> Targets:
-    """Owners whose properties still need AI research in this pass, best first (buy box, then score).
+    """Owners whose properties still need AI research in this pass, best first (buy box, then score). Owners
+    whose last tries failed come after the rest (fewest failures first), so a few owners that keep failing can't
+    stop every run before it reaches anyone else.
 
     Left out: owners set aside (scope buybox, once scored), confirmed or do-not-contact owners, owner types
     the stage doesn't apply to, properties already researched this pass, owners with no name, and any owner
@@ -437,7 +460,7 @@ def owner_groups(conn: sqlite3.Connection, market: dict, cfg: ResearchConfig,
         if not name:
             no_name += 1
             continue
-        key = _group_key(ctx, name)
+        key = _group_key(name)
         groups.setdefault(key, OwnerGroup(key=key, name=name)).members.append(ctx)
     if not groups:
         return Targets(groups=[], no_name=no_name)
@@ -453,10 +476,12 @@ def owner_groups(conn: sqlite3.Connection, market: dict, cfg: ResearchConfig,
         if family & dnc:
             skipped += len(g.members)
             continue
+        g.family = family
         g.members.sort(key=E._sort_key)
         g.cache_key = _cache_key(g, cfg)
         out.append(g)
-    out.sort(key=lambda g: E._sort_key(g.best))
+    errors = _error_counts(conn, market["id"])
+    out.sort(key=lambda g: (errors.get(g.key, 0), E._sort_key(g.best)))
     return Targets(groups=out, skipped_dnc=skipped, no_name=no_name)
 
 
@@ -846,6 +871,7 @@ class _Applied:
     people_added: int = 0
     blocked: int = 0
     leads: int = 0
+    skipped_dnc: bool = False   # the owner was marked do-not-contact while the run was going: nothing written
 
 
 def _insert_run(conn: sqlite3.Connection, market_id: int, g: OwnerGroup, cfg: ResearchConfig, backend: Any, *,
@@ -867,13 +893,16 @@ def apply_answer(conn: sqlite3.Connection, market_id: int, g: OwnerGroup, answer
                  settings: Settings | None = None) -> _Applied:
     """Write one owner's answer to every property of the group, in one transaction: the run, its findings,
     the kept people and contacts (source ai_research, not tested yet; values on the do-not-contact list stay
-    do-not-contact), one ai_research check-off per property (found | nothing, actor 'ai') and the new state."""
+    do-not-contact), one ai_research check-off per property (found | nothing, actor 'ai') and the new state.
+    Nothing is written when a property of the owner's family was marked do-not-contact in the meantime."""
     dcfg = E.drill_config(settings)
     found = screen(answer, cfg)
     blocked = sum(1 for f in found if f.status == "blocked")
     answer = answer.model_copy(update={"summary": safe_text(answer.summary, cfg, blocked),   # what may be shown
                                        "not_found_reason": safe_text(answer.not_found_reason, cfg, blocked)})
     with E._tx(conn):
+        if _family_dnc(conn, g.family or set(g.property_ids)):
+            return _Applied(run_id=0, skipped_dnc=True)
         dnc = E._dnc_keys(conn)
         found_ids: set[int] = set()
         res = _Applied(run_id=0)
@@ -1042,6 +1071,7 @@ class _Stats:
     blocked_dropped: int = 0
     leads: int = 0
     errors: int = 0
+    skipped_dnc: int = 0         # owners marked do-not-contact while the run was going
     capped: bool = False
     fatal: str | None = None
     warnings: list[str] = field(default_factory=list)
@@ -1105,6 +1135,9 @@ def _run(conn: sqlite3.Connection, market: dict, groups: list[OwnerGroup], be: A
     n = len(groups)
     for i, g in enumerate(groups):
         _tell(progress, i / max(1, n) * 0.98, f"AI research: owner {i + 1:,} of {n:,}: {g.name}")
+        if _family_dnc(conn, g.family or set(g.property_ids)):   # marked do-not-contact since the run began
+            stats.skipped_dnc += 1
+            continue
         hit = cached_answer(conn, g, cfg)
         from_cache = hit is not None
         if hit is not None:
@@ -1144,6 +1177,9 @@ def _run(conn: sqlite3.Connection, market: dict, groups: list[OwnerGroup], be: A
             cache_put(conn, g.cache_key, CACHE_PROVIDER, 200, {"answer": clean.model_dump(), "meta": meta})
         done = apply_answer(conn, market["id"], g, answer, cfg, be, from_cache=from_cache, meta=meta,
                             settings=settings)
+        if done.skipped_dnc:
+            stats.skipped_dnc += 1
+            continue
         stats.researched += 1
         stats.found += int(done.found_props > 0)
         stats.nothing += int(done.found_props == 0)
@@ -1156,7 +1192,7 @@ def _run(conn: sqlite3.Connection, market: dict, groups: list[OwnerGroup], be: A
 
 
 def _result(estimate: dict, stats: _Stats, groups: list[OwnerGroup], t: Targets, be: Any) -> dict:
-    left = len(groups) - stats.researched - stats.errors
+    left = len(groups) - stats.researched - stats.errors - stats.skipped_dnc
     if not groups and not stats.fatal:
         msg = "AI research: nothing to research. Every owner in scope has been researched in this pass."
         if t.no_name:
@@ -1174,6 +1210,9 @@ def _result(estimate: dict, stats: _Stats, groups: list[OwnerGroup], t: Targets,
             msg += f" Dropped {stats.blocked_dropped:,} findings from blocked sites."
     if stats.errors:
         msg += f" {stats.errors:,} had a problem and will be retried next run."
+    if stats.skipped_dnc:
+        msg += (f" Left out {stats.skipped_dnc:,} owner{'s' if stats.skipped_dnc != 1 else ''} marked do-not-contact "
+                f"while the run was going.")
     if stats.capped:
         msg += " Hit the per-run cap (ai_research.max_calls_per_run); run it again for the rest."
     if stats.fatal:
@@ -1184,7 +1223,8 @@ def _result(estimate: dict, stats: _Stats, groups: list[OwnerGroup], t: Targets,
             "cached": stats.cached, "calls": stats.calls, "found": stats.found, "nothing": stats.nothing,
             "found_properties": stats.found_properties, "contacts_added": stats.contacts_added,
             "people_added": stats.people_added, "blocked_dropped": stats.blocked_dropped, "leads": stats.leads,
-            "errors": stats.errors, "capped": stats.capped, "pending": max(0, left),
+            "errors": stats.errors, "skipped_dnc_during_run": stats.skipped_dnc, "capped": stats.capped,
+            "pending": max(0, left),
             "stopped": stats.fatal is not None, "error": stats.fatal, "warnings": stats.warnings, "message": msg}
 
 
@@ -1214,9 +1254,10 @@ def _copies(conn: sqlite3.Connection, f: dict) -> list[dict]:
 
 
 def contact_marked(conn: sqlite3.Connection, contact: dict, status: str, actor: str | None) -> set[int]:
-    """engine.set_contact_status changed an AI-found contact (inside its transaction): update its finding, and
-    when it is wrong, mark the same contact wrong on the owner's other properties (still untested ones only).
-    Returns the other properties changed."""
+    """engine.set_contact_status (or a logged reach-out) changed an AI-found contact, inside its transaction:
+    update its finding. Marked wrong, the same contact is marked wrong on the owner's other properties (still
+    untested ones only). Taken back (untested or verified again), the copies that same wrong mark reached are
+    put back to untested too. Returns the other properties changed."""
     now = now_iso()
     touched: set[int] = set()
     for f in rows(conn, "SELECT * FROM research_findings WHERE contact_point_id = ?", (contact["id"],)):
@@ -1235,6 +1276,20 @@ def contact_marked(conn: sqlite3.Connection, contact: dict, status: str, actor: 
             new = "kept" if f["status"] == "wrong" else f["status"]
             conn.execute("UPDATE research_findings SET status=?, marked_by=?, marked_at=? WHERE id=?",
                          (new, actor, now, f["id"]))
+            if f["status"] != "wrong":
+                continue
+            for copy in _copies(conn, f):
+                # Only the copies the same wrong mark reached (it wrote one time on all of them); a copy someone
+                # marked wrong on its own property later keeps its mark.
+                if copy["status"] != "wrong" or copy["marked_at"] != f["marked_at"]:
+                    continue
+                conn.execute("UPDATE research_findings SET status='kept', marked_by=?, marked_at=? WHERE id=?",
+                             (actor, now, copy["id"]))
+                if copy.get("contact_point_id"):
+                    cur = conn.execute("UPDATE contact_points SET status='untested' WHERE id=? AND status='wrong'",
+                                       (copy["contact_point_id"],))
+                    if cur.rowcount:
+                        touched.add(int(copy["property_id"]))
     return touched
 
 
@@ -1259,10 +1314,10 @@ def mark_finding(conn: sqlite3.Connection, finding_id: int, status: str, *, acto
                   "kept": "untested" if contact.get("status") == "wrong" else None}[st]
         if change:
             res = E.set_contact_status(conn, int(f["contact_point_id"]), change, actor=actor, settings=settings)
+            new = st if st == "wrong" or f["status"] == "wrong" else f["status"]
             with E._tx(conn):   # also when the contact was first found by another stage (then it has no AI mark)
-                conn.execute("UPDATE research_findings SET status=?, marked_by=?, marked_at=? WHERE id=?",
-                             (st if st == "wrong" or f["status"] == "wrong" else f["status"], actor, now_iso(),
-                              f["id"]))
+                conn.execute("UPDATE research_findings SET status=?, marked_by=?, marked_at=? WHERE id=? "
+                             "AND status != ?", (new, actor, now_iso(), f["id"], new))
             return {**res, "finding": one(conn, "SELECT * FROM research_findings WHERE id = ?", (f["id"],))}
     cfg = E.drill_config(settings)
     now = now_iso()

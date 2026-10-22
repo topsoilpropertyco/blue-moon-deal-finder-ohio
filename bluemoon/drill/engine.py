@@ -76,8 +76,9 @@ CARRY_ROLES = ("member", "officer", "trustee", "deed_signer", "heir")
 # People who are never the owner: recording one does not make a property "Possible owner" (level 2).
 # 'rejected' is a person an AI research finding named who was then marked wrong.
 NOT_OWNER_ROLES = ("manager", "agent", "rejected")
-# Contacts and people the AI research step found. It writes them to every property of the owner itself, so
-# the portfolio match never copies them (the copy would lose the source link).
+# Contacts and people the AI research step found. It writes them itself, but only to the buy-box properties of
+# the market it ran in, with the link where each was seen. So the portfolio match copies an AI contact to the
+# owner's other properties only once a reach-out shows it works (verified); AI people are never copied.
 AI_SOURCE = "ai_research"
 # Roles that name the owner itself: when the export had no owner name, the owner type is read from them.
 OWNER_NAME_ROLES = ("owner_of_record", "possible_owner", "confirmed_owner")
@@ -165,6 +166,8 @@ class DrillConfig:
     # (no county rental registry, for example): the stage is skipped for properties in those counties.
     not_in_county: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
     learn_order: bool = True   # drill.yaml learn_order: real hit rates reorder the free hands-on stages
+    # drill.yaml ai_research.scope: buybox = a background stage (the AI research) only reaches buy-box owners
+    research_scope: str = "buybox"
 
     @property
     def by_key(self) -> dict[str, Stage]:
@@ -194,8 +197,10 @@ def drill_config(settings: Settings | None = None) -> DrillConfig:
         except (TypeError, ValueError, AttributeError):
             continue
     learn = raw.get("learn_order", True)
+    scope = str((raw.get("ai_research") or {}).get("scope") or "buybox").strip().lower()
     return DrillConfig(stages=stages, validate=validate, levels=levels, not_in_county=_dead_county_slots(stages, s),
-                       learn_order=learn if isinstance(learn, bool) else str(learn).lower() not in ("false", "no", "0"))
+                       learn_order=learn if isinstance(learn, bool) else str(learn).lower() not in ("false", "no", "0"),
+                       research_scope=scope)
 
 
 def _dead_county_slots(stages: list[Stage], s: Settings) -> dict[str, set[tuple[str, str]]]:
@@ -758,8 +763,9 @@ def _stage_rows(ctx: Ctx, cfg: DrillConfig) -> list[dict]:
             status = "disabled"
         elif status is None and st.background:
             status = "pending"
-            # With no owner name there is nothing to search for: the owner can still run out of stages.
-            if owner_search_name(ctx):
+            # With no owner name there is nothing to search for, and a set-aside owner (scope buybox) is never in
+            # a run: either way the owner can still run out of stages.
+            if owner_search_name(ctx) and not (cfg.research_scope == "buybox" and ctx.in_buybox is False):
                 held.append(len(out))
         elif status is None:
             status = "pending" if next_marked else "next"
@@ -1093,6 +1099,9 @@ def set_contact_status(conn: sqlite3.Connection, contact_id: int, status: str, *
     elif len(touched) > 1 and st == "wrong":
         msg += (f" Also marked wrong on {len(touched) - 1} other propert{'ies' if len(touched) > 2 else 'y'} of this "
                 f"owner (the AI research found it for all of them).")
+    elif len(touched) > 1:
+        msg += (f" Also put back to not tested yet on {len(touched) - 1} other "
+                f"propert{'ies' if len(touched) > 2 else 'y'} of this owner.")
     return _result(conn, int(c["property_id"]), msg, settings, contact=contact)
 
 
@@ -1218,9 +1227,11 @@ def _confirm(conn: sqlite3.Connection, property_id: int, person: str | None) -> 
 
 def log_outreach(conn: sqlite3.Connection, property_id: int, channel: str, outcome: str,
                  contact_point_id: int | None = None, notes: str | None = None, *,
-                 settings: Settings | None = None) -> dict:
+                 actor: str | None = None, settings: Settings | None = None) -> dict:
     """Log one reach-out and apply its effect from drill.yaml validate.outcomes:
-    confirm -> level 3 (confirmed); mark_wrong -> the contact is marked wrong; dnc -> do not contact."""
+    confirm -> level 3 (confirmed); mark_wrong -> the contact is marked wrong; dnc -> do not contact.
+    A contact the AI research found also updates its finding, like set_contact_status: marked wrong, the same
+    contact is marked wrong on the owner's other properties research wrote it to (`actor` is who logged it)."""
     cfg = drill_config(settings)
     allowed = cfg.validate.channels or list(CHANNELS)
     try:
@@ -1246,7 +1257,9 @@ def log_outreach(conn: sqlite3.Connection, property_id: int, channel: str, outco
         cur = conn.execute("INSERT INTO outreach(property_id, contact_point_id, channel, outcome, notes, created_at) "
                            "VALUES(?,?,?,?,?,?)",
                            (property_id, contact["id"] if contact else None, ch, oc, clean_str(notes), now_iso()))
-        msg = _apply_effect(conn, property_id, spec.effect, contact, cfg)
+        msg, others = _apply_effect(conn, property_id, spec.effect, contact, cfg, actor)
+        for pid in sorted(others - {property_id}):
+            _refresh(conn, pid, cfg)
         ev = _refresh(conn, property_id, cfg)
     if spec.effect == "confirm":
         carry_to_siblings(conn, property_id, settings=settings)
@@ -1269,33 +1282,50 @@ def _pick_contact(conn: sqlite3.Connection, property_id: int, channel: str, cont
     return cands[0] if len(cands) == 1 else None
 
 
+def _ai_contact_marked(conn: sqlite3.Connection, contact: dict | None, status: str, actor: str | None) -> set[int]:
+    """An AI-found contact changed status from a logged reach-out: keep its finding (and its copies on the
+    owner's other properties) in step. Returns the other properties changed."""
+    if not contact or contact.get("source") != AI_SOURCE:
+        return set()
+    from . import research   # research imports this module, so import it here
+    return research.contact_marked(conn, contact, status, actor)
+
+
 def _apply_effect(conn: sqlite3.Connection, property_id: int, effect: str, contact: dict | None,
-                  cfg: DrillConfig) -> str:
+                  cfg: DrillConfig, actor: str | None = None) -> tuple[str, set[int]]:
+    """(message, other properties changed) for one logged reach-out."""
     now = now_iso()
     # status!='dnc' below: an outcome can never take a contact off the do-not-contact list.
     if effect == "confirm":
+        others: set[int] = set()
         if contact:
             conn.execute("UPDATE contact_points SET status='verified', last_tested_at=? WHERE id=? AND status!='dnc'",
                          (now, contact["id"]))
+            others = _ai_contact_marked(conn, contact, "verified", actor)
         name = None
         if contact and contact.get("person_id"):
             name = scalar(conn, "SELECT name FROM people WHERE id=?", (contact["person_id"],))
             if L.looks_like_entity(name):
                 name = None  # the owner of record is a company; the person we talked to is the best guess
         who = _confirm(conn, property_id, name)
-        return f"Confirmed owner{f' ({who})' if who else ''}: level 3. Hand off to the CRM."
+        return f"Confirmed owner{f' ({who})' if who else ''}: level 3. Hand off to the CRM.", others
     if effect == "mark_wrong":
         if not contact:
-            return "Pick which contact was wrong so the drill can skip it."
+            return "Pick which contact was wrong so the drill can skip it.", set()
         conn.execute("UPDATE contact_points SET status='wrong', last_tested_at=? WHERE id=? AND status!='dnc'",
                      (now, contact["id"]))
-        return f"{contact['value']} is marked wrong."
+        others = _ai_contact_marked(conn, contact, "wrong", actor) - {property_id}
+        msg = f"{contact['value']} is marked wrong."
+        if others:
+            msg += (f" Also marked wrong on {len(others)} other propert{'ies' if len(others) > 1 else 'y'} of this "
+                    f"owner (the AI research found it for all of them).")
+        return msg, others
     if effect == "dnc":
         _set_property_dnc(conn, property_id)
-        return _dnc_message(_dnc_siblings(conn, property_id, cfg))
+        return _dnc_message(_dnc_siblings(conn, property_id, cfg)), set()
     if contact:
         conn.execute("UPDATE contact_points SET last_tested_at=? WHERE id=?", (now, contact["id"]))
-    return ""
+    return "", set()
 
 
 def level_action(conn: sqlite3.Connection, property_id: int, action: str, person: str | None = None,
@@ -1450,12 +1480,14 @@ class CarrySource:
 
 
 def _carry_sources(conn: sqlite3.Connection) -> CarrySource:
-    """Original (not already carried) contacts, unmasked people and confirmed owners of every property."""
+    """Original (not already carried) contacts, unmasked people and confirmed owners of every property. An AI
+    research contact counts only once verified (see AI_SOURCE)."""
     contacts: dict[int, list[dict]] = defaultdict(list)
     people: dict[int, list[dict]] = defaultdict(list)
     confirmed: dict[int, str] = {}
     for c in rows(conn, "SELECT * FROM contact_points WHERE status IN ('verified','untested') AND channel!='mail' "
-                        "AND COALESCE(source,'') NOT IN (?, ?) ORDER BY id", (PORTFOLIO_STAGE, AI_SOURCE)):
+                        "AND COALESCE(source,'') != ? AND NOT (COALESCE(source,'') = ? AND status != 'verified') "
+                        "ORDER BY id", (PORTFOLIO_STAGE, AI_SOURCE)):
         contacts[c["property_id"]].append(c)
     roles = CARRY_ROLES + ("statutory_agent", "confirmed_owner")
     marks = ",".join("?" for _ in roles)

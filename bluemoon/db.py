@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS outreach (
 CREATE TABLE IF NOT EXISTS research_runs (
   id INTEGER PRIMARY KEY,
   market_id INTEGER REFERENCES markets(id),
-  owner_key TEXT NOT NULL,         -- 'pk:<portfolio key>' or 'name:<normalized owner name>'
+  owner_key TEXT NOT NULL,         -- 'name:<normalized owner name>' (older runs may hold 'pk:<portfolio key>')
   owner_name TEXT NOT NULL,
   cache_key TEXT,                  -- api_cache.key of the answer
   model TEXT, prompt_version TEXT,

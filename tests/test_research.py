@@ -473,6 +473,23 @@ def test_one_call_per_owner_written_to_every_property(conn, settings):
     assert scalar(conn, "SELECT COUNT(*) FROM drill_attempts WHERE stage_key='ai_research' AND actor='ai'") == 2
 
 
+def test_owners_sharing_a_portfolio_are_each_searched_for_themselves(conn, settings):
+    # One mailing address (a manager's) joins two different owners into one portfolio key: each owner gets its own
+    # search, and one owner's findings never land on the other's property.
+    a = owner_prop(conn, "MAPLE ROW HOLDINGS LLC", portfolio_key="pk-shared", score=0.6)
+    b = owner_prop(conn, "OAK LANE PROPERTIES LLC", portfolio_key="pk-shared", score=0.5)
+    be = Scripted({"MAPLE ROW HOLDINGS LLC": answer()})
+    res = R.research_owners(conn, MARKET, backend=be)
+    assert sorted(be.owners) == ["MAPLE ROW HOLDINGS LLC", "OAK LANE PROPERTIES LLC"] and res["owners"] == 2
+    assert len(contacts_of(conn, a)) == 2 and contacts_of(conn, b) == []
+    assert not rows(conn, "SELECT * FROM people WHERE property_id=? AND source='ai_research'", (b,))
+    outcomes = {r["property_id"]: r["outcome"] for r in rows(
+        conn, "SELECT property_id, outcome FROM drill_attempts WHERE stage_key='ai_research'")}
+    assert outcomes == {a: "found", b: "nothing"}
+    runs = {r["owner_name"]: json.loads(r["property_ids"]) for r in rows(conn, "SELECT * FROM research_runs")}
+    assert runs == {"MAPLE ROW HOLDINGS LLC": [a], "OAK LANE PROPERTIES LLC": [b]}
+
+
 def test_nothing_found_is_a_nothing_check_off(conn, settings):
     pid = owner_prop(conn, "QUIET OWNER LLC")
     res = R.research_owners(conn, MARKET, backend=Scripted())
@@ -492,6 +509,36 @@ def test_do_not_contact_owner_groups_are_skipped(conn, settings):
     res = R.research_owners(conn, MARKET, backend=be)
     assert be.owners == ["MAPLE ROW HOLDINGS LLC"] and res["skipped_dnc"] == 1
     assert "do-not-contact" in R.research_owners(conn, MARKET, backend=be, dry_run=True)["message"]
+
+
+def test_an_owner_marked_do_not_contact_during_a_run_is_left_alone(conn, settings):
+    maple = owner_prop(conn, "MAPLE ROW HOLDINGS LLC", score=0.9)
+    oak = owner_prop(conn, "OAK LANE PROPERTIES LLC", score=0.8)
+    elm = owner_prop(conn, "ELM STREET RENTALS LLC", score=0.7)
+    E.ensure_states(conn, MARKET)
+
+    class MarksWhileAsking(Scripted):
+        def ask(self, prompt, *, schema=None):
+            reply = super().ask(prompt, schema=schema)
+            if "MAPLE ROW" in prompt:            # marked do-not-contact while Claude was searching
+                E.level_action(conn, maple, "dnc")
+            return reply
+
+    def progress(fraction, message):
+        if "owner 1 of" in message:                # marked before its turn came
+            E.level_action(conn, oak, "dnc")
+
+    be = MarksWhileAsking({"MAPLE ROW HOLDINGS LLC": answer(), "ELM STREET RENTALS LLC": answer()})
+    res = R.research_owners(conn, MARKET, backend=be, progress=progress)
+    assert be.owners == ["MAPLE ROW HOLDINGS LLC", "ELM STREET RENTALS LLC"]       # Oak Lane is never searched
+    assert res["researched"] == 1 and res["skipped_dnc_during_run"] == 2 and "do-not-contact" in res["message"]
+    for pid in (maple, oak):
+        assert scalar(conn, "SELECT status FROM drill_state WHERE property_id=?", (pid,)) == "dnc"
+        assert not rows(conn, "SELECT * FROM drill_attempts WHERE property_id=? AND stage_key='ai_research'", (pid,))
+        assert not rows(conn, "SELECT * FROM people WHERE property_id=? AND source='ai_research'", (pid,))
+        assert not rows(conn, "SELECT * FROM research_findings WHERE property_id=?", (pid,))
+        assert contacts_of(conn, pid) == []
+    assert [json.loads(r["property_ids"]) for r in rows(conn, "SELECT property_ids FROM research_runs")] == [[elm]]
 
 
 def test_owners_with_no_name_or_set_aside_are_left_out(conn, settings):
@@ -535,6 +582,32 @@ def test_errors_are_not_cached_and_stop_after_three_in_a_row(conn, settings):
     assert scalar(conn, "SELECT COUNT(*) FROM api_cache") == 0
     assert scalar(conn, "SELECT COUNT(*) FROM drill_attempts WHERE stage_key='ai_research'") == 0
     assert scalar(conn, "SELECT COUNT(*) FROM research_runs WHERE outcome='error'") == 3
+
+
+def test_owners_that_keep_failing_go_behind_the_others(conn, settings):
+    from bluemoon.imagery.vision import VisionCallError
+    timeout = VisionCallError("Claude took longer than 420 seconds for this owner.", calls=1)
+    hard = [f"HARD OWNER {i} LLC" for i in range(3)]
+    good = [f"GOOD OWNER {i} LLC" for i in range(2)]
+    for i, name in enumerate(hard + good):
+        owner_prop(conn, name, score=0.9 - i / 20)
+    be = Scripted({name: timeout for name in hard})
+    first = R.research_owners(conn, MARKET, backend=be)
+    assert be.owners == hard and first["stopped"] and first["researched"] == 0
+    # The next run starts with the owners not tried yet, so the three that failed can't block it.
+    be.prompts.clear()
+    second = R.research_owners(conn, MARKET, backend=be, limit=3)
+    assert be.owners == [*good, hard[0]] and second["researched"] == 2 and second["errors"] == 1
+
+    def queue() -> list[R.OwnerGroup]:
+        return R.owner_groups(conn, market_by_slug(conn, MARKET), R.research_config(settings), settings).groups
+
+    assert [g.name for g in queue()] == [hard[1], hard[2], hard[0]]     # fewest failures first, then best score
+    # An owner answered after failing starts again from zero failures.
+    del be.answers[hard[1]]
+    key = queue()[0].key
+    R.research_owners(conn, MARKET, backend=be, limit=1)
+    assert key not in R._error_counts(conn, market_by_slug(conn, MARKET)["id"])
 
 
 def test_test_on_5_makes_5_calls(conn, settings):
@@ -612,6 +685,21 @@ def test_an_owner_with_no_name_can_still_run_out_of_stages(conn, settings):
     assert {s["key"]: s["status"] for s in d["stages"]}["ai_research"] == "pending"
 
 
+def test_a_set_aside_owner_can_run_out_of_stages(conn, settings, tmp_root):
+    # Research (scope buybox) never reaches a set-aside owner, so it can't hold that owner open.
+    pid = owner_prop(conn, "FAR AWAY HOLDINGS LLC", in_buybox=0)
+    E.run_auto_stages(conn, MARKET)
+    d = walk(conn, pid)
+    assert d["status"] == "exhausted" and d["next_step"]["kind"] == "exhausted"
+    assert {s["key"]: s["status"] for s in d["stages"]}["ai_research"] == "pending"
+    # With scope all it would be in a run: then it waits for the research like a buy-box owner.
+    set_research(tmp_root, scope="all")
+    other = owner_prop(conn, "DISTANT HOLDINGS LLC", in_buybox=0)
+    E.run_auto_stages(conn, MARKET)
+    d = walk(conn, other, stop_at="ai_research")
+    assert d["next_step"]["stage_key"] == "ai_research" and d["status"] == "active"
+
+
 def test_found_research_reopens_an_exhausted_owner(conn, settings):
     pid = owner_prop(conn, "MAPLE ROW HOLDINGS LLC")
     E.run_auto_stages(conn, MARKET)
@@ -630,6 +718,19 @@ def test_portfolio_match_never_copies_ai_contacts(conn, settings):
     assert not rows(conn, "SELECT * FROM contact_points WHERE property_id=? AND channel!='mail'", (b,))
 
 
+def test_a_verified_ai_contact_carries_to_the_owners_other_properties(conn, settings):
+    a = owner_prop(conn, "MAPLE ROW HOLDINGS LLC")
+    b = owner_prop(conn, "MAPLE ROW HOLDINGS LLC", in_buybox=0)     # set aside: research never writes to it
+    R.research_owners(conn, MARKET, backend=Scripted({"MAPLE ROW HOLDINGS LLC": answer()}))
+    phone_a = contacts_of(conn, a)[0]
+    E.set_contact_status(conn, phone_a["id"], "verified")
+    carried = rows(conn, "SELECT * FROM contact_points WHERE property_id=? AND channel!='mail'", (b,))
+    assert [(c["value"], c["source"], c["status"]) for c in carried] == [
+        (phone_a["value"], "portfolio_match", "untested")]                # the untested AI email stays put
+    assert "verified there" in carried[0]["notes"]
+    assert not rows(conn, "SELECT * FROM people WHERE property_id=? AND name='Robin Sample'", (b,))
+
+
 def test_marking_an_ai_contact_wrong_updates_its_finding_everywhere(conn, settings):
     a = owner_prop(conn, "MAPLE ROW HOLDINGS LLC", portfolio_key="pk-maple")
     b = owner_prop(conn, "MAPLE ROW HOLDINGS LLC", portfolio_key="pk-maple")
@@ -643,9 +744,56 @@ def test_marking_an_ai_contact_wrong_updates_its_finding_everywhere(conn, settin
     assert phone_b["status"] == "wrong"
     copy = one(conn, "SELECT status FROM research_findings WHERE contact_point_id=?", (phone_b["id"],))
     assert copy["status"] == "wrong"
-    # Taking it back on one property keeps the finding again.
-    E.set_contact_status(conn, phone_a["id"], "untested", actor="seth@example.org")
+    # Taking it back on one property keeps the finding again, and puts back every copy the wrong mark reached.
+    res = E.set_contact_status(conn, phone_a["id"], "untested", actor="seth@example.org")
+    assert "1 other property" in res["message"]
     assert one(conn, "SELECT status FROM research_findings WHERE id=?", (f["id"],))["status"] == "kept"
+    assert one(conn, "SELECT status FROM contact_points WHERE id=?", (phone_b["id"],))["status"] == "untested"
+    assert one(conn, "SELECT status FROM research_findings WHERE contact_point_id=?",
+               (phone_b["id"],))["status"] == "kept"
+    assert E.property_drill(conn, b)["next_step"]["kind"] == "validate"
+    # The same through the finding's own Wrong / Keep buttons.
+    R.mark_finding(conn, f["id"], "wrong", actor="team")
+    assert one(conn, "SELECT status FROM contact_points WHERE id=?", (phone_b["id"],))["status"] == "wrong"
+    R.mark_finding(conn, f["id"], "kept", actor="team")
+    assert [one(conn, "SELECT status FROM contact_points WHERE id=?", (c["id"],))["status"]
+            for c in (phone_a, phone_b)] == ["untested", "untested"]
+    assert {r["status"] for r in rows(conn, "SELECT status FROM research_findings WHERE kind='phone' AND "
+                                            "status IN ('kept','wrong')")} == {"kept"}
+
+
+def test_a_copy_marked_wrong_on_its_own_keeps_its_mark_after_an_undo_elsewhere(conn, settings):
+    a = owner_prop(conn, "MAPLE ROW HOLDINGS LLC", portfolio_key="pk-maple")
+    b = owner_prop(conn, "MAPLE ROW HOLDINGS LLC", portfolio_key="pk-maple")
+    R.research_owners(conn, MARKET, backend=Scripted({"MAPLE ROW HOLDINGS LLC": answer()}))
+    phone_a, phone_b = contacts_of(conn, a)[0], contacts_of(conn, b)[0]
+    E.set_contact_status(conn, phone_a["id"], "wrong")
+    # A later wrong mark on b's own copy (a different time) is b's own: undoing a's mark leaves it.
+    conn.execute("UPDATE research_findings SET marked_at='2020-01-01T00:00:00+00:00' WHERE contact_point_id=?",
+                 (phone_b["id"],))
+    conn.commit()
+    E.set_contact_status(conn, phone_a["id"], "untested")
+    assert one(conn, "SELECT status FROM contact_points WHERE id=?", (phone_b["id"],))["status"] == "wrong"
+
+
+def test_logging_bounced_on_an_ai_contact_marks_it_wrong_everywhere(conn, settings):
+    a = owner_prop(conn, "MAPLE ROW HOLDINGS LLC", portfolio_key="pk-maple")
+    b = owner_prop(conn, "MAPLE ROW HOLDINGS LLC", portfolio_key="pk-maple")
+    R.research_owners(conn, MARKET, backend=Scripted({"MAPLE ROW HOLDINGS LLC": answer()}))
+    phone_a, phone_b = contacts_of(conn, a)[0], contacts_of(conn, b)[0]
+    res = E.log_outreach(conn, a, "phone", "bounced", contact_point_id=phone_a["id"], actor="seth@example.org")
+    assert "1 other property" in res["message"]
+    for c in (phone_a, phone_b):
+        assert one(conn, "SELECT status FROM contact_points WHERE id=?", (c["id"],))["status"] == "wrong"
+        f = one(conn, "SELECT * FROM research_findings WHERE contact_point_id=?", (c["id"],))
+        assert f["status"] == "wrong" and f["marked_by"] == "seth@example.org"
+    assert phone_b["id"] not in E.property_drill(conn, b)["next_step"].get("contact_ids", [])   # not asked again
+    assert R.research_quality(conn, MARKET)["phone"]["wrong"] == 2
+    # Talking to the owner on it after all keeps the finding again and puts the copy back.
+    E.log_outreach(conn, a, "phone", "reached_confirmed", contact_point_id=phone_a["id"])
+    assert one(conn, "SELECT status FROM research_findings WHERE contact_point_id=?",
+               (phone_a["id"],))["status"] == "kept"
+    assert one(conn, "SELECT status FROM contact_points WHERE id=?", (phone_b["id"],))["status"] == "untested"
 
 
 def test_marking_a_person_wrong_rejects_them(conn, settings):
@@ -712,6 +860,21 @@ def test_findings_route_records_who(tmp_root, settings, conn):
         cid = contacts_of(conn, pid)[0]["id"]
         assert c.patch(f"/api/contacts/{cid}", json={"status": "wrong"}).status_code == 200
     assert one(conn, "SELECT marked_by FROM research_findings WHERE contact_point_id=?", (cid,))["marked_by"]
+
+
+def test_outreach_route_records_who_marked_an_ai_contact(tmp_root, settings, conn):
+    from fastapi.testclient import TestClient
+
+    from bluemoon.web.app import app
+    pid = owner_prop(conn, "MAPLE ROW HOLDINGS LLC")
+    R.research_owners(conn, MARKET, backend=Scripted({"MAPLE ROW HOLDINGS LLC": answer()}))
+    cid = contacts_of(conn, pid)[0]["id"]
+    with TestClient(app) as c:
+        r = c.post(f"/api/m/{MARKET}/properties/{pid}/outreach",
+                   json={"channel": "phone", "outcome": "wrong_person", "contact_point_id": cid})
+        assert r.status_code == 200, r.text
+    f = one(conn, "SELECT status, marked_by FROM research_findings WHERE contact_point_id=?", (cid,))
+    assert f["status"] == "wrong" and f["marked_by"]
 
 
 # --- pipeline, CLI and jobs ----------------------------------------------------------------------

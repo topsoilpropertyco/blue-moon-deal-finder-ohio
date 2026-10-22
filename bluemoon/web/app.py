@@ -653,10 +653,10 @@ def mark_research_finding(fid: int, body: FindingStatusIn, conn: Conn, request: 
 
 
 @router.post("/api/m/{slug}/properties/{pid}/outreach")
-def log_outreach(slug: str, pid: int, body: OutreachIn, conn: Conn) -> dict:
+def log_outreach(slug: str, pid: int, body: OutreachIn, conn: Conn, request: Request) -> dict:
     require_property(conn, slug, pid)
     return engine.log_outreach(conn, pid, body.channel, body.outcome, contact_point_id=body.contact_point_id,
-                               notes=body.notes)
+                               notes=body.notes, actor=auth.signed_in_as(request))
 
 
 @router.post("/api/m/{slug}/properties/{pid}/level")
