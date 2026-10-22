@@ -180,6 +180,7 @@ rent:
 
 safety:
   confirm_over_properties: 50    # paid runs bigger than this need an explicit OK
+  confirm_clears_over: 10        # a Blue Moon file whose empty cells would erase more values than this asks first
 
 scoring:
   base_rate: 0.015               # Blue Moon odds before any evidence

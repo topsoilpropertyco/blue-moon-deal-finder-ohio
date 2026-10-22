@@ -45,8 +45,10 @@ from .columns import (
     detect_provider,
     field_label,
     known_header_score,
+    looks_like_blue_moon,
     map_columns,
     norm_header,
+    other_blue_moon_export,
 )
 from .edits import EDITABLE_BY_FIELD, edits_count_text, latest_edits, same_value
 
@@ -186,6 +188,7 @@ class Table:
     skipped_columns: list[str] = field(default_factory=list)
     skipped_sheets: list[str] = field(default_factory=list)
     made_by_blue_moon: bool = False      # the workbook says this app wrote it (our own export)
+    created: datetime | None = None      # our workbook's own time stamp (when it was exported; Excel keeps it)
 
 
 # --- reading files ----------------------------------------------------------------------------
@@ -213,7 +216,7 @@ def _read(path: Path) -> Table:
     raise IngestError(f"{path.name} isn't a CSV or Excel (.xlsx) file, so I can't import it.")
 
 
-def _read_csv(path: Path) -> Table:
+def _read_csv(path: Path, keep_formulas: bool = False) -> Table:
     text = _decode(path.read_bytes())
     sample = text[:65536]
     try:
@@ -221,7 +224,7 @@ def _read_csv(path: Path) -> Table:
     except csv.Error:
         delimiter = _count_delimiter(sample, path.suffix.lower())
     grid = [[_csv_cell(c) for c in r] for r in csv.reader(io.StringIO(text), delimiter=delimiter)]
-    return _grid_to_table(path.name, grid, sheet=None)
+    return _grid_to_table(path.name, grid, sheet=None, keep_formulas=keep_formulas)
 
 
 def _count_delimiter(sample: str, ext: str) -> str:
@@ -291,11 +294,25 @@ def _made_by_blue_moon(wb: Any) -> bool:
         return False
 
 
+def _workbook_created(wb: Any) -> datetime | None:
+    try:
+        created = wb.properties.created
+        return created if isinstance(created, datetime) else None
+    except Exception:  # unreadable metadata never stops an import
+        return None
+
+
 def read_sheets(path: str | Path) -> list[Table]:
     """Every sheet of an XLSX that looks like a list (a header row with known column names), or the one table
     of a CSV. Used for our own exports, whose property sheets (Ranked, All properties, Excluded) can each
-    carry edits."""
+    carry edits.
+
+    There an empty cell clears a value, so a formula is never read as empty (as a Crexi import does): it reads
+    as the result Excel saved with it (=36+2 is 38), or, with no saved result, as its text, which the round
+    trip reports as a cell it can't read and leaves alone."""
     path = Path(path).expanduser()
+    if path.suffix.lower() in CSV_EXTS and path.exists():
+        return [_read_csv(path, keep_formulas=True)]
     if path.suffix.lower() not in XLSX_EXTS:
         return [_read(path)]
     import openpyxl
@@ -307,23 +324,65 @@ def read_sheets(path: str | Path) -> list[Table]:
     except Exception as exc:
         raise IngestError(f"I couldn't open {path.name} as an Excel file ({exc.__class__.__name__}). "
                           f"Try exporting it again, or save it as .csv.") from exc
-    out: list[Table] = []
+    grids: dict[str, list[list[Any]]] = {}
     try:
         ours = _made_by_blue_moon(wb)
+        created = _workbook_created(wb) if ours else None
         for ws in wb.worksheets:
             grid = [[_xlsx_cell(c) for c in r] for r in ws.iter_rows(values_only=True)]
             if not any(any(c is not None for c in r) for r in grid[:HEADER_SCAN_ROWS]):
                 continue
             if max((known_header_score(r) for r in grid[:HEADER_SCAN_ROWS]), default=0) == 0:
                 continue
-            table = _grid_to_table(path.name, grid, sheet=ws.title)
-            table.made_by_blue_moon = ours
-            out.append(table)
+            grids[ws.title] = grid
     finally:
         wb.close()
+    _use_saved_results(path, grids)
+    out: list[Table] = []
+    for title, grid in grids.items():
+        table = _grid_to_table(path.name, grid, sheet=title, keep_formulas=True)
+        table.made_by_blue_moon = ours
+        table.created = created
+        out.append(table)
     if not out:
         raise IngestError(f"{path.name} has no rows in any sheet.")
     return out
+
+
+EXCEL_ERRORS = frozenset({"#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#SPILL!", "#CALC!",
+                          "#GETTING_DATA"})
+
+
+def _use_saved_results(path: Path, grids: dict[str, list[list[Any]]]) -> None:
+    """Put the result Excel saved with each formula in place of the formula's text. A formula with no saved
+    result (a file no spreadsheet app has saved), or whose result is an error like #REF!, keeps its text.
+    The workbook is opened a second time only when it holds formulas."""
+    spots: dict[str, dict[int, list[int]]] = {}
+    for title, grid in grids.items():
+        for i, r in enumerate(grid):
+            for j, c in enumerate(r):
+                if _is_formula(c):
+                    spots.setdefault(title, {}).setdefault(i, []).append(j)
+    if not spots:
+        return
+    import openpyxl
+
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception:  # the formulas keep their text: read as unreadable, never as empty
+        return
+    try:
+        for title, rows_ in spots.items():
+            last = max(rows_)
+            for i, r in enumerate(wb[title].iter_rows(values_only=True)):
+                if i > last:
+                    break
+                for j in rows_.get(i, ()):
+                    v = _xlsx_cell(r[j]) if j < len(r) else None
+                    if v is not None and not (isinstance(v, str) and v.upper() in EXCEL_ERRORS):
+                        grids[title][i][j] = v
+    finally:
+        wb.close()
 
 
 def _xlsx_cell(v: Any) -> Any:
@@ -347,7 +406,9 @@ def _is_formula(v: Any) -> bool:
     return isinstance(v, str) and v.startswith("=")
 
 
-def _grid_to_table(filename: str, grid: list[list[Any]], sheet: str | None) -> Table:
+def _grid_to_table(filename: str, grid: list[list[Any]], sheet: str | None, keep_formulas: bool = False) -> Table:
+    """The header row and the rows under it. A formula cell reads as empty and a column of only formulas is
+    skipped, unless keep_formulas (our own files: read_sheets), where a formula keeps its text."""
     grid = [r for r in grid if any(c is not None for c in r)]
     if not grid:
         raise IngestError(f"{filename} is empty.")
@@ -365,7 +426,7 @@ def _grid_to_table(filename: str, grid: list[list[Any]], sheet: str | None) -> T
         blank_header = i >= len(header_cells) or clean_str(header_cells[i]) is None
         if blank_header and not values:
             continue
-        if values and all(_is_formula(v) for v in values):
+        if values and not keep_formulas and all(_is_formula(v) for v in values):
             skipped.append(names[i])
             continue
         keep.append(i)
@@ -373,7 +434,7 @@ def _grid_to_table(filename: str, grid: list[list[Any]], sheet: str | None) -> T
     headers = [names[i] for i in keep]
     out_rows = []
     for r in body:
-        row = {names[i]: (None if i >= len(r) or _is_formula(r[i]) else r[i]) for i in keep}
+        row = {names[i]: (None if i >= len(r) or (_is_formula(r[i]) and not keep_formulas) else r[i]) for i in keep}
         if any(v is not None for v in row.values()):
             out_rows.append(row)
     return Table(filename=filename, headers=headers, rows=out_rows, sheet=sheet, header_row=h_idx + 1,
@@ -921,11 +982,24 @@ def preview_file(path: str | Path, overrides: Mapping[str, str | None] | None = 
 
 
 def _provider(table: Table) -> str:
-    """detect_provider, plus our own workbooks known by their metadata (with a Property ID column)."""
+    """detect_provider, plus our own workbooks known by their metadata (with a Property ID column).
+    IngestError for our own files that can't come back: one of the other exports (DRILL worklist, mailing
+    list, CRM handoff), or a property list whose Property ID column was deleted. Through the Crexi merge
+    they would add duplicates and write our columns into the original data."""
     provider = detect_provider(table.headers)
-    if provider != "bluemoon" and table.made_by_blue_moon and any(
-            norm_header(h) == "property id" for h in table.headers):
+    if provider == "bluemoon":
+        return provider
+    other = other_blue_moon_export(table.headers)
+    if other:
+        raise IngestError(f"This is Blue Moon's {other}, one of its own exports, not a property list, so it can't "
+                          f"be imported. To bring fixes back, import ranked_list or a review file.")
+    has_id = any(norm_header(h) == "property id" for h in table.headers)
+    if table.made_by_blue_moon and has_id:
         return "bluemoon"
+    if not has_id and (table.made_by_blue_moon or looks_like_blue_moon(table.headers)):
+        raise IngestError("This is one of Blue Moon's own files, but its Property ID column is missing, so I can't "
+                          "tell which property each row is. Download a fresh copy, make your changes there, and "
+                          "leave the Property ID and Row as of columns in place.")
     return provider
 
 

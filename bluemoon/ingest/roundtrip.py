@@ -9,10 +9,14 @@ What an import of a Blue Moon export does:
 - matches rows by 'Property ID', only inside the chosen market; it never adds a property;
 - reads only the EDITABLE columns (Units, Building sq ft, Year built, Property type, County, ZIP, Lot acres)
   and 'Buy box decision'; every other column (scores, owner, links, the original Crexi columns) is ignored;
-- changes only what differs from the app (an emptied cell clears the value), and records each change in
-  property_edits (who, when, through which import), so a later Crexi file never quietly undoes it;
+- changes only what differs from the app (an emptied cell clears the value, and the preview counts those
+  apart), and records each change in property_edits (who, when, through which import), so a later Crexi file
+  never quietly undoes it. A cell it can't read (text in a number column, a negative number, a formula with
+  no result saved by Excel) is left alone and listed;
 - leaves a row alone when the property changed in the app after the file was downloaded ('Row as of' is
-  older than the change), so an old file never brings back old data;
+  older than the change), so an old file never brings back old data. A workbook without 'Row as of' (an
+  older export, or the column deleted) goes by the export time saved in the workbook instead; a CSV without
+  it changes nothing;
 - 'Buy box decision' set to 'Add to buy box', 'Set aside' or 'Follow the rules' becomes a decision by hand
   (scoring/overrides.py, note 'From spreadsheet', one batch the dashboard can undo);
 - never touches raw_json, the source id, owner names or addresses; then re-scores the market.
@@ -47,6 +51,7 @@ from .crexi import (
     PropertyRecord,
     Table,
     _file_hash,
+    _is_formula,
     _num,
     _options,
     _plural,
@@ -69,6 +74,7 @@ DECISION_HEADER = "Buy box decision"
 ADDRESS_HEADER = "Address"
 DECISION_NOTE = "From spreadsheet"
 DEFAULT_ACTOR = "cli"
+CONFIRM_CLEARS_OVER = 10    # config.yaml safety.confirm_clears_over: the preview asks before erasing more values
 MAX_EXAMPLES = 5
 _CHUNK = 900
 _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")   # exports.py puts a ' before these in CSV cells
@@ -121,6 +127,9 @@ class EditPlan(BaseModel):
     problems: list[str] = Field(default_factory=list)
     unsupported_decisions: int = 0
     no_as_of_column: bool = False
+    file_as_of: datetime | None = None        # no 'Row as of': when the workbook was exported, used instead
+    unchecked: list[int] = Field(default_factory=list)   # changes left alone: nothing to check their age by
+    sheets_without_as_of: list[str] = Field(default_factory=list)   # property sheets not read (column deleted)
     addresses: dict[int, str] = Field(default_factory=dict)
 
     def changed_ids(self) -> list[int]:
@@ -128,6 +137,12 @@ class EditPlan(BaseModel):
 
     def field_counts(self) -> dict[str, int]:
         c: Counter[str] = Counter(f for changes in self.fields.values() for f in changes)
+        return {e.field: c[e.field] for e in EDITABLE if c[e.field]}
+
+    def clear_counts(self) -> dict[str, int]:
+        """{field: n} of values the import erases (an empty cell where the app has a value)."""
+        c: Counter[str] = Counter(f for pid, changes in self.fields.items() for f, v in changes.items()
+                                  if v is None and self.old.get(pid, {}).get(f) is not None)
         return {e.field: c[e.field] for e in EDITABLE if c[e.field]}
 
     def decision_counts(self) -> dict[str, int]:
@@ -149,19 +164,25 @@ def _blank(v: Any) -> bool:
 
 
 def parse_cell(field: str, v: Any, today_year: int | None = None) -> tuple[bool, Any]:
-    """(ok, value) for one editable cell. An empty cell is (True, None): the value is cleared. A cell that
-    can't be read is (False, None) and changes nothing."""
+    """(ok, value) for one editable cell. An empty cell (or 0 in a number column) is (True, None): the value
+    is cleared. A cell that can't be read (a negative number, a whole number that rounds to 0, a formula with
+    no saved result) is (False, None) and changes nothing."""
+    if _is_formula(v):                     # read_sheets put Excel's saved result here when there was one
+        return False, None
     v = _unguard(v)
     kind = EDITABLE_BY_FIELD[field].kind
     if _blank(v):
         return True, None
     if kind in ("int", "float"):
         f = _num(v)
-        if f is None:
+        if f is None or f < 0:             # a minus sign is a typo, never "erase this"
             return False, None
-        if f <= 0:                         # 0 means "not recorded", as in Crexi files
+        if f == 0:                         # 0 means "not recorded", as in Crexi files
             return True, None
-        return True, (int(round(f)) if kind == "int" else float(f))
+        if kind == "int":
+            n = int(round(f))
+            return (False, None) if n <= 0 else (True, n)
+        return True, float(f)
     if kind == "year":
         year, invalid = _year(v, today_year or date.today().year)
         return (False, None) if invalid else (True, year)
@@ -256,12 +277,18 @@ def _pid(v: Any) -> int | None:
     return int(f)
 
 
-def _read_rows(tables: list[Table], today_year: int) -> tuple[list[EditRow], list[str], bool, int]:
-    """(rows, sheet names used, whether 'Row as of' was missing, rows without a Property ID)."""
+def _read_rows(tables: list[Table], today_year: int) -> tuple[list[EditRow], list[str], bool, int, list[str]]:
+    """(rows, sheet names used, whether 'Row as of' was missing, rows without a Property ID, property sheets
+    not read because their 'Row as of' column was deleted while another sheet still has it)."""
     use = [t for t in tables if _header(t.headers, ID_HEADER)]
     with_as_of = [t for t in use if _header(t.headers, AS_OF_HEADER)]
+    without: list[str] = []
     if with_as_of:
-        use = with_as_of               # the property sheets; the DRILL worklist and Summary carry no edits
+        # The property sheets; the DRILL worklist and Summary carry no edits. A property sheet without the
+        # column can't be checked for age, so it isn't read (and the preview says so).
+        without = [t.sheet or t.filename for t in use
+                   if not _header(t.headers, AS_OF_HEADER) and is_blue_moon_export(t.headers)]
+        use = with_as_of
     else:
         use = [t for t in use if is_blue_moon_export(t.headers)] or use[:1]
     out: list[EditRow] = []
@@ -289,7 +316,7 @@ def _read_rows(tables: list[Table], today_year: int) -> tuple[list[EditRow], lis
             if hdec:
                 row.decision_text = _text(_unguard(r.get(hdec)))
             out.append(row)
-    return out, [t.sheet or t.filename for t in use], not with_as_of, no_id
+    return out, [t.sheet or t.filename for t in use], not with_as_of, no_id, without
 
 
 # --- what the app has now ----------------------------------------------------------------------------
@@ -358,13 +385,16 @@ def plan_edits(conn: sqlite3.Connection, market_slug: str, path: str | Path, lim
     except KeyError:
         raise IngestError(f"There is no market called '{market_slug}'.") from None
     tables = read_sheets(path)
-    read, sheets, no_as_of, no_id = _read_rows(tables, date.today().year)
+    read, sheets, no_as_of, no_id, without = _read_rows(tables, date.today().year)
     if limit is not None:
         first = list(dict.fromkeys(r.property_id for r in read))[:max(0, int(limit))]
         keep = set(first)
         read = [r for r in read if r.property_id in keep]
+    file_as_of = None
+    if no_as_of:      # no 'Row as of' column: our workbook's own export time stands in (Excel keeps it when saving)
+        file_as_of = next((parse_as_of(t.created) for t in tables if t.made_by_blue_moon and t.created), None)
     plan = EditPlan(market=market_slug, filename=path.name, sheets=sheets, rows_without_id=no_id,
-                    no_as_of_column=no_as_of)
+                    no_as_of_column=no_as_of, file_as_of=file_as_of, sheets_without_as_of=without)
     ids = sorted({int(r.property_id) for r in read if r.property_id is not None})
     plan.properties_total = len(ids)
     props = _properties(conn, ids)
@@ -377,6 +407,7 @@ def plan_edits(conn: sqlite3.Connection, market_slug: str, path: str | Path, lim
     wanted: dict[tuple[int, str], list[Any]] = defaultdict(list)
     wanted_decision: dict[int, list[str]] = defaultdict(list)
     stale: set[int] = set()
+    unchecked: set[int] = set()
     for r in read:
         pid = int(r.property_id or 0)
         if pid not in here_set:
@@ -397,15 +428,18 @@ def plan_edits(conn: sqlite3.Connection, market_slug: str, path: str | Path, lim
                 intent = None
         if not diffs and intent is None:
             continue
-        if not no_as_of:
-            changed_at = _db_time(prop.get("updated_at"))
-            if diffs and (r.as_of is None or (changed_at and changed_at > r.as_of)):
-                stale.add(pid)
-                diffs = {}
-            last = _db_time(decided_at.get(pid))
-            if intent and (r.as_of is None or (last and last > r.as_of)):
-                stale.add(pid)
-                intent = None
+        if no_as_of and file_as_of is None:
+            unchecked.add(pid)             # an old file can't be told from a fresh one: change nothing
+            continue
+        as_of = file_as_of if no_as_of else r.as_of
+        changed_at = _db_time(prop.get("updated_at"))
+        if diffs and (as_of is None or (changed_at and changed_at > as_of)):
+            stale.add(pid)
+            diffs = {}
+        last = _db_time(decided_at.get(pid))
+        if intent and (as_of is None or (last and last > as_of)):
+            stale.add(pid)
+            intent = None
         for f, v in diffs.items():
             wanted[(pid, f)].append(v)
         if intent:
@@ -428,7 +462,8 @@ def plan_edits(conn: sqlite3.Connection, market_slug: str, path: str | Path, lim
         plan.decisions[pid] = intents[0]
     changed = set(plan.changed_ids())
     plan.stale = sorted(stale)             # something in the file was left alone for these
-    plan.unchanged = len([pid for pid in here if pid not in changed and pid not in stale])
+    plan.unchecked = sorted(unchecked)
+    plan.unchanged = len([pid for pid in here if pid not in changed and pid not in stale and pid not in unchecked])
     return plan
 
 
@@ -441,11 +476,11 @@ def plan_message(plan: EditPlan, market_name: str | None = None, done: bool = Fa
         text = f"Imported your edits: {_plural(n, 'property', 'properties')} changed ({', '.join(parts)})."
     elif done:
         text = "Imported the file, but nothing changed." + (
-            "" if plan.stale else " Nothing in it differed from the app.")
+            "" if plan.stale or plan.unchecked else " Nothing in it differed from the app.")
     elif n:
         text = (f"This is a Blue Moon export. {_plural(n, 'property has', 'properties have')} changes: "
                 f"{', '.join(parts)}.")
-    elif plan.stale:
+    elif plan.stale or plan.unchecked:
         text = "This is a Blue Moon export. Importing it would change nothing."
     else:
         text = ("This is a Blue Moon export. Nothing in it differs from what is in the app, so importing it "
@@ -455,6 +490,11 @@ def plan_message(plan: EditPlan, market_name: str | None = None, done: bool = Fa
         text += (f" {_plural(len(plan.stale), 'property', 'properties')} changed in the app after this file was "
                  f"downloaded, so the file's changes to {'it were' if one else 'them were'} left alone. Download a "
                  f"fresh copy to edit {'it' if one else 'them'}.")
+    if plan.unchecked:
+        one = len(plan.unchecked) == 1
+        text += (f" {_plural(len(plan.unchecked), 'property has', 'properties have')} changes I left alone: this "
+                 f"file has no 'Row as of' column, so I can't tell whether the app changed {'it' if one else 'them'} "
+                 f"after the file was downloaded. Download a fresh copy, make your changes there and import that.")
     if plan.other_market and not (set(plan.fields) | set(plan.decisions)):
         where = ", ".join(plan.other_market)
         text += (f" {_plural(sum(plan.other_market.values()), 'property in it belongs', 'properties in it belong')}"
@@ -462,11 +502,28 @@ def plan_message(plan: EditPlan, market_name: str | None = None, done: bool = Fa
     return text
 
 
-def plan_warnings(plan: EditPlan) -> list[str]:
+def plan_warnings(plan: EditPlan, done: bool = False) -> list[str]:
     out: list[str] = []
-    if plan.no_as_of_column:
-        out.append("This file is from before the 'Row as of' column, so I couldn't check whether rows changed in "
-                   "the app since it was downloaded. Download a fresh copy next time.")
+    clears = plan.clear_counts()
+    if clears:
+        n = sum(clears.values())
+        it = "it" if n == 1 else "them"
+        if done:
+            out.append(f"Erased {_plural(n, 'value', 'values')} where this file had an empty cell "
+                       f"({edits_count_text(clears)}). A later Crexi import keeps {it} blank. To put {it} back, "
+                       f"type {'the value' if n == 1 else 'the values'} into a fresh download and import it.")
+        else:
+            out.append(f"{_plural(n, 'cell is', 'cells are')} empty in this file where the app has a value "
+                       f"({edits_count_text(clears)}). Importing erases {'that value' if n == 1 else 'those values'}"
+                       f", and a later Crexi import keeps {it} blank. If you didn't mean to, put "
+                       f"{'it' if n == 1 else 'the values'} back in the file and import it again.")
+    if plan.no_as_of_column and plan.file_as_of:
+        out.append("This file has no 'Row as of' column, so I went by the time it was downloaded (saved in the "
+                   "workbook): rows that changed in the app after that were left alone. Download a fresh copy "
+                   "next time.")
+    for name in plan.sheets_without_as_of:
+        out.append(f"The '{name}' sheet has no 'Row as of' column, so its changes were not read. Download a fresh "
+                   f"copy, or make your changes on a sheet that still has that column.")
     if plan.unknown_ids:
         out.append(f"{_plural(len(plan.unknown_ids), 'Property ID is', 'Property IDs are')} not in the app, so "
                    f"{'that row was' if len(plan.unknown_ids) == 1 else 'those rows were'} skipped. Imports of "
@@ -505,11 +562,21 @@ def _change_list(plan: EditPlan, limit: int = 20) -> list[dict]:
     return out[:limit]
 
 
+def _confirm_clears_over() -> int:
+    v = get_settings().section("safety").get("confirm_clears_over")
+    return int(v) if v is not None else CONFIRM_CLEARS_OVER
+
+
 def _summary(plan: EditPlan) -> dict:
+    """fields_changed counts every change; clears ({field: n}) the ones that erase a value. confirm_clears: the
+    Import screen asks "erase these values?" before saving (more of them than safety.confirm_clears_over)."""
+    clears = plan.clear_counts()
     return {"properties_changed": len(plan.changed_ids()), "fields_changed": plan.field_counts(),
             "decisions_changed": plan.decision_counts(), "skipped_stale": len(plan.stale),
-            "unknown_ids": len(plan.unknown_ids), "other_market": plan.other_market,
-            "conflicts": plan.conflicts, "unchanged": plan.unchanged, "changes": _change_list(plan)}
+            "skipped_unchecked": len(plan.unchecked), "unknown_ids": len(plan.unknown_ids),
+            "other_market": plan.other_market, "conflicts": plan.conflicts, "unchanged": plan.unchanged,
+            "clears": clears, "confirm_clears": sum(clears.values()) > _confirm_clears_over(),
+            "changes": _change_list(plan)}
 
 
 # --- preview ------------------------------------------------------------------------------------------
@@ -606,7 +673,7 @@ def import_blue_moon_edits(conn: sqlite3.Connection, market_slug: str, path: str
         raise IngestError(f"There is no market called '{market_slug}'. Markets: {known}.") from None
     plan = plan_edits(conn, market_slug, path, limit)
     file_hash = _file_hash(path)
-    warnings = plan_warnings(plan) + _previous_import_warning(conn, market["id"], file_hash)
+    warnings = plan_warnings(plan, done=True) + _previous_import_warning(conn, market["id"], file_hash)
     column_map = {e.field: e.header for e in EDITABLE}
     now = now_iso()
     _progress(progress, 0.3, f"Saving changes to {_plural(len(plan.changed_ids()), 'property', 'properties')}")
@@ -628,7 +695,7 @@ def import_blue_moon_edits(conn: sqlite3.Connection, market_slug: str, path: str
         from ..scoring.rank import compute_scores
         compute_scores(conn, market_slug)
     message = plan_message(plan, market["name"], done=True)
-    stale_only = len(set(plan.stale) - set(plan.changed_ids()))
+    stale_only = len((set(plan.stale) | set(plan.unchecked)) - set(plan.changed_ids()))
     skipped = stale_only + len(plan.unknown_ids) + sum(plan.other_market.values()) + plan.rows_without_id
     found_here = len(plan.changed_ids()) + plan.unchanged
     with conn:

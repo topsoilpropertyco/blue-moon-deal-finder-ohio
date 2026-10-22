@@ -93,11 +93,19 @@ Every function that writes commits its own transaction.
   the export wrote changes nothing). Only real differences are written (decimals within 1e-4, text ignoring case;
   an empty cell clears), each one logged in `property_edits` (via `import:<id>`, actor). A row whose "Row as of" is
   older than `properties.updated_at` (fields) or the property's last `buybox_override_log` entry (decision) is left
-  alone (`skipped_stale`). Sheets of one workbook that disagree about a value leave it alone (`conflicts`). Never
-  touches raw_json, source_id, owner or address; re-scores the market when anything changed. Result adds
-  `{provider: 'bluemoon', properties_changed, fields_changed:{field:n}, decisions_changed:{include|exclude|rules:n},
-  skipped_stale, unknown_ids, other_market, conflicts, batch_id, message, changes:[{property_id, address, field,
-  label, old, new}]}`; the preview has the same counts under `edits` and a `message`, and never owner data.
+  alone (`skipped_stale`). No "Row as of" anywhere: our workbook's `created` metadata (export time) stands in for
+  it; a CSV (or a workbook not made by us) changes nothing (`skipped_unchecked`). A property sheet that lost the
+  column while another has it is not read, and the preview names it. Sheets of one workbook that disagree about a
+  value leave it alone (`conflicts`). Cells that can't be read (a minus sign, a whole number rounding to 0, a
+  formula: `read_sheets` uses Excel's saved result, else keeps the formula text) are listed and left alone, never
+  cleared. Never touches raw_json, source_id, owner or address; re-scores the market when anything changed. Result
+  adds `{provider: 'bluemoon', properties_changed, fields_changed:{field:n}, decisions_changed:{include|exclude|rules:n},
+  skipped_stale, skipped_unchecked, unknown_ids, other_market, conflicts, clears:{field:n}, confirm_clears, batch_id,
+  message, changes:[{property_id, address, field, label, old, new}]}`; the preview has the same counts under `edits`
+  and a `message`, and never owner data. `confirm_clears` (more clears than `safety.confirm_clears_over`) makes the
+  Import screen ask "Erase N values?" before saving. `crexi._provider` refuses (IngestError) our other exports
+  (`columns.other_blue_moon_export`: DRILL worklist, mailing list, CRM handoff) and our property lists without
+  "Property ID" (`columns.looks_like_blue_moon` or the workbook metadata), so they never reach the Crexi merge.
 - `edits.py`: `EDITABLE`, `latest_edits(conn, market_id, property_ids=None)`, `record_edit(...)`, `same_value(...)`.
   Table `property_edits(id, property_id, field, old_value, new_value (JSON), via, actor, created_at)`, append-only;
   the newest row per (property, field) is the correction in force. Owner names are not editable (a new owner name

@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import csv
 import json
+import re
+import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -14,8 +17,8 @@ from openpyxl import load_workbook
 
 from bluemoon import exports, pipeline
 from bluemoon.db import loads, one, rows, scalar
-from bluemoon.ingest import detect_provider, import_file, preview_file, read_table
-from bluemoon.ingest.columns import is_blue_moon_export
+from bluemoon.ingest import IngestError, detect_provider, import_file, preview_file, read_table
+from bluemoon.ingest.columns import is_blue_moon_export, looks_like_blue_moon, other_blue_moon_export
 from bluemoon.ingest.roundtrip import current_decision_text, decision_intent, parse_as_of, parse_cell
 from bluemoon.scoring import overrides
 
@@ -68,6 +71,17 @@ def snapshot(conn) -> dict[int, dict]:
     return {r["id"]: r for r in rows(conn, "SELECT * FROM properties ORDER BY id")}
 
 
+def sheet_cols(ws) -> dict[str, int]:
+    """{header: column number} of a worksheet's first row."""
+    return {c.value: i for i, c in enumerate(ws[1], start=1) if c.value}
+
+
+def drop_columns(wb, header: str, sheets: list[str] | None = None) -> None:
+    for ws in wb.worksheets:
+        if (sheets is None or ws.title in sheets) and header in sheet_cols(ws):
+            ws.delete_cols(sheet_cols(ws)[header])
+
+
 def edited_csv(conn, tmp_path, edits: dict[str, dict[str, str]], name: str = "edited.csv") -> Path:
     """Export ranked_list.csv, change cells {address: {header: value}}, save it as another file."""
     header, data = export_csv(conn)
@@ -101,7 +115,7 @@ def test_our_workbook_is_known_by_its_metadata_even_with_columns_deleted(ranked,
     before = one(ranked, "SELECT source_id, raw_json FROM properties WHERE id = ?", (pid,))
     res = import_file(ranked, APARTMENTS, path)
     assert res["provider"] == "bluemoon" and res["fields_changed"] == {"units": 1}
-    assert any("before the 'Row as of' column" in w for w in res["warnings"])
+    assert any("went by the time it was downloaded" in w for w in res["warnings"])
     assert one(ranked, "SELECT source_id, raw_json FROM properties WHERE id = ?", (pid,)) == before
 
 
@@ -161,6 +175,7 @@ def test_xlsx_round_trip_reads_every_property_sheet(ranked, tmp_path):
     assert all(after[p]["raw_json"] == before[p]["raw_json"] and after[p]["source_id"] == before[p]["source_id"]
                for p in after)
     assert {r["actor"] for r in rows(ranked, "SELECT actor FROM property_edits")} == {"cli"}
+    assert not any("has no 'Row as of' column" in w for w in res["warnings"])   # not about the DRILL worklist
 
 
 def test_two_sheets_that_disagree_leave_the_value_alone(ranked, tmp_path):
@@ -275,6 +290,10 @@ def test_row_as_of_survives_what_excel_does_to_it():
     ("units", "lots", (False, None)), ("year_built", "1985", (True, 1985)), ("year_built", "9999", (False, None)),
     ("county", "Clark County", (True, "CLARK")), ("zip", "4550", (True, "04550")), ("zip", "ABCDE", (False, None)),
     ("property_type", "'-Multifamily", (True, "-Multifamily")), ("lot_acres", "0.5", (True, 0.5)),
+    # A minus sign, a unit count that rounds to 0 or a formula with no saved result is a typo, never "erase".
+    ("units", "-12", (False, None)), ("units", -12, (False, None)), ("units", 0.4, (False, None)),
+    ("units", 0, (True, None)), ("building_sqft", "-5000", (False, None)), ("lot_acres", -0.3, (False, None)),
+    ("units", "=36+2", (False, None)), ("property_type", "=A2", (False, None)), ("county", "=B2", (False, None)),
 ])
 def test_parse_cell(field, value, expected):
     assert parse_cell(field, value, 2026) == expected
@@ -448,6 +467,163 @@ def test_the_dashboard_round_trip(settings, sample_csv, tmp_path):
         conn.close()
 
 
+# --- cells that are not what they seem, old files, files that aren't property lists ---------------------
+
+def cache_formula_result(path: Path, formula: str, result: object) -> None:
+    """Save a formula's result in the workbook, the way Excel does (openpyxl saves none)."""
+    tmp = path.with_name(path.name + ".tmp")
+    with zipfile.ZipFile(path) as src, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename.startswith("xl/worksheets/"):
+                data = re.sub(rf"<f>{re.escape(formula)}</f>(<v\s*/>|<v></v>)?", f"<f>{formula}</f><v>{result}</v>",
+                              data.decode("utf-8")).encode("utf-8")
+            out.writestr(item, data)
+    tmp.replace(path)
+
+
+def units_of(conn, pid: int):
+    return scalar(conn, "SELECT units FROM properties WHERE id = ?", (pid,))
+
+
+def test_a_formula_reads_as_the_result_excel_saved_and_never_as_empty(ranked, tmp_path):
+    path = exports.export_market(ranked, APARTMENTS, only=["ranked_list.xlsx"])["ranked_list.xlsx"]
+    wb = load_workbook(path)
+    ws = wb["Ranked"]
+    col = sheet_cols(ws)
+    picks = [r for r in range(2, ws.max_row + 1) if ws.cell(r, col["Units"]).value]
+    (saved_row, bare_row) = picks[:2]
+    saved_pid, saved_units = ws.cell(saved_row, col["Property ID"]).value, ws.cell(saved_row, col["Units"]).value
+    bare_pid, bare_units = ws.cell(bare_row, col["Property ID"]).value, ws.cell(bare_row, col["Units"]).value
+    ws.cell(saved_row, col["Units"]).value = f"={saved_units}+2"
+    ws.cell(bare_row, col["Units"]).value = f"={bare_units}+3"
+    wb.save(tmp_path / "formulas.xlsx")
+    cache_formula_result(tmp_path / "formulas.xlsx", f"{saved_units}+2", saved_units + 2)
+    pv = preview_file(tmp_path / "formulas.xlsx", market_slug=APARTMENTS, conn=ranked)
+    assert pv["edits"]["fields_changed"] == {"units": 1} and pv["edits"]["clears"] == {}
+    assert any(f"Units '={bare_units}+3' isn't a value I can read" in w for w in pv["warnings"])
+    import_file(ranked, APARTMENTS, tmp_path / "formulas.xlsx")
+    assert units_of(ranked, saved_pid) == saved_units + 2           # Excel's saved result
+    assert units_of(ranked, bare_pid) == bare_units                 # no result saved: left alone, not cleared
+
+
+def test_a_formula_or_a_minus_sign_in_a_csv_changes_nothing(ranked, tmp_path):
+    before = snapshot(ranked)
+    path = edited_csv(ranked, tmp_path, {"455 EXAMPLE AVE": {"Units": "=36+2", "Lot acres": "-0.5"},
+                                         "1200 SAMPLE RIDGE DR": {"Units": "-12"}})
+    res = import_file(ranked, APARTMENTS, path)
+    assert res["properties_changed"] == 0 and snapshot(ranked) == before
+    for text in ("Units '=36+2'", "Lot acres '-0.5'", "Units '-12'"):
+        assert any(text in w for w in res["warnings"]), text
+
+
+def test_a_csv_without_row_as_of_changes_nothing(ranked, tmp_path):
+    header, data = export_csv(ranked)
+    by_address(data, "455 EXAMPLE AVE")["Units"] = "40"
+    for r in data:
+        del r["Row as of"]
+    path = write_csv(tmp_path / "old.csv", [h for h in header if h != "Row as of"], data)
+    before = snapshot(ranked)
+    pv = preview_file(path, market_slug=APARTMENTS, conn=ranked)
+    assert pv["provider"] == "bluemoon" and pv["edits"]["skipped_unchecked"] == 1
+    assert "Importing it would change nothing" in pv["message"] and "no 'Row as of' column" in pv["message"]
+    res = import_file(ranked, APARTMENTS, path)
+    assert res["properties_changed"] == 0 and res["rows_skipped"] == 1 and snapshot(ranked) == before
+
+
+def test_an_old_workbook_without_row_as_of_goes_by_when_it_was_exported(ranked, tmp_path):
+    path = exports.export_market(ranked, APARTMENTS, only=["ranked_list.xlsx"])["ranked_list.xlsx"]
+    wb = load_workbook(path)
+    drop_columns(wb, "Row as of")
+    wb.properties.created = datetime(2020, 1, 1)
+    ws = wb["Ranked"]
+    col = sheet_cols(ws)
+    (row_a, row_b) = [r for r in range(2, ws.max_row + 1) if ws.cell(r, col["Units"]).value][:2]
+    pid_a, units_a = ws.cell(row_a, col["Property ID"]).value, ws.cell(row_a, col["Units"]).value
+    pid_b, units_b = ws.cell(row_b, col["Property ID"]).value, ws.cell(row_b, col["Units"]).value
+    ws.cell(row_a, col["Units"]).value = units_a + 5
+    ws.cell(row_b, col["Units"]).value = units_b + 5
+    wb.save(tmp_path / "old.xlsx")
+    ranked.execute("UPDATE properties SET updated_at = '2000-01-01T00:00:00+00:00'")
+    ranked.execute("UPDATE properties SET updated_at = '2021-06-01T00:00:00+00:00' WHERE id = ?", (pid_b,))
+    ranked.commit()                                                  # B changed in the app after the export
+    res = import_file(ranked, APARTMENTS, tmp_path / "old.xlsx")
+    assert res["fields_changed"] == {"units": 1} and res["skipped_stale"] == 1
+    assert units_of(ranked, pid_a) == units_a + 5 and units_of(ranked, pid_b) == units_b
+    assert any("went by the time it was downloaded" in w for w in res["warnings"])
+    # The same file again: 'All properties' still holds A's old value, but A changed since, so it stays.
+    again = import_file(ranked, APARTMENTS, tmp_path / "old.xlsx")
+    assert again["properties_changed"] == 0 and units_of(ranked, pid_a) == units_a + 5
+
+
+def test_a_property_sheet_that_lost_row_as_of_is_named(ranked, tmp_path):
+    path = exports.export_market(ranked, APARTMENTS, only=["ranked_list.xlsx"])["ranked_list.xlsx"]
+    wb = load_workbook(path)
+    ws = wb["Ranked"]
+    col = sheet_cols(ws)
+    ws.cell(2, col["Units"]).value = (ws.cell(2, col["Units"]).value or 0) + 7
+    drop_columns(wb, "Row as of", ["Ranked"])
+    wb.save(tmp_path / "edited.xlsx")
+    pv = preview_file(tmp_path / "edited.xlsx", market_slug=APARTMENTS, conn=ranked)
+    assert pv["edits"]["properties_changed"] == 0
+    assert any("The 'Ranked' sheet has no 'Row as of' column, so its changes were not read" in w
+               for w in pv["warnings"])
+    assert not any("DRILL worklist" in w for w in pv["warnings"])
+
+
+def test_our_file_without_its_property_id_column_is_refused(ranked, tmp_path):
+    files = exports.export_market(ranked, APARTMENTS, only=["ranked_list.xlsx", "ranked_list.csv"])
+    wb = load_workbook(files["ranked_list.xlsx"])
+    drop_columns(wb, "Property ID")
+    wb.save(tmp_path / "trimmed.xlsx")
+    header, data = read_csv(files["ranked_list.csv"])
+    for r in data:
+        del r["Property ID"]
+    header = [h for h in header if h != "Property ID"]
+    trimmed_csv = write_csv(tmp_path / "trimmed.csv", header, data)
+    assert looks_like_blue_moon(header) and not is_blue_moon_export(header)
+    before = snapshot(ranked)
+    for path in (tmp_path / "trimmed.xlsx", trimmed_csv):
+        with pytest.raises(IngestError, match="Property ID column is missing"):
+            preview_file(path, market_slug=APARTMENTS, conn=ranked)
+        with pytest.raises(IngestError, match="Property ID column is missing"):
+            import_file(ranked, APARTMENTS, path)
+    assert snapshot(ranked) == before                    # no Crexi merge: raw_json and source ids untouched
+
+
+def test_our_other_exports_are_refused_not_merged(ranked):
+    files = exports.export_market(ranked, APARTMENTS, only=["drill_worklist.csv", "mailing_list.csv",
+                                                            "crm_handoff.csv"], stamp_handoffs=False)
+    before = snapshot(ranked)
+    for name, what in (("drill_worklist.csv", "DRILL worklist"), ("mailing_list.csv", "mailing list"),
+                       ("crm_handoff.csv", "CRM handoff")):
+        assert other_blue_moon_export(read_csv(files[name])[0]) == what, name
+        with pytest.raises(IngestError, match=what):
+            preview_file(files[name], market_slug=APARTMENTS, conn=ranked)
+        with pytest.raises(IngestError, match=what):
+            import_file(ranked, APARTMENTS, files[name])
+    assert snapshot(ranked) == before
+    assert other_blue_moon_export(export_csv(ranked)[0]) is None
+
+
+def test_emptied_cells_are_counted_apart_and_ask_first_over_the_limit(ranked, settings, tmp_path):
+    header, data = export_csv(ranked)
+    had = sum(1 for r in data if r["Units"])
+    for r in data:
+        r["Units"] = ""
+    path = write_csv(tmp_path / "blank_units.csv", header, data)
+    pv = preview_file(path, market_slug=APARTMENTS, conn=ranked)
+    assert pv["edits"]["clears"] == {"units": had} and pv["edits"]["confirm_clears"] is (had > 10)
+    assert any(w.startswith(f"{had} cells are empty in this file") and "erases those values" in w
+               for w in pv["warnings"])
+    settings.raw["safety"]["confirm_clears_over"] = 1
+    assert preview_file(path, market_slug=APARTMENTS, conn=ranked)["edits"]["confirm_clears"] is True
+    one_blank = edited_csv(ranked, tmp_path, {"455 EXAMPLE AVE": {"Units": ""}}, "one_blank.csv")
+    assert preview_file(one_blank, market_slug=APARTMENTS, conn=ranked)["edits"]["confirm_clears"] is False
+    res = import_file(ranked, APARTMENTS, path)
+    assert res["clears"] == {"units": had} and any(w.startswith(f"Erased {had} values") for w in res["warnings"])
+
+
 # --- the Import and Exports screens (Node, a tiny DOM stub; skipped without Node) -------------------------
 
 SCREENS_HARNESS = r"""
@@ -513,6 +689,11 @@ async function fire(root, type, t) {
   const file = new File([fs.readFileSync(fx.editedCsv)], 'ranked_list.csv', {type: 'text/csv'});
   await fire(im, 'change', target(HTMLInputElement, {props: {files: [file], value: ''}}));
   out.preview = text(im);
+  if (fx.askClears) {
+    await fire(im, 'click', target(Element, {'data-im': 'ask-clears'}));
+    out.asked = text(im);
+    out.importedBeforeOk = calls.some((c) => c.key.endsWith('/import'));
+  }
   await fire(im, 'click', target(Element, {'data-im': 'import'}));
   out.result = text(im);
   await fire(im, 'click', target(Element, {'data-im': 'undo', 'data-batch': fx.batch}));
@@ -528,7 +709,8 @@ async function fire(root, type, t) {
 """
 
 
-def test_import_and_exports_screens_show_the_round_trip(settings, sample_csv, tmp_path):
+@pytest.mark.parametrize("ask_clears", [False, True])
+def test_import_and_exports_screens_show_the_round_trip(settings, sample_csv, tmp_path, ask_clears):
     import shutil
     import subprocess
 
@@ -557,13 +739,16 @@ def test_import_and_exports_screens_show_the_round_trip(settings, sample_csv, tm
             assert res.status_code == 200, res.text
             api[f"POST {base}/{route}"] = res.json()
         batch = api[f"POST {base}/import"]["batch_id"]
+        if ask_clears:      # as if the file emptied more cells than safety.confirm_clears_over
+            api[f"POST {base}/import/preview"]["edits"].update({"clears": {"units": 12}, "confirm_clears": True})
         api[f"POST {base}/buybox/undo"] = c.post(f"{base}/buybox/undo", json={"batch_id": batch}).json()
         api[f"GET {base}/analytics"] = c.get(f"{base}/analytics").json()
         summary = c.get(f"{base}/summary").json()
         markets = c.get("/api/markets").json()
     fx = tmp_path / "fx.json"
     fx.write_text(json.dumps({"api": api, "market": APARTMENTS, "markets": markets, "summary": summary,
-                              "editedCsv": str(edited), "batch": batch}), encoding="utf-8")
+                              "editedCsv": str(edited), "batch": batch, "askClears": ask_clears}),
+                  encoding="utf-8")
     script = tmp_path / "harness.js"
     script.write_text(SCREENS_HARNESS, encoding="utf-8")
     out = tmp_path / "out.json"
@@ -576,6 +761,12 @@ def test_import_and_exports_screens_show_the_round_trip(settings, sample_csv, tm
                  "decisions 1", "What will change", "455 EXAMPLE AVE", "Save the changes to 2 properties"):
         assert text in r["preview"], text
     assert "Our field" not in r["preview"]                     # not the Crexi column-matching preview
+    if ask_clears:              # the first Save only asks; nothing is imported until "Yes, erase them"
+        assert 'data-im="ask-clears"' in r["preview"] and "Erase 12 values?" not in r["preview"]
+        assert "Erase 12 values?" in r["asked"] and "Yes, erase them and save" in r["asked"]
+        assert r["importedBeforeOk"] is False
+    else:
+        assert 'data-im="ask-clears"' not in r["preview"] and 'data-im="import"' in r["preview"]
     for text in ("Imported your edits", "Properties changed", "Undo the buy box decisions", 'data-batch="'):
         assert text in r["result"], text
     assert "Undo the buy box decisions" not in r["undone"] and "Undone" in r["undone"]

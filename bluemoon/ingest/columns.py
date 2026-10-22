@@ -354,14 +354,38 @@ BLUE_MOON_SIGNATURE: tuple[str, ...] = ("Blue Moon score %", "Why set aside", "S
                                         "Next DRILL step", "Buy box decision", "Set-aside groups")
 
 
-def is_blue_moon_export(headers: list[str]) -> bool:
-    """True for a file this app exported (ranked list, excluded file, review file), even after Excel."""
+# Our other exports are not property lists and never come back in (crexi._provider refuses them). Each is
+# known by its Property ID column plus headers only that file has: {name: (headers, how many must be there)}.
+BLUE_MOON_OTHER_EXPORTS: dict[str, tuple[tuple[str, ...], int]] = {
+    "DRILL worklist": (("Next step key",), 1),
+    "mailing list": (("Why on this list", "Full mailing address", "Contact ID"), 2),
+    "CRM handoff": (("confirmed_person", "handed_off_at", "new_in_this_export", "other_contacts_untested"), 2),
+}
+
+
+def looks_like_blue_moon(headers: list[str]) -> bool:
+    """Our own property list's column names ('Row as of', or two of our distinctive ones), with or without
+    its Property ID column."""
     have = {norm_header(h) for h in headers if h}
-    if "property id" not in have:
-        return False
     if any(norm_header(m) in have for m in BLUE_MOON_MARKERS):
         return True
     return sum(1 for s in BLUE_MOON_SIGNATURE if norm_header(s) in have) >= 2
+
+
+def is_blue_moon_export(headers: list[str]) -> bool:
+    """True for a file this app exported (ranked list, excluded file, review file), even after Excel."""
+    return "property id" in {norm_header(h) for h in headers if h} and looks_like_blue_moon(headers)
+
+
+def other_blue_moon_export(headers: list[str]) -> str | None:
+    """'DRILL worklist', 'mailing list' or 'CRM handoff' for those exports of ours, else None."""
+    have = {norm_header(h) for h in headers if h}
+    if "property id" not in have:
+        return None
+    for name, (marks, need) in BLUE_MOON_OTHER_EXPORTS.items():
+        if sum(1 for m in marks if norm_header(m) in have) >= need:
+            return name
+    return None
 
 
 def detect_provider(headers: list[str]) -> str:

@@ -38,10 +38,10 @@
 
   /* One import at a time. Reset when the market changes. */
   const S = {root: null, market: null, file: null, preview: null, result: null, busy: '', error: null, history: null,
-    undone: false};
+    undone: false, askClears: false};
 
   function reset() {
-    Object.assign(S, {file: null, preview: null, result: null, busy: '', error: null, undone: false});
+    Object.assign(S, {file: null, preview: null, result: null, busy: '', error: null, undone: false, askClears: false});
   }
 
   /* ---------- pieces ---------- */
@@ -194,19 +194,34 @@
     return fields + decisions;
   }
 
+  /* Empty cells that erase values: above safety.confirm_clears_over the first Save click asks once more. */
+  function clearsAsk(e) {
+    const clears = Object.values(e.clears || {}).reduce((a, n) => a + (toNum(n) || 0), 0);
+    return '<div class="im-warn"><h3>Erase ' + plural(clears, 'value') + '?</h3><p>This file has ' +
+      plural(clears, 'empty cell') + ' where the app has a value. Saving erases ' + (clears === 1 ? 'it' : 'them') +
+      ', and a later Crexi import keeps ' + (clears === 1 ? 'it' : 'them') + ' blank.</p></div>';
+  }
+
   function bluemoonPreview(p) {
     const e = p.edits || {};
     const n = toNum(e.properties_changed) || 0;
     const shown = (e.changes || []).length;
-    const save = n ? '<button class="btn primary" type="button" data-im="import">Save the changes to ' +
-      plural(n, 'property', 'properties') + '</button>' : '';
+    const label = 'Save the changes to ' + plural(n, 'property', 'properties');
+    let save = n ? '<button class="btn primary" type="button" data-im="import">' + label + '</button>' : '';
+    let ask = '';
+    if (n && e.confirm_clears) {
+      ask = S.askClears ? clearsAsk(e) : '';
+      save = S.askClears
+        ? '<button class="btn primary" type="button" data-im="import">Yes, erase them and save</button>'
+        : '<button class="btn primary" type="button" data-im="ask-clears">' + label + '</button>';
+    }
     return '<div class="panel im-step"><div class="im-stephead"><span class="im-n">1</span><h2>Check your edits</h2></div>' +
       bluemoonFacts(p) + '<p class="vw-tight">' + esc(p.message || '') + '</p>' + changesTable(e.changes, editCount(e) - shown) +
       warningsList(p.warnings) + '</div>' +
       '<div class="panel im-step"><div class="im-stephead"><span class="im-n">2</span><h2>Import it</h2></div>' +
       '<p class="note vw-tight">Only Units, Building sq ft, Year built, Property type, County, ZIP, Lot acres and Buy box decision ' +
       'are read. Owner names, scores and the original Crexi columns are never changed, and no property is added. ' +
-      'Each change is saved with your name, and a later Crexi import keeps it.</p>' +
+      'Each change is saved with your name, and a later Crexi import keeps it.</p>' + ask +
       '<div class="bar vw-actions">' + save + '<button class="btn" type="button" data-im="again">Choose a different file</button></div></div>';
   }
 
@@ -386,6 +401,9 @@
       paint();
       const input = root.querySelector('[data-im-file]');
       if (input) input.click();
+    } else if (act === 'ask-clears') {
+      S.askClears = true;
+      paint();
     } else if (act === 'import') {
       runImport(toNum(b.getAttribute('data-limit')));
     } else if (act === 'undo') {
