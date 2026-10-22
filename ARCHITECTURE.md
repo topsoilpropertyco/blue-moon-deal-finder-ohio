@@ -78,6 +78,30 @@ Every function that writes commits its own transaction.
   (e.g. `year_unknown`, `year_invalid`, `units_unknown`, `shared_apn`, `no_owner_name`, `no_coordinates`).
   Normalizes county ("CLARK COUNTY" -> "CLARK"), zip to 5 digits, year 9999 -> NULL + flag.
   After import call `bluemoon.drill.engine.ensure_states(conn, market_slug)` (creates level rows).
+  `import_file(..., actor=None)`: who is importing (the dashboard's `auth.signed_in_as`; `cli` when None).
+  `updated_at` moves only when a stored value changes. After the merge, the corrections in `property_edits` are put
+  back (result `edits_kept`, warning "Kept N values you corrected by hand"); raw_json still gets the file's values.
+  XLSX: on a tie between sheets, our export's "All properties" wins; `read_sheets(path)` returns every list sheet.
+- Round trip (our own exports coming back): `columns.detect_provider` returns `bluemoon` for a file with "Property ID"
+  and "Row as of" (or >= 2 of our distinctive headers on older exports; or workbook metadata creator "Blue Moon
+  Deal Finder"), checked before Crexi. `import_file`/`preview_file(..., conn=)` hand such a file to
+  `roundtrip.import_blue_moon_edits` / `preview_blue_moon_edits`: rows match by "Property ID" inside the market
+  (never inserts; unknown ids and other markets are reported), only `edits.EDITABLE` columns are read (Units,
+  Building sq ft, Year built, Property type, County, ZIP, Lot acres; exact header first, as Crexi's own columns can
+  differ only in case) plus "Buy box decision" ("Add to buy box" / "Set aside" / "Follow the rules" become
+  `overrides.set_decision`/`clear` in one batch, note "From spreadsheet", bucket NULL; text still equal to what
+  the export wrote changes nothing). Only real differences are written (decimals within 1e-4, text ignoring case;
+  an empty cell clears), each one logged in `property_edits` (via `import:<id>`, actor). A row whose "Row as of" is
+  older than `properties.updated_at` (fields) or the property's last `buybox_override_log` entry (decision) is left
+  alone (`skipped_stale`). Sheets of one workbook that disagree about a value leave it alone (`conflicts`). Never
+  touches raw_json, source_id, owner or address; re-scores the market when anything changed. Result adds
+  `{provider: 'bluemoon', properties_changed, fields_changed:{field:n}, decisions_changed:{include|exclude|rules:n},
+  skipped_stale, unknown_ids, other_market, conflicts, batch_id, message, changes:[{property_id, address, field,
+  label, old, new}]}`; the preview has the same counts under `edits` and a `message`, and never owner data.
+- `edits.py`: `EDITABLE`, `latest_edits(conn, market_id, property_ids=None)`, `record_edit(...)`, `same_value(...)`.
+  Table `property_edits(id, property_id, field, old_value, new_value (JSON), via, actor, created_at)`, append-only;
+  the newest row per (property, field) is the correction in force. Owner names are not editable (a new owner name
+  reads as a sale to the DRILL).
 
 ### enrich (`bluemoon/enrich/`)
 - `drive.py`: `estimate_minutes(lat, lng, origin_lat, origin_lng, settings=None) -> float`;
@@ -208,7 +232,12 @@ Every function that writes commits its own transaction.
   dict[str, Path]` (`ranked_list.xlsx`, `ranked_list.csv`, `excluded_<reason>.csv` incl. `excluded_manual.csv`,
   `crm_handoff.csv`, `mailing_list.csv`, `drill_worklist.csv`, `run_summary.md`). Property lists include "Why
   this score", "Photo reasons" and, after "Why set aside": "Buy box decision", "Rules said", "Decided by",
-  "Decided on", "Set-aside groups". CSV cells that could run as a formula start with `'`; xlsx links are http(s) only.
+  "Decided on", "Set-aside groups", and end with "Property ID" and "Row as of" (max of `properties.updated_at` and the
+  last buy-box decision; the round trip's staleness guard). Workbooks carry metadata creator "Blue Moon Deal Finder".
+  `export_review(conn, market_slug, bucket) -> Path`: one set-aside group as `output/<market>/review/review_<group>.xlsx`
+  (sheet "Review": Address, City, then "Buy box decision" (a dropdown) and the editable columns, then the rest of
+  ours, no Crexi columns; sheet "How to edit"). CSV cells that could run as a formula start with `'`; xlsx links
+  are http(s) only.
 - `run.py` CLI: `uv run run.py <command> [--market SLUG] [--limit N] [--dry-run] [--yes]` with commands
   `import <files...> [--force]` (a folder: oldest first, files already imported in any market skipped),
   `owners`, `drive`, `rent`, `photos`, `classify`, `score`, `drill`, `all`, `estimate`, `export`, `calibrate`,
@@ -272,11 +301,12 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | GET | `/api/m/{slug}/analytics` | `{imports:[...], filter_funnel:[...], coverage:[{field,pct}], counties:[...], size_dist:[...], score_dist:[...], owner_types:[...], levels:[{key,level,label,count,in_buybox}], api_usage:[...]}` |
 | GET | `/api/m/{slug}/model` | score model summary (weights, learned, outcomes count) |
 | GET | `/api/sources` | prioritized source catalog + counties |
-| POST | `/api/m/{slug}/import/preview` | multipart `file` -> columns, sample, `key_fields`, `size_metric`, `type_mismatch` |
-| POST | `/api/m/{slug}/import` | multipart `file` -> import result (then owners/score/drill auto-run; `queued`: the free rent check started in the background) |
+| POST | `/api/m/{slug}/import/preview` | multipart `file` -> columns, sample, `key_fields`, `size_metric`, `type_mismatch`; a Blue Moon export: `{provider: 'bluemoon', message, edits:{properties_changed, fields_changed, decisions_changed, skipped_stale, unknown_ids, other_market, conflicts, changes}, warnings}` |
+| POST | `/api/m/{slug}/import` | multipart `file` -> import result (then owners/score/drill auto-run; `queued`: the free rent check started in the background); edits from a Blue Moon export are saved with the signed-in person (see ingest round trip) |
 | GET | `/api/m/{slug}/estimate?limit=` | dry-run estimate of every paid step |
 | POST | `/api/m/{slug}/jobs` | body `{step, limit?, dry_run?, confirm?}` -> `{job_id}` |
 | GET | `/api/jobs/{id}` / `/api/jobs` | job status |
+| GET | `/api/m/{slug}/export/review.xlsx?bucket=` | one set-aside group to fix in Excel and import back (`exports.export_review`; 400 for an unknown group) |
 | GET | `/api/m/{slug}/export/{name}` | file download (`ranked_list.xlsx`, `ranked_list.csv`, `crm_handoff.csv`, `mailing_list.csv`, `drill_worklist.csv`, `excluded.zip`, `run_summary.md`); a GET never changes data |
 | POST | `/api/m/{slug}/export/crm_handoff.csv` | JSON body `{mark: true}`: the CRM list, marking the newly confirmed owners in it as handed off |
 | GET | `/images/{property_id}/{file}` | cached image (local only) |

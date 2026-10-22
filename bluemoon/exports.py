@@ -14,6 +14,10 @@
 - mailing_list.csv   Name and mailing address where letters are next, or a buy-box owner's address is untested.
 - drill_worklist.csv What to do next for each owner still being worked.
 - run_summary.md     Counts, colors, layers, API use and cost this month, credits and how far they reach.
+- review/review_<group>.xlsx  One set-aside group to check and fix in Excel (export_review), then import back.
+
+Every property list ends with 'Property ID' and 'Row as of', and workbooks name this app in their metadata:
+an edited copy imported back is known as ours and only its editable columns are read (ingest/roundtrip.py).
 
 Our columns come first, then every original column from the import, under its original name.
 This module never reads API keys.
@@ -38,6 +42,7 @@ from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 from . import pipeline
 from .config import AssetClass, Settings, get_settings
@@ -45,6 +50,7 @@ from .db import loads, market_by_slug, rows, this_month
 from .drill import credits as drill_credits
 from .drill import engine, links, stats
 from .enrich.owners import OWNER_TYPE_LABELS
+from .ingest.edits import EDITABLE
 from .scoring import (
     EXCLUSION_LABELS,
     MANUAL_REASON,
@@ -136,6 +142,9 @@ def property_columns(ac: AssetClass) -> list[Col]:
         _col("street_view_url", "Street View", "link", "Street View"),
         _col("auditor_url", "County auditor", "link", "Auditor"),
         _col("property_id", "Property ID", "int"),
+        # When this row's data was last changed (a correction, an import or a buy-box decision). Bringing the
+        # file back in (ingest/roundtrip.py) leaves a row alone when the app changed it after this time.
+        _col("row_as_of", ROW_AS_OF),
     ]
     return cols
 
@@ -176,6 +185,26 @@ MAILING_COLUMNS: list[Col] = [
 
 SUMMARY_COLUMNS: list[Col] = [_col("section", "Section"), _col("item", "Item"), _col("value", "Value")]
 
+# --- the round trip: download, fix in Excel, import back (ingest/roundtrip.py) ---------------------------
+
+ROW_AS_OF = "Row as of"
+WORKBOOK_CREATOR = "Blue Moon Deal Finder"       # ingest/crexi.py BLUE_MOON_CREATOR: our own file, coming back
+REVIEW_FOLDER = "review"
+REVIEW_FIRST = ("Address", "City")               # which property each row is, then the columns you can fix
+DECISION_CHOICES = ("Add to buy box", "Set aside", "Follow the rules")   # ingest/roundtrip.py DECISION_WORDS
+HOW_TO_EDIT: tuple[tuple[str, str], ...] = (
+    ("What this is", "The properties in one set-aside group, so you can check them and fix what is wrong."),
+    ("What you can change", "Units, Building sq ft, Year built, Property type, County, ZIP, Lot acres, and "
+                            "Buy box decision. Every other column is for reading; changes to it are ignored."),
+    ("Buy box decision", "Type Add to buy box, Set aside or Follow the rules. Leave it as it is to change nothing."),
+    ("An empty cell", "Clears that value (for example a year built you know is wrong)."),
+    ("Don't change", "Property ID and Row as of: they tell the app which property each row is and how old it is."),
+    ("When you're done", "Save the file (as .xlsx or .csv) and drop it on the Import screen. The preview shows "
+                         "what will change before anything is saved."),
+    ("Safe", "Only properties already in the app are changed; nothing is added or deleted. A row that changed "
+             "in the app after you downloaded this file is left alone. Every change is logged with your name."),
+)
+
 
 # --- the data ------------------------------------------------------------------------------------
 
@@ -208,10 +237,12 @@ def load_market(conn: sqlite3.Connection, market_slug: str) -> MarketData:
     summaries = engine.summaries(conn, market_slug)
     decisions = overrides.load(conn, [market["id"]])
     spec = buckets.group_spec(market, ac, settings)
+    decided = _last_decided(conn, market["id"])
     out, headers = [], {}
     for prop, enrich in load_scoring_rows(conn, [market["id"]]):
         row = _property_row(prop, enrich, scores.get(prop["id"]), summaries.get(prop["id"]), ac, market, settings,
                             decisions.get(prop["id"]) or {}, spec)
+        row["row_as_of"] = max(str(prop.get("updated_at") or ""), str(decided.get(prop["id"]) or "")) or None
         headers.update(dict.fromkeys(row["_raw"]))
         out.append(row)
     out.sort(key=_list_order)
@@ -219,6 +250,13 @@ def load_market(conn: sqlite3.Connection, market_slug: str) -> MarketData:
                                                    "p.id = d.property_id WHERE p.market_id = ? AND d.handed_off_at "
                                                    "IS NOT NULL", (market["id"],))}
     return MarketData(settings, market, ac, out, list(headers), summaries, handed)
+
+
+def _last_decided(conn: sqlite3.Connection, market_id: int) -> dict[int, str]:
+    """{property id: when its buy-box decision last changed} (for 'Row as of')."""
+    return {int(r["property_id"]): r["at"] for r in rows(
+        conn, "SELECT l.property_id, MAX(l.created_at) AS at FROM buybox_override_log l JOIN properties p ON "
+              "p.id = l.property_id WHERE p.market_id = ? GROUP BY l.property_id", (market_id,))}
 
 
 def _list_order(r: dict) -> tuple:
@@ -402,12 +440,17 @@ class Sheet:
     name: str
     columns: list[Col]
     items: list[dict]
+    freeze: str = "A2"          # the cell below and right of what stays put when scrolling
+    choices: dict[str, tuple[str, ...]] = field(default_factory=dict)   # header -> a dropdown's suggestions
 
 
 def write_xlsx(path: Path, sheets: list[Sheet]) -> Path:
-    """A workbook with a bold frozen header, filters, sensible widths, colored color-columns and links."""
+    """A workbook with a bold frozen header, filters, sensible widths, colored color-columns and links.
+    Its metadata names this app, so importing it back is known as a Blue Moon export (ingest/roundtrip.py)."""
     def write(tmp: Path) -> None:
         wb = Workbook(write_only=True)
+        wb.properties.creator = WORKBOOK_CREATOR
+        wb.properties.title = path.stem
         for sheet in sheets:
             _write_sheet(wb.create_sheet(sheet.name[:31]), sheet)
         wb.save(tmp)
@@ -418,7 +461,7 @@ def _write_sheet(ws: Any, sheet: Sheet) -> None:
     cols = sheet.columns
     for i, width in enumerate(_widths(cols, sheet.items), start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
-    ws.freeze_panes = "A2"
+    ws.freeze_panes = sheet.freeze
     bold, fill = Font(bold=True), PatternFill("solid", fgColor=HEADER_FILL)
     header = []
     for c in cols:
@@ -431,6 +474,15 @@ def _write_sheet(ws: Any, sheet: Sheet) -> None:
         ws.append([_xlsx_cell(ws, c, c.get(item), fills) for c in cols])
     if cols:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{len(sheet.items) + 1}"
+    headers = [c.header for c in cols]
+    for header, options in sheet.choices.items():
+        if header in headers and sheet.items:
+            # Suggestions only: any other text is still allowed (the cell may show what the export wrote).
+            dv = DataValidation(type="list", formula1='"' + ",".join(options) + '"', allow_blank=True,
+                                showErrorMessage=False)
+            letter = get_column_letter(headers.index(header) + 1)
+            dv.add(f"{letter}2:{letter}{len(sheet.items) + 1}")
+            ws.data_validations.append(dv)
 
 
 def _xlsx_cell(ws: Any, col: Col, value: Any, fills: dict[str, PatternFill]) -> Any:
@@ -864,6 +916,39 @@ def export_zip(conn: sqlite3.Connection, market_slug: str, names: str | Iterable
     return _atomic(folder / name, write)
 
 
+def review_columns(ac: AssetClass) -> list[Col]:
+    """The review file's columns: which property it is, then what you can fix, then everything else of ours
+    (Property ID and Row as of last). No original Crexi columns: they can't be changed from here."""
+    ours = property_columns(ac)
+    by_header = {c.header: c for c in ours}
+    first = [h for h in (*REVIEW_FIRST, "Buy box decision", *(e.header for e in EDITABLE)) if h in by_header]
+    return [by_header[h] for h in first] + [c for c in ours if c.header not in first]
+
+
+def export_review(conn: sqlite3.Connection, market_slug: str, bucket: str, out_dir: str | Path | None = None) -> Path:
+    """One set-aside group as a small workbook to check and fix in Excel, then import back: a 'Review' sheet
+    (the group's properties, the columns you can change first) and a 'How to edit' sheet. Written to
+    output/<market>/review/review_<group>.xlsx, so the full export is never overwritten. ValueError for a
+    group the app doesn't know."""
+    reason, _ = buckets.parse_key(bucket)
+    data = load_market(conn, market_slug)
+    ids = set(overrides.group_property_ids(conn, int(data.market["id"]), bucket))
+    items = [r for r in data.properties if r["property_id"] in ids]
+    spec = buckets.group_spec(data.market, data.asset, data.settings)
+    sample = items[0]["_prop"].get("property_type") if items else None
+    group = f"{EXCLUSION_LABELS.get(reason, reason)}: {buckets.label_for(bucket, spec, sample)}"
+    notes = [("Group", f"{group} ({len(items):,} {'property' if len(items) == 1 else 'properties'})"),
+             ("Market", data.market["name"]),
+             ("Downloaded", datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")), *HOW_TO_EDIT]
+    folder = Path(out_dir) if out_dir else data.settings.path("output") / market_slug / REVIEW_FOLDER
+    name = "review_" + re.sub(r"[^a-z0-9_-]+", "_", bucket) + ".xlsx"
+    return write_xlsx(folder / name, [
+        Sheet("Review", review_columns(data.asset), items, freeze=f"{get_column_letter(len(REVIEW_FIRST) + 1)}2",
+              choices={"Buy box decision": DECISION_CHOICES}),
+        Sheet("How to edit", [_col("topic", "Topic"), _col("text", "What to know")],
+              [{"topic": a, "text": b} for a, b in notes])])
+
+
 def _wanted(only: Iterable[str] | None) -> set[str]:
     if only is None:
         return set(EXPORT_FILES)
@@ -905,7 +990,8 @@ def _yes_no(value: Any) -> str | None:
 
 
 __all__ = [
-    "EXCLUDED_FILES", "EXPORT_FILES", "MAIN_FILES", "Col", "MarketData", "Sheet", "api_usage", "credit_reach",
-    "export_market", "export_zip", "load_market", "mailing_rows", "property_columns", "summary_data",
-    "summary_markdown", "summary_rows", "worklist_rows", "write_csv", "write_xlsx",
+    "EXCLUDED_FILES", "EXPORT_FILES", "MAIN_FILES", "ROW_AS_OF", "Col", "MarketData", "Sheet", "api_usage",
+    "credit_reach", "export_market", "export_review", "export_zip", "load_market", "mailing_rows",
+    "property_columns", "review_columns", "summary_data", "summary_markdown", "summary_rows", "worklist_rows",
+    "write_csv", "write_xlsx",
 ]

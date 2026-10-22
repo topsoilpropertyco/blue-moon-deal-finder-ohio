@@ -2,6 +2,8 @@
  * Step 1 previews it (detected source, sheet, rows, how its columns map to ours, sample rows) without
  * saving anything. Step 2 imports it, then shows what changed and what ran automatically (owners, free
  * drive estimates, score, DRILL). Re-importing is safe: it merges and never deletes.
+ * A Blue Moon export Seth fixed in Excel (provider 'bluemoon') gets its own preview: what would change, from
+ * the editable columns only; its import saves just those changes (buy-box decisions can be undone here).
  */
 (() => {
   'use strict';
@@ -35,10 +37,11 @@
     ['units', 'Units'], ['building_sqft', 'Sq ft'], ['year_built', 'Built'], ['flags', 'Flags']];
 
   /* One import at a time. Reset when the market changes. */
-  const S = {root: null, market: null, file: null, preview: null, result: null, busy: '', error: null, history: null};
+  const S = {root: null, market: null, file: null, preview: null, result: null, busy: '', error: null, history: null,
+    undone: false};
 
   function reset() {
-    Object.assign(S, {file: null, preview: null, result: null, busy: '', error: null});
+    Object.assign(S, {file: null, preview: null, result: null, busy: '', error: null, undone: false});
   }
 
   /* ---------- pieces ---------- */
@@ -52,6 +55,7 @@
     return H.head('Setup · Import', 'Bring in a Crexi export', [
       'Export Property Records from Crexi as CSV or Excel, then drop the file here.',
       '<b>Re-importing is safe:</b> it merges with what is here and never deletes anything.',
+      'Fixed a Blue Moon export in Excel? Drop it here too: only the columns you can fix are read.',
       'Importing into <b>' + esc(marketName()) + '</b>. Switch markets in the top bar.',
     ]);
   }
@@ -147,6 +151,7 @@
   }
 
   function previewPanel(p) {
+    if (p.provider === 'bluemoon') return bluemoonPreview(p);
     const rows = toNum(p.rows) || 0;
     const test = rows > TEST_ROWS ? '<button class="btn quiet" type="button" data-im="import" data-limit="' + TEST_ROWS + '">Import the first ' + TEST_ROWS + ' only (test)</button>' : '';
     return '<div class="panel im-step"><div class="im-stephead"><span class="im-n">1</span><h2>Check the file</h2></div>' +
@@ -156,6 +161,70 @@
       'Then the free steps run on their own: owners, drive estimates, score and DRILL.</p>' +
       '<div class="bar vw-actions"><button class="btn primary" type="button" data-im="import">Import ' + plural(rows, 'property', 'properties') + '</button>' +
       test + '<button class="btn" type="button" data-im="again">Choose a different file</button></div></div>';
+  }
+
+  /* ---------- a Blue Moon export with Seth's edits ---------- */
+
+  function editValue(v) {
+    if (v === null || v === undefined || v === '') return '<span class="faint">blank</span>';
+    return esc(String(v));
+  }
+
+  function changesTable(changes, more) {
+    const rows = changes || [];
+    if (!rows.length) return '';
+    return '<h3>What will change</h3><div class="vw-scroll"><table class="wt im-sample"><thead><tr><th>Property</th>' +
+      '<th>Column</th><th>Now</th><th>From the file</th></tr></thead><tbody>' +
+      rows.map((c) => '<tr><td>' + esc(c.address || ('Property ' + c.property_id)) + '</td><td>' + esc(c.label || c.field) +
+        '</td><td>' + (c.field === 'buybox' ? '<span class="faint">—</span>' : editValue(c.old)) + '</td><td>' +
+        editValue(c.new) + '</td></tr>').join('') + '</tbody></table></div>' +
+      (more > 0 ? '<p class="note">… and ' + plural(more, 'more change') + '.</p>' : '');
+  }
+
+  function bluemoonFacts(p) {
+    const facts = [['Looks like', p.provider_label || 'Blue Moon export'], ['File', p.filename || (S.file && S.file.name) || '']];
+    if (p.sheet) facts.push(['Read from', p.sheet]);
+    facts.push(['Properties in it', num(p.rows)]);
+    return '<dl class="kv">' + facts.map(([k, v]) => '<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>').join('') + '</dl>';
+  }
+
+  function editCount(e) {
+    const fields = Object.values((e && e.fields_changed) || {}).reduce((a, n) => a + (toNum(n) || 0), 0);
+    const decisions = Object.values((e && e.decisions_changed) || {}).reduce((a, n) => a + (toNum(n) || 0), 0);
+    return fields + decisions;
+  }
+
+  function bluemoonPreview(p) {
+    const e = p.edits || {};
+    const n = toNum(e.properties_changed) || 0;
+    const shown = (e.changes || []).length;
+    const save = n ? '<button class="btn primary" type="button" data-im="import">Save the changes to ' +
+      plural(n, 'property', 'properties') + '</button>' : '';
+    return '<div class="panel im-step"><div class="im-stephead"><span class="im-n">1</span><h2>Check your edits</h2></div>' +
+      bluemoonFacts(p) + '<p class="vw-tight">' + esc(p.message || '') + '</p>' + changesTable(e.changes, editCount(e) - shown) +
+      warningsList(p.warnings) + '</div>' +
+      '<div class="panel im-step"><div class="im-stephead"><span class="im-n">2</span><h2>Import it</h2></div>' +
+      '<p class="note vw-tight">Only Units, Building sq ft, Year built, Property type, County, ZIP, Lot acres and Buy box decision ' +
+      'are read. Owner names, scores and the original Crexi columns are never changed, and no property is added. ' +
+      'Each change is saved with your name, and a later Crexi import keeps it.</p>' +
+      '<div class="bar vw-actions">' + save + '<button class="btn" type="button" data-im="again">Choose a different file</button></div></div>';
+  }
+
+  function bluemoonResult(r) {
+    const decisions = Object.values(r.decisions_changed || {}).reduce((a, n) => a + (toNum(n) || 0), 0);
+    const tiles = [BM.ui.stat(toNum(r.properties_changed) || 0, 'Properties changed'),
+      BM.ui.stat(decisions, 'Buy box decisions')];
+    if (toNum(r.skipped_stale)) tiles.push(BM.ui.stat(r.skipped_stale, 'Left alone (changed in the app since)'));
+    const away = (toNum(r.unknown_ids) || 0) + Object.values(r.other_market || {}).reduce((a, n) => a + (toNum(n) || 0), 0);
+    if (away) tiles.push(BM.ui.stat(away, 'Not in this market'));
+    const undo = r.batch_id && !S.undone
+      ? '<button class="btn" type="button" data-im="undo" data-batch="' + esc(r.batch_id) + '">Undo the buy box decisions</button>' : '';
+    const ok = !r.after_import || r.after_import.ok !== false;
+    return '<div class="panel im-step im-done"><div class="im-stephead"><span class="im-n ' + (ok ? 'ok' : '') + '">' + (ok ? '✓' : '!') + '</span>' +
+      '<h2>Imported your edits</h2></div><div class="strip vw-strip">' + tiles.join('') + '</div>' +
+      '<p class="vw-tight">' + esc(r.message || '') + '</p>' + warningsList(r.warnings) + autoSteps(r.after_import) +
+      '<div class="bar vw-actions"><button class="btn primary" type="button" data-go="deals">See the deals</button>' + undo +
+      '<button class="btn" type="button" data-im="again">Import another file</button></div></div>';
   }
 
   /* ---------- step 2: result ---------- */
@@ -176,6 +245,7 @@
   }
 
   function resultPanel(r) {
+    if (r.provider === 'bluemoon') return bluemoonResult(r);
     // The tiles add up to the rows read: duplicates are part of rows_skipped, so they get their own tile,
     // and rows already stored with the same values are not counted as 'Updated'.
     const unchanged = toNum(r.rows_unchanged) || 0;
@@ -299,7 +369,8 @@
     const done = await forThisMarket(() => BM.api(H.mpath('/import'), {method: 'POST', form: fileForm(limit)}),
       (result) => { S.result = result || {}; S.preview = null; });
     if (!done) return;
-    BM.toast('Imported: ' + num(S.result.rows_new) + ' new, ' + num(S.result.rows_updated) + ' updated.');
+    BM.toast(S.result.provider === 'bluemoon' ? (S.result.message || 'Imported your edits.')
+      : 'Imported: ' + num(S.result.rows_new) + ' new, ' + num(S.result.rows_updated) + ' updated.');
     BM.refreshSummary().catch(() => {});
     S.history = null;
     loadHistory();
@@ -317,7 +388,23 @@
       if (input) input.click();
     } else if (act === 'import') {
       runImport(toNum(b.getAttribute('data-limit')));
+    } else if (act === 'undo') {
+      undoDecisions(b.getAttribute('data-batch'));
     }
+  }
+
+  /** Put back the buy-box decisions the imported file changed (one batch, like the Deals screen's Undo). */
+  async function undoDecisions(batch) {
+    if (!batch || !S.result) return;
+    const result = S.result;
+    S.busy = 'Undoing the buy box decisions from this file…';
+    paint();
+    await forThisMarket(() => BM.api(H.mpath('/buybox/undo'), {method: 'POST', body: {batch_id: batch}}), (res) => {
+      S.undone = true;
+      result.message = (res && res.message) || 'Undone.';
+      BM.toast(result.message);
+      BM.refreshSummary().catch(() => {});
+    });
   }
 
   function wireDrop(root) {

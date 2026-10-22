@@ -142,6 +142,9 @@ details.im-more[open] > summary{margin-bottom:6px}
 .ex-row .btn{flex:none;min-width:116px}
 .ex-steps,.se-steps{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;color:var(--muted)}
 .ex-steps b,.se-steps b{color:var(--ink)}
+.ex-sheets+.ex-sheets{margin-top:16px}
+.ex-review{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.ex-review .select{flex:1 1 220px;min-width:0;max-width:100%}
 .se-steps p{margin:0 0 4px}
 @media (max-width:560px){
   .ex-row{flex-direction:column;align-items:stretch;gap:10px}
