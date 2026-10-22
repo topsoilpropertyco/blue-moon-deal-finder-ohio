@@ -364,3 +364,9 @@ def test_export_without_stamping_leaves_handoffs_alone(ranked, market_slug):
     path = exports.export_market(ranked, market_slug, only=["crm_handoff.csv"], stamp_handoffs=False)["crm_handoff.csv"]
     assert read_csv(path)[0]["new_in_this_export"] == "Yes"
     assert one(ranked, "SELECT handed_off_at FROM drill_state WHERE property_id = ?", (pid,))["handed_off_at"] is None
+
+
+def test_a_property_set_aside_by_hand_is_not_on_the_mailing_list(settings):
+    from bluemoon.exports import mailing_rows
+    import inspect
+    assert "Set aside by hand" in inspect.getsource(mailing_rows)

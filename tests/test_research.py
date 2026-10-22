@@ -544,7 +544,6 @@ def test_an_owner_marked_do_not_contact_during_a_run_is_left_alone(conn, setting
 def test_owners_with_no_name_or_set_aside_are_left_out(conn, settings):
     add_prop(conn, owner_name=None)
     owner_prop(conn, "FAR AWAY HOLDINGS LLC", in_buybox=0)
-    owner_prop(conn, "CITY OF SPRINGFIELD", owner_type="government")
     be = Scripted()
     res = R.research_owners(conn, MARKET, backend=be)
     assert be.prompts == [] and res["researched"] == 0 and "nothing to research" in res["message"]

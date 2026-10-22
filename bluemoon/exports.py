@@ -577,13 +577,15 @@ def write_crm_handoff(conn: sqlite3.Connection, data: MarketData, folder: Path, 
 def mailing_rows(conn: sqlite3.Connection, data: MarketData) -> list[dict]:
     """Where to send letters, buy box first: owners whose next DRILL step is a letter, and buy-box owners
     whose mailing address is untested. Never a do-not-contact owner or address, never an address marked
-    wrong, never a confirmed owner (they're in the CRM)."""
+    wrong, never a confirmed owner (they're in the CRM), never a property you set aside by hand."""
     mail = _mail_contacts(conn, data.market["id"])
     dnc = engine._dnc_keys(conn)
     out = []
     for r in data.properties:
         summary = data.summaries.get(r["property_id"]) or {}
         if summary.get("status") in ("dnc", "confirmed"):
+            continue
+        if r.get("decision") == "Set aside by hand":   # you set it aside yourself: no letters either
             continue
         contacts = mail.get(r["property_id"], [])
         usable = [c for c in contacts if c["status"] in ("untested", "verified")

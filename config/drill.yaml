@@ -63,7 +63,7 @@ stages:
     automation: auto
     background: true            # its own job (Run screen, AI research); never blocks the stages you work by hand
     cost: plan                  # your Claude plan through Claude Code; no per-call bill
-    applies_to: [individual, trust, estate, small_llc, corporation, portfolio, nonprofit, unknown]
+    applies_to: [all]           # every owner type: individuals, trusts, estates, LLCs, companies, nonprofits
     sources: [ai_web_research]
     method: Claude searches the web for the owner's business filing, officers and statutory agent, company website, public business phone and email, and business social pages, with the link where it saw each. It never uses people-search sites. Everything it finds stays "not tested yet" until you reach out.
     hit_rate: 0.30
