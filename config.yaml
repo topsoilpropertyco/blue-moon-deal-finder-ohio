@@ -166,6 +166,7 @@ review:
   spot_check_fraction: 0.05      # share of green/red results also sent to review as spot checks
   acceptance_min: 0.90           # green must be >= 90% truly target; red >= 90% truly not
   acceptance_min_reviews: 10     # reviews needed before pass/fail is shown
+  include_unchecked: false       # true = also list photos the AI hasn't looked at yet (normally the AI looks first)
 
 rent:
   # hud_arcgis = HUD's free public map service (no key)

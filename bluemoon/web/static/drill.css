@@ -285,3 +285,6 @@ body:has(.dr-outcomes.dr-stick) .toast{bottom:calc(env(safe-area-inset-bottom,0p
 .dr-cm.diag{background:var(--sunk)}
 .dr-color-table{min-width:520px}
 .dr-color-table tbody tr{cursor:default}
+.dr-place{margin:6px 0 0;font-size:16px;color:var(--ink)}
+.dr-addphoto{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.dr-addphoto .note{flex:1;min-width:200px}

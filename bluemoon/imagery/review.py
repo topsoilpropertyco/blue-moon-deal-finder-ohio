@@ -57,6 +57,7 @@ class ReviewConfig(BaseModel):
     reviewed_p_mixed: float = Field(60.0, ge=0, le=100)
     reviewed_p_other: float = Field(0.0, ge=0, le=100)
     mixed_labels: list[str] = Field(default_factory=lambda: ["MIXED"])
+    include_unchecked: bool = False        # also list properties whose photos the AI hasn't looked at yet
 
 
 def review_config(settings: Settings | None = None) -> ReviewConfig:
@@ -181,7 +182,7 @@ def _group(r: Mapping[str, Any], has_images: bool, cfg: ReviewConfig, salt: str)
         if classified:
             return "needs_review"
         if has_images:
-            return "not_checked"
+            return "not_checked" if cfg.include_unchecked else None   # the AI looks first (Run: Photo check)
         return "no_photos" if r.get("status") == "no_imagery" else None
     color = visual_color(p, cfg)
     if color == "yellow":

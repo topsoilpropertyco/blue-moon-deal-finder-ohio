@@ -186,8 +186,9 @@
 
   function sortedImages(images) {
     const list = (images || []).filter((im) => im && im.url);
-    const sv = list.filter((im) => im.kind !== 'satellite').sort((a, b) => String(a.name).localeCompare(String(b.name)));
-    return [...sv, ...list.filter((im) => im.kind === 'satellite')];
+    const mine = list.filter((im) => im.kind === 'yours').sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, {numeric: true}));
+    const sv = list.filter((im) => im.kind !== 'satellite' && im.kind !== 'yours').sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    return [...mine, ...sv, ...list.filter((im) => im.kind === 'satellite')];
   }
 
   function imageTile(im, i, cls, alt) {
@@ -204,6 +205,7 @@
     const hasStreet = imgs.some((im) => im.kind !== 'satellite');
     let svCount = 0;
     const tiles = imgs.map((im, i) => {
+      if (im.kind === 'yours') { svCount += 1; return imageTile(im, i, svCount === 1 ? 'main' : '', 'A photo you added'); }
       if (im.kind === 'satellite') return imageTile(im, i, hasStreet ? 'sat' : 'main', 'Satellite view from above');
       svCount += 1;
       return imageTile(im, i, svCount === 1 ? 'main' : '', `Street View photo ${svCount}`);
@@ -267,6 +269,7 @@
           <div>
             <div class="eyebrow">${esc(meta)}</div>
             <h2 class="dr-addr">${esc(W.address(it))}</h2>
+            <p class="dr-place"><b>${esc(W.place(it))}</b>${it.county ? ` · ${esc(W.titleCase(it.county))} County` : ''}</p>
             <p class="note dr-tight">${esc(it.why || '')}</p>
           </div>
           ${aiHtml(it)}
@@ -275,6 +278,10 @@
           <label class="dr-field dr-note"><span>Note (optional): why, in a few words</span>
             <input data-f="note" autocomplete="off" placeholder="e.g. stairs and breezeway on the side"></label>
           ${linksHtml(it)}
+          <div class="dr-addphoto">
+            <label class="btn">Add a photo<input type="file" data-f="photo" accept="image/jpeg,image/png" hidden></label>
+            <span class="note">Found a better picture on Google or the property's website? Choose it here, or copy it and press Ctrl/Cmd+V on this page. The photo check reads it first.</span>
+          </div>
           <div class="dr-nav">
             <button class="btn" data-act="prev" ${q.idx <= 0 ? 'disabled' : ''}>← Back <kbd>K</kbd></button>
             <button class="btn" data-act="skip">Skip for now <kbd>S</kbd></button>
@@ -453,12 +460,46 @@
       skip: () => step(1),
       prev: () => step(-1),
       restart: () => { S.q.idx = 0; paintQueue(); },
+      photo: () => {},
       'open-property': () => { const it = S.q && S.q.items[S.q.idx]; if (it) BM.openProperty(it.id); },
     };
     if (!handlers[act]) return;
     e.preventDefault();
     handlers[act]();
   }
+
+  async function addPhoto(file) {
+    const q = S.q;
+    const it = q && q.items[q.idx];
+    if (!it || !file) return;
+    if (!/^image\/(jpeg|png)$/.test(file.type)) {
+      BM.toast('Use a JPEG or PNG photo (right-click the picture and save it, or copy it and paste).', {error: true});
+      return;
+    }
+    const form = new FormData();
+    form.append('file', file, file.name || 'photo.png');
+    try {
+      const res = await BM.api(W.mpath(`/properties/${it.id}/photo`), {method: 'POST', form});
+      it.images = res.images || it.images;
+      BM.toast(res.message || 'Photo added.');
+      paintQueue();
+    } catch (err) {
+      BM.toast(err.message, {error: true});
+    }
+  }
+
+  document.addEventListener('change', (e) => {
+    const f = e.target && e.target.matches && e.target.matches('[data-f="photo"]') ? e.target.files[0] : null;
+    if (f && S.mode === 'queue' && S.root && S.root.isConnected) addPhoto(f);
+  });
+
+  document.addEventListener('paste', (e) => {
+    if (S.mode !== 'queue' || !S.q || !S.root || !S.root.isConnected || W.route().key !== 'review') return;
+    const item = [...((e.clipboardData && e.clipboardData.items) || [])].find((x) => /^image\/(jpeg|png)$/.test(x.type));
+    if (!item) return;
+    e.preventDefault();
+    addPhoto(item.getAsFile());
+  });
 
   document.addEventListener('keydown', (e) => {
     if (S.mode !== 'queue' || !S.q || !S.root || !S.root.isConnected || W.route().key !== 'review') return;

@@ -136,9 +136,17 @@ def test_queue_order_and_card_contents(tmp_root, conn, settings):
     add(conn, settings, photos=False, status="pending")              # photos still coming: not shown
     add(conn, settings, **ai("INTERIOR_CORRIDOR", 5, 0), reviewed_label="INTERIOR_CORRIDOR")  # answered
     add(conn, settings, in_buybox=0, **ai("MIXED", 50, 50))            # outside the buy box
+    q = review_queue(conn, MARKET)          # photos the AI hasn't looked at yet wait for it: you see them after
+    assert [c["id"] for c in q] == [unsure, yellow_top, yellow_low, no_photos, green]
+    assert [c["group"] for c in q] == ["needs_review", "unsure", "unsure", "no_photos", "spot_check"]
+    set_config(tmp_root, "review.include_unchecked", True)
+    from bluemoon.config import reload_settings
+    reload_settings()
     q = review_queue(conn, MARKET)
-    assert [c["id"] for c in q] == [unsure, yellow_top, yellow_low, not_checked, no_photos, green]
-    assert [c["group"] for c in q] == ["needs_review", "unsure", "unsure", "not_checked", "no_photos", "spot_check"]
+    assert [c["group"] for c in q][3] == "not_checked" and not_checked in [c["id"] for c in q]
+    set_config(tmp_root, "review.include_unchecked", False)
+    reload_settings()
+    q = review_queue(conn, MARKET)
     card = q[1]
     assert card["color"] == "yellow" and card["final_p"] == 60 and "60%" in card["why"]
     assert [i["name"] for i in card["images"]] == ["sv_0.jpg", "sv_1.jpg", "sv_2.jpg", "sat.jpg"]
@@ -150,7 +158,7 @@ def test_queue_order_and_card_contents(tmp_root, conn, settings):
                                   "help": helps["EXTERIOR_CORRIDOR"]}
     assert card["cues"] == ["stairs"] and card["crexi_url"] and card["question"]
     assert q[0]["needs_review"] is True and q[0]["color"] == "na"
-    assert len(review_queue(conn, MARKET, include_excluded=True)) == 7
+    assert len(review_queue(conn, MARKET, include_excluded=True)) == 6
     assert [c["id"] for c in review_queue(conn, MARKET, limit=2, offset=1)] == [yellow_top, yellow_low]
 
 
@@ -372,3 +380,18 @@ def test_module_exports(settings):
                  "parse_result", "review_queue", "save_review", "examples_for", "scorecard", "calibrate"):
         assert callable(getattr(im, name))
     assert review.EXAMPLES_FILE == "examples.jsonl"
+
+
+def test_a_photo_you_add_shows_first_and_only_real_photos_are_accepted(tmp_root, conn, settings):
+    from fastapi.testclient import TestClient
+    from bluemoon.imagery import streetview
+    from bluemoon.web.app import app
+    pid = add(conn, settings, **ai("MIXED", 50, 55))
+    jpeg = b"\xff\xd8\xff\xe0" + b"0" * 200
+    with TestClient(app) as c:
+        r = c.post(f"/api/m/{MARKET}/properties/{pid}/photo", files={"file": ("x.jpg", jpeg, "image/jpeg")})
+        assert r.status_code == 200 and r.json()["name"] == "you_1.jpg"
+        assert r.json()["images"][0]["kind"] == "yours"
+        bad = c.post(f"/api/m/{MARKET}/properties/{pid}/photo", files={"file": ("x.jpg", b"not a photo", "image/jpeg")})
+        assert bad.status_code == 400 and "JPEG or PNG" in bad.json()["detail"]
+    assert streetview.existing_images(settings, pid)[0] == "you_1.jpg"

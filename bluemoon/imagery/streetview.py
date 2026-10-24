@@ -50,6 +50,8 @@ SKU_STREET_VIEW = "street_view_static"     # matches google.prices in config.yam
 SKU_SATELLITE = "static_maps"
 SKU_METADATA = "street_view_metadata"
 SAT_FILE = "sat.jpg"
+YOURS_PREFIX = "you_"      # photos you add by hand (you_1.jpg, you_2.png ...); the photo check reads them first
+MAX_YOURS = 8
 METERS_PER_MILE = 1609.344
 TOO_CLOSE_METERS = 4.0                     # panorama on top of the point: bearing means nothing
 FALLBACK_HEADINGS = (0.0, 120.0, 240.0)    # then sweep around instead
@@ -204,7 +206,30 @@ def existing_images(settings: Settings, property_id: int) -> list[str]:
         return []
     sv = sorted(p.name for p in d.glob("sv_*.jpg") if p.is_file() and p.stat().st_size > 0)
     sat = [SAT_FILE] if (d / SAT_FILE).is_file() and (d / SAT_FILE).stat().st_size > 0 else []
-    return sv + sat
+    return your_images(settings, property_id) + sv + sat
+
+
+def your_images(settings: Settings, property_id: int) -> list[str]:
+    """Photos you added by hand, oldest first."""
+    d = property_dir(settings, property_id)
+    if not d.is_dir():
+        return []
+    mine = [p for p in d.iterdir() if p.is_file() and p.name.startswith(YOURS_PREFIX) and p.stat().st_size > 0
+            and p.suffix.lower() in (".jpg", ".png")]
+    return sorted((p.name for p in mine), key=lambda n: (len(n), n))
+
+
+def add_your_image(settings: Settings, property_id: int, data: bytes) -> str:
+    """Save a photo you found yourself. JPEG or PNG only. Returns its file name."""
+    if not looks_like_image(data):
+        raise ValueError("That isn't a JPEG or PNG photo. Save the picture as a .jpg or .png and try again.")
+    have = your_images(settings, property_id)
+    if len(have) >= MAX_YOURS:
+        raise ValueError(f"This property already has {MAX_YOURS} of your photos. Delete one first.")
+    n = 1 + max([int(re.sub(r"\D", "", Path(h).stem) or 0) for h in have] + [0])
+    name = f"{YOURS_PREFIX}{n}.{'png' if data.startswith(PNG_MAGIC) else 'jpg'}"
+    save_image(property_dir(settings, property_id), name, data)
+    return name
 
 
 def image_paths(settings: Settings, property_id: int) -> list[Path]:
@@ -867,7 +892,7 @@ def images_for(property_id: int, settings: Settings | None = None) -> list[dict]
     s = settings or get_settings()
     out = []
     for name in existing_images(s, property_id):
-        kind = "satellite" if name == SAT_FILE else "street_view"
+        kind = "satellite" if name == SAT_FILE else "yours" if name.startswith(YOURS_PREFIX) else "street_view"
         out.append({"name": name, "url": f"/images/{int(property_id)}/{name}", "kind": kind})
     return out
 
@@ -887,5 +912,5 @@ def map_links(lat: float | None, lng: float | None, heading: float | None = None
     }
 
 
-__all__ = ["ImageryConfig", "StreetViewMetadata", "existing_images", "fetch_imagery", "image_paths",
+__all__ = ["add_your_image", "your_images", "ImageryConfig", "StreetViewMetadata", "existing_images", "fetch_imagery", "image_paths",
            "imagery_config", "imagery_estimate", "images_for", "map_links", "street_view_shots", "update_visual"]

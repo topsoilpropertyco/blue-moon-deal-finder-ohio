@@ -65,6 +65,7 @@ from ..imagery import (
     vision_config,
 )
 from ..imagery import queue_counts as review_counts
+from ..imagery import streetview
 from ..ingest import IngestError, import_file, preview_file
 from ..scoring import overrides
 from ..scoring.learn import model_summary, set_outcome
@@ -756,6 +757,24 @@ def import_preview(slug: str, conn: Conn, file: Annotated[UploadFile, File()]) -
         return preview_file(save_upload(file, folder / name), market_slug=slug, conn=conn)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
+
+
+MAX_PHOTO_BYTES = 12 * 1024 * 1024
+
+
+@router.post("/api/m/{slug}/properties/{pid}/photo")
+def add_photo(slug: str, pid: int, conn: Conn, file: Annotated[UploadFile, File()]) -> dict:
+    """A photo you found yourself (a Google search, the property's website). JPEG or PNG; the photo check reads
+    it first and the review card shows it. Nothing is deleted or replaced."""
+    require_property(conn, slug, pid)
+    data = file.file.read(MAX_PHOTO_BYTES + 1)
+    if len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(413, f"That photo is over {MAX_PHOTO_BYTES // (1024 * 1024)} MB.")
+    if not data:
+        raise HTTPException(400, "That file is empty.")
+    name = streetview.add_your_image(get_settings(), pid, data)
+    return {"name": name, "images": streetview.images_for(pid, get_settings()),
+            "message": "Photo added. It shows first, and the photo check reads it first."}
 
 
 @router.post("/api/m/{slug}/import")
