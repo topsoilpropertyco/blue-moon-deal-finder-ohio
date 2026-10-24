@@ -514,8 +514,10 @@ def cmd_share(args: argparse.Namespace, settings: Settings) -> int:
         return EXIT_ERROR
     how = (f"Each person types their email and the team password ({len(plan['emails'])} on the list)."
            if plan["mode"] == "team" else "Everyone types the team password.")
-    say("Starting Cloudflare's free link to the dashboard. Keep this window open (or use the background "
-        "service). " + how)
+    provider = sharing.share_settings(settings)["provider"]
+    say(("Starting your ngrok link (a permanent address) to the dashboard" if provider == "ngrok"
+         else "Starting Cloudflare's free link to the dashboard") +
+        ". Keep this window open (or use the background service). " + how)
 
     def on_url(url: str) -> None:
         say()
@@ -529,7 +531,8 @@ def cmd_share(args: argparse.Namespace, settings: Settings) -> int:
     except sharing.ShareError as exc:
         say(str(exc))
         return EXIT_ERROR
-    say("Sharing stopped. The team link no longer works.")
+    say("Sharing stopped. The team link no longer works." +
+        (" If it stopped right away, run: uv run run.py --debug share  to see why." if code not in (0, None) else ""))
     return EXIT_OK if code in (0, None) else EXIT_ERROR
 
 
