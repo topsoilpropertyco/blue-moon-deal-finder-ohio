@@ -4,7 +4,7 @@
 
 /* --- basics ----------------------------------------------------------------------------------- */
 .dr [hidden]{display:none!important}
-.dr{display:flex;flex-direction:column;gap:16px;min-width:0}
+.dr{display:flex;flex-direction:column;gap:var(--s5);min-width:0}
 .dr > .strip{margin:6px 0 0}
 .dr .lines{margin-top:6px}
 .dr h3{font-size:13px;font-weight:600;margin:0}
@@ -21,13 +21,13 @@
 .dr-row-between{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .dr-moon{display:inline-flex;align-items:center;gap:6px}
 .dr-moon .num{font-family:var(--f-display);font-size:18px;line-height:1}
-.dr-stack{display:flex;flex-direction:column;gap:16px}
+.dr-stack{display:flex;flex-direction:column;gap:var(--s5)}
 .dr-grid{margin-top:0}
 .dr-scope{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px}
 .dr-scope .note{color:var(--muted);font-size:13px;flex:1 1 260px;min-width:0}
 .dr .panel h2 + .note{margin-top:-6px}
 .dr .empty{margin-top:0}
-.dr-banner{margin:0;padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
+.dr-banner{margin:0;padding:var(--s3) var(--s5);border:1px solid var(--line);border-radius:12px;background:var(--surface);display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
 .dr-banner.warn{border-color:var(--warn)}
 .dr-banner .btn{margin-left:auto}
 .dr-loading{flex-direction:row;align-items:center;gap:10px;color:var(--muted)}
@@ -49,7 +49,7 @@
   .dr-linklike{display:inline-block;padding:11px 0;margin:-11px 0}  /* bigger tap area, same layout */
 }
 .dr-sub{margin-top:4px!important;color:var(--faint);font-size:11px!important;letter-spacing:.1em;text-transform:uppercase}
-.dr-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:13px}
+.dr-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s3);font-size:13px}
 .dr-list li{overflow-wrap:anywhere}
 .dr-list .ch{margin-right:6px}
 .dr-cval{overflow-wrap:anywhere}
@@ -90,8 +90,8 @@
 .dr-idx{color:var(--faint);font-family:var(--f-mono);font-size:12px}
 .dr-sname{font-weight:600}
 .dr-off-note{color:var(--warn-ink)!important}
-.dr-stagecards{display:flex;flex-direction:column;gap:8px}
-.dr-stagecard{border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:6px;background:var(--surface)}
+.dr-stagecards{display:flex;flex-direction:column;gap:var(--s3)}
+.dr-stagecard{border:1px solid var(--line);border-radius:14px;padding:var(--s4) var(--s5);display:flex;flex-direction:column;gap:var(--s2);background:var(--surface)}
 .dr-stagecard.off{opacity:.75}
 .dr-stagecard.quiet{padding:8px 12px;gap:2px;border-style:dashed}
 .dr-stagecard.quiet b{font-weight:500;color:var(--muted)}
@@ -115,8 +115,8 @@
 .dr-progress i{display:block;height:100%;background:var(--accent);transition:width .2s}
 .dr-nav{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .dr-nav .btn:last-child{margin-left:auto}
-.dr-work{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:16px;align-items:start}
-.dr-col{display:flex;flex-direction:column;gap:16px;min-width:0}
+.dr-work{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:var(--s5);align-items:start}
+.dr-col{display:flex;flex-direction:column;gap:var(--s5);min-width:0}
 @media (max-width:900px){.dr-work{grid-template-columns:minmax(0,1fr)}}
 
 .dr-prop-top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}
@@ -135,7 +135,7 @@
 .dr-plinks{display:flex;flex-wrap:wrap;gap:6px}
 .dr-chiplink{color:var(--accent)!important}
 
-.dr-links{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;align-items:start}
+.dr-links{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:var(--s3);align-items:start}
 .dr-link{display:flex;flex-direction:column;gap:3px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);text-decoration:none;color:var(--ink);min-height:56px}
 .dr-link:hover{border-color:var(--accent)}
 .dr-link.first{border-color:var(--accent);background:var(--accent-soft)}
@@ -147,8 +147,8 @@
 .dr-link-k.dr-k-find{color:var(--warn-ink)}
 .dr-link-how{font-size:12.5px;color:var(--muted);overflow-wrap:anywhere}
 
-.dr-check{gap:12px}
-.dr-check form{display:flex;flex-direction:column;gap:12px}
+.dr-check{gap:var(--s4)}
+.dr-check form{display:flex;flex-direction:column;gap:var(--s4)}
 /* Found / Nothing / (Matches records) / Not applicable: one equal column per button, phones too. While the Found
    form is closed the bar sticks to the bottom of the screen, so the answer is one tap away while reading. */
 .dr-outcomes{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:8px}
@@ -165,7 +165,7 @@ body:has(.dr-outcomes.dr-stick) .toast{bottom:calc(env(safe-area-inset-bottom,0p
 .dr-form-err{margin:0;color:var(--bad);font-size:13px;font-weight:600}
 .dr-legal{margin:0;font-size:12.5px;color:var(--muted);border-left:3px solid var(--warn);padding:4px 0 4px 10px}
 
-.dr-contact{border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.dr-contact{border:1px solid var(--line);border-radius:14px;padding:var(--s4) var(--s5);display:flex;flex-direction:column;gap:var(--s3)}
 .dr-contact.logged{border-style:dashed}
 .dr-contact-top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;font-size:15px}
 .dr-contact-top a{color:var(--accent);font-weight:600;text-decoration:none}
@@ -197,7 +197,7 @@ body:has(.dr-outcomes.dr-stick) .toast{bottom:calc(env(safe-area-inset-bottom,0p
 @media (hover:none),(max-width:760px){.dr-keys,.dr kbd{display:none}}
 
 /* --- credits ---------------------------------------------------------------------------------- */
-.dr-hero{gap:12px}
+.dr-hero{gap:var(--s4)}
 .dr-hero-main{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .dr-hero-main b{font-size:15px}
 .dr-meter{height:8px;border-radius:8px;background:var(--sunk);overflow:hidden}
@@ -207,10 +207,10 @@ body:has(.dr-outcomes.dr-stick) .toast{bottom:calc(env(safe-area-inset-bottom,0p
 .dr-short-acts .btn{margin-left:0}
 .dr-pending{border-color:var(--warn)}
 .dr-plan{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
-.dr-plan-item{display:grid;grid-template-columns:36px minmax(0,1fr);gap:12px;padding:14px 0;border-top:1px solid var(--line)}
+.dr-plan-item{display:grid;grid-template-columns:36px minmax(0,1fr);gap:var(--s4);padding:var(--s5) 0;border-top:1px solid var(--line)}
 .dr-plan-item:first-child{border-top:0;padding-top:4px}
 .dr-plan-n{font-family:var(--f-display);font-size:26px;line-height:1;color:var(--accent);text-align:right}
-.dr-plan-body{display:flex;flex-direction:column;gap:6px;min-width:0}
+.dr-plan-body{display:flex;flex-direction:column;gap:var(--s2);min-width:0}
 .dr-plan-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}
 .dr-addr-sm{font-size:15px}
 .dr-plan-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px}
@@ -224,7 +224,7 @@ body:has(.dr-outcomes.dr-stick) .toast{bottom:calc(env(safe-area-inset-bottom,0p
 .dr-tag.ok{color:var(--good);border-color:var(--good);background:transparent}
 .dr-more{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--line)}
 .dr-log{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
-.dr-log-row{display:grid;grid-template-columns:110px minmax(0,1fr) auto;gap:4px 12px;align-items:center;padding:10px 0;border-top:1px solid var(--line);font-size:13px}
+.dr-log-row{display:grid;grid-template-columns:110px minmax(0,1fr) auto;gap:4px 12px;align-items:center;padding:var(--s3) 0;border-top:1px solid var(--line);font-size:13px}
 .dr-log-row:first-child{border-top:0}
 .dr-log-row > form{grid-column:1/-1}
 .dr-log-what{min-width:0;display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline}
@@ -241,7 +241,7 @@ body:has(.dr-outcomes.dr-stick) .toast{bottom:calc(env(safe-area-inset-bottom,0p
 
 /* --- photo review ----------------------------------------------------------------------------- */
 .dr-tabs{flex-wrap:wrap}
-.dr-rev{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:20px;align-items:start}
+.dr-rev{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:var(--s5);align-items:start}
 @media (max-width:860px){.dr-rev{grid-template-columns:minmax(0,1fr)}}
 .dr-imgs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;min-width:0}
 .dr-img{display:block;border-radius:10px;overflow:hidden;background:var(--sunk);border:1px solid var(--line)}
@@ -249,11 +249,11 @@ body:has(.dr-outcomes.dr-stick) .toast{bottom:calc(env(safe-area-inset-bottom,0p
 .dr-img.main{grid-column:1/-1}
 .dr-img.main img{aspect-ratio:16/10}
 .dr-noimg{grid-column:1/-1;display:flex;flex-direction:column;gap:6px;justify-content:center;align-items:flex-start;min-height:220px;padding:20px;border:1.5px dashed var(--na);border-radius:12px;color:var(--muted)}
-.dr-revpanel{gap:14px}
+.dr-revpanel{gap:var(--s5)}
 .dr .dr-revpanel h2.dr-addr + .note{margin-top:8px}
 .dr-reasons{margin:0;font-size:13px;color:var(--ink);background:var(--sunk);border-radius:10px;padding:10px 12px}
 .dr-q{font-size:15px!important}
-.dr-choices{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+.dr-choices{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s3)}
 .dr-choice{border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:10px 12px;text-align:left;display:flex;justify-content:space-between;align-items:center;gap:10px;min-height:48px;width:100%}
 .dr-choice:hover{border-color:var(--accent)}
 .dr-choice.target{box-shadow:inset 3px 0 0 var(--good)}
@@ -261,9 +261,9 @@ body:has(.dr-outcomes.dr-stick) .toast{bottom:calc(env(safe-area-inset-bottom,0p
 .dr-choice-t{display:flex;flex-direction:column;gap:2px;min-width:0}
 .dr-choice-t .note{font-size:12px}
 /* Phones and narrow windows: the answers sit in a bar stuck to the bottom of the screen, next to the photo.
-   The -18px margin matches .panel's padding; the help text stays in each button's title. */
+   The negative margin matches .panel's padding (--pad); the help text stays in each button's title. */
 @media (max-width:860px){
-  .dr-choices{position:sticky;bottom:0;z-index:4;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:0 -18px;padding:10px 18px calc(10px + env(safe-area-inset-bottom,0px));background:var(--surface);border-top:1px solid var(--line)}
+  .dr-choices{position:sticky;bottom:0;z-index:4;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:0 calc(var(--pad) * -1);padding:10px var(--pad) calc(10px + env(safe-area-inset-bottom,0px));background:var(--surface);border-top:1px solid var(--line)}
   .dr-choice{min-height:44px;padding:8px 10px;justify-content:center;text-align:center}
   .dr-choice-t .note{display:none}
   body:has(.dr-choices) .toast{bottom:calc(env(safe-area-inset-bottom,0px) + 150px)}

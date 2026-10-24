@@ -40,6 +40,9 @@ output/*
 *.webp
 *.heic
 *.pdf
+# The Blue Moon logo files are not private data: keep them in git.
+!docs/brand/*
+!bluemoon/web/static/brand/*
 
 # Python
 __pycache__/

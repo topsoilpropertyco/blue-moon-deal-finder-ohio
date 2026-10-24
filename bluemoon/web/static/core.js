@@ -19,7 +19,7 @@
 
   const LS_MARKET = 'bm.market';
   const LS_DISMISSED = 'bm.dismissed';
-  const GROUPS = [['work', 'Work'], ['insight', 'Insight'], ['setup', 'Setup']];
+  const GROUPS = [['work', 'Work'], ['insight', 'Insights'], ['setup', 'Setup']];
   const DEFAULT_VIEW = 'deals';
   const SUMMARY_STALE_MS = 60000;
   const LEVEL_NAMES = {1: 'No owner data', 2: 'Possible owner', 3: 'Confirmed owner'};
@@ -163,8 +163,7 @@
     box.className = 'login';
     box.innerHTML =
       '<form class="panel" novalidate>' +
-      '<div class="brand"><svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="10" fill="var(--accent)"/>' +
-      '<circle cx="15" cy="8" r="9" fill="var(--surface)"/></svg><b>Blue Moon</b></div>' +
+      '<div class="brand"><span class="glow"><img class="brand-mark" src="/static/brand/stool-120.webp" width="79" height="120" alt=""></span><b>Blue Moon</b></div>' +
       '<h2>Sign in</h2>' +
       '<p class="note" style="margin:0">' + (askEmail ? 'Type your email and the team password.' : 'Type the team password.') + '</p>' +
       (askEmail ? '<label class="field">Your email<input type="email" name="email" autocomplete="email" required></label>' : '') +
@@ -256,7 +255,7 @@
       if (s < 7 * 86400) return Math.round(s / 86400) + ' days ago';
       return fmt.date(iso);
     },
-    /* Extras (not in the core contract): readable casing for ALL-CAPS addresses, and plurals. */
+  /* Extras (not in the core contract): readable casing for ALL-CAPS addresses, and plurals. */
     title(text) {
       if (!text) return '';
       const s = String(text);
@@ -387,6 +386,16 @@
       (text ? '<p class="note">' + esc(text) + '</p>' : '') + (actionHtml || '') + '</div>';
   }
 
+  /** The Find / Fund / Operate stool in front of the blue moon (a soft glow behind it in dark mode). */
+  function logo(cls) {
+    return '<span class="glow ' + esc(cls || '') + '"><img class="hero-mark" src="/static/brand/stool-320.webp" width="211" height="320" alt="Blue Moon: Find, Fund, Operate"></span>';
+  }
+
+  function emptyHero(title, text, actionHtml) {
+    return '<div class="empty empty-hero">' + logo() + '<h2>' + esc(title) + '</h2>' +
+      (text ? '<p class="note">' + esc(text) + '</p>' : '') + (actionHtml || '') + '</div>';
+  }
+
   /* Extras (not in the core contract) that keep every screen consistent. */
   function loading(text) {
     return '<div class="loading"><span class="spin" aria-hidden="true"></span>' + esc(text || 'Loading…') + '</div>';
@@ -404,7 +413,7 @@
     const m = currentMarket();
     const what = m ? (m.asset_label || m.name) : 'this market';
     const where = m && m.geography ? ' (' + m.geography + ')' : '';
-    return empty('No properties in this market yet',
+    return emptyHero('No properties in this market yet',
       'Import a Crexi file for ' + what + where + ' to fill this screen.' + (extra ? ' ' + extra : '') +
       ' Re-importing a newer export just updates it; nothing is ever deleted.',
       '<button class="btn primary" type="button" data-go="import">Import a Crexi file for ' + esc(what) + '</button>');
@@ -562,33 +571,67 @@
     return '<span class="badge">' + esc(text) + '</span>';
   }
 
+  /* The top menu: three group buttons (Work, Insights, Setup). One group's screens show at a time; the button
+     opens it and a second click hides it. The current screen's group opens by itself when you arrive on it. */
+  let navOpen = null;
+
+  function groupOf(key) {
+    const v = views.get(key);
+    return v ? v.group : null;
+  }
+
+  /** The badges of a group, for its button, so they stay visible when the menu is closed: one small dot
+      (the numbers sit in different units: owners, credits, photos), with the details in the tooltip and for screen readers. */
+  function groupBadge(items) {
+    const parts = [];
+    items.forEach((v) => {
+      if (!v.badge || !state.summary) return;
+      let b = null;
+      try { b = v.badge(state.summary); } catch (e) { b = null; }
+      if (b === null || b === undefined || b === '' || b === 0 || b === false) return;
+      parts.push(v.label + ' ' + (typeof b === 'number' ? fmt.num(b) : String(b)));
+    });
+    if (!parts.length) return {html: '', sr: '', tip: ''};
+    return {html: '<span class="navdot" aria-hidden="true"></span>', sr: ' (' + parts.join(', ') + ')', tip: parts.join(', ')};
+  }
+
   function renderNav() {
     const nav = $('#nav');
     if (!nav) return;
-    nav.innerHTML = GROUPS.map(([group, label]) => {
-      const items = sortedViews(group);
-      if (!items.length) return '';
-      return '<div class="navgroup" role="group" aria-label="' + esc(label) + '"><span class="navlabel">' + esc(label) + '</span>' +
-        items.map((v) => '<a class="tab" href="#' + esc(v.key) + '" data-key="' + esc(v.key) + '"' +
-          (v.key === route.key ? ' aria-current="page"' : '') + '>' + esc(v.label) + badgeHtml(v) + '</a>').join('') +
-        '</div>';
+    const groups = GROUPS.map(([group, label]) => ({group, label, items: sortedViews(group)})).filter((g) => g.items.length);
+    if (navOpen && !groups.some((g) => g.group === navOpen)) navOpen = null;
+    const focused = document.activeElement && nav.contains(document.activeElement) ? document.activeElement : null;
+    const focusKey = focused ? (focused.getAttribute('data-navgroup') ? 'g:' + focused.getAttribute('data-navgroup') : 'k:' + focused.getAttribute('data-key')) : '';
+    nav.innerHTML = '<div class="navbar" role="group" aria-label="Menus">' + groups.map((g) => {
+      const open = navOpen === g.group;
+      const bd = groupBadge(g.items);
+      const here = route.key && groupOf(route.key) === g.group;
+      return '<button type="button" class="navbtn' + (here ? ' here' : '') + '" data-navgroup="' + esc(g.group) + '" aria-expanded="' + open +
+        '" aria-controls="navpanel-' + esc(g.group) + '"' + (bd.tip ? ' title="' + esc(bd.tip) + '"' : '') + '><span>' + esc(g.label) + '</span>' + bd.html +
+        (bd.sr ? '<span class="sr">' + esc(bd.sr) + '</span>' : '') + '<i class="navcaret" aria-hidden="true"></i></button>';
+    }).join('') + '</div>' + groups.map((g) => {
+      const open = navOpen === g.group;
+      return '<div class="navpanel" id="navpanel-' + esc(g.group) + '" role="group" aria-label="' + esc(g.label) + ' screens"' + (open ? '' : ' hidden') + '>' +
+        g.items.map((v) => '<a class="tab" href="#' + esc(v.key) + '" data-key="' + esc(v.key) + '"' +
+          (v.key === route.key ? ' aria-current="page"' : '') + '>' + esc(v.label) + badgeHtml(v) + '</a>').join('') + '</div>';
     }).join('');
-    const cur = nav.querySelector('[aria-current="page"]');
-    if (cur && nav.scrollWidth > nav.clientWidth) {
-      const left = cur.offsetLeft - nav.clientWidth / 2 + cur.offsetWidth / 2;
-      nav.scrollLeft = Math.max(0, left);
+    if (focusKey) {
+      const again = focusKey.startsWith('g:') ? nav.querySelector('[data-navgroup="' + focusKey.slice(2) + '"]')
+        : nav.querySelector('[data-key="' + focusKey.slice(2) + '"]');
+      if (again) again.focus({preventScroll: true});
     }
-    navEdges();
   }
 
-  /** Phones: show a chevron on whichever edge of the tab row still has screens past it. */
-  function navEdges() {
-    const nav = $('#nav');
-    const top = nav && nav.closest('.top');
-    if (!top) return;
-    const max = nav.scrollWidth - nav.clientWidth;
-    top.classList.toggle('nav-l', nav.scrollLeft > 4);
-    top.classList.toggle('nav-r', nav.scrollLeft < max - 4);
+  function toggleNav(group) {
+    navOpen = navOpen === group ? null : group;
+    renderNav();
+  }
+
+  function closeNav() {
+    if (!navOpen) return false;
+    navOpen = null;
+    renderNav();
+    return true;
   }
 
   function defaultView() {
@@ -642,6 +685,7 @@
       route.key = key;
       route.params = params;
       route.path = path;
+      navOpen = groupOf(key);
       renderNav();
       renderCurrent({scrollTop: true});
     }
@@ -864,6 +908,18 @@
   }
 
   function onKey(ev) {
+    if (ev.key === 'Escape' && navOpen && !drawer.id && !loginShown) {
+      const nav = $('#nav');
+      const inNav = nav && document.activeElement && nav.contains(document.activeElement);
+      if (inNav) {
+        const group = document.activeElement.closest('.navpanel') ? navOpen : null;
+        ev.preventDefault();
+        closeNav();
+        const btn = $('#nav [data-navgroup="' + (group || '') + '"]');
+        if (btn) btn.focus({preventScroll: true});
+        return;
+      }
+    }
     if (ev.key === 'Escape' && drawer.id && !loginShown) {
       const tag = (ev.target && ev.target.tagName) || '';
       if (tag === 'SELECT') return;
@@ -890,8 +946,10 @@
       ev.currentTarget.classList.toggle('scrolled', ev.currentTarget.scrollTop > 72);
     }, {passive: true});
     $('#market').addEventListener('change', (ev) => setMarket(ev.target.value));
-    $('#nav').addEventListener('scroll', navEdges, {passive: true});
-    window.addEventListener('resize', navEdges);
+    $('#nav').addEventListener('click', (ev) => {
+      const b = ev.target instanceof Element ? ev.target.closest('[data-navgroup]') : null;
+      if (b) toggleNav(b.getAttribute('data-navgroup'));
+    });
     checkHealth();
     try {
       await loadMarkets();
@@ -925,7 +983,7 @@
     rerender,
     esc,
     fmt,
-    ui: {moon, levelPips, levelLadder, channelBadges, bars, stat, empty, loading, error: errorBox, emptyMarket, dot, coverage},
+    ui: {logo, emptyHero, moon, levelPips, levelLadder, channelBadges, bars, stat, empty, loading, error: errorBox, emptyMarket, dot, coverage},
     /* extras */
     m: marketPath,
     setMarket,

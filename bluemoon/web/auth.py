@@ -215,13 +215,17 @@ LOGIN_PAGE = """<!doctype html>
 @media (prefers-color-scheme: dark){:root{--bg:#111318;--card:#1a1d24;--ink:#eceef2;--muted:#9aa1ad;--line:#2c313b;--accent:#7c9cff;--bad:#ff8a80}}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);
 color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:16px}
-form{width:100%;max-width:340px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
-h1{font-size:20px;margin:0 0 4px}p{margin:0 0 16px;color:var(--muted);font-size:14px}
+form{width:100%;max-width:360px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:32px}
+.logo{display:grid;place-items:center;position:relative;isolation:isolate;margin:0 auto 16px;width:96px}
+.logo::before{content:"";position:absolute;inset:-34%;z-index:-1;border-radius:50%;opacity:0;background:radial-gradient(circle,color-mix(in srgb,var(--accent) 38%,transparent) 0,color-mix(in srgb,var(--accent) 14%,transparent) 42%,transparent 70%)}
+@media (prefers-color-scheme: dark){.logo::before{opacity:1}}
+.logo img{display:block;width:96px;height:auto}
+h1{font-size:20px;margin:0 0 6px;text-align:center}p{text-align:center}p{margin:0 0 16px;color:var(--muted);font-size:14px}
 input{width:100%;margin-top:8px;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:inherit}
 button{width:100%;margin-top:12px;font:inherit;font-weight:600;padding:10px;border:0;border-radius:10px;background:var(--accent);color:#fff;cursor:pointer}
 .err{color:var(--bad);font-size:14px;min-height:21px;margin:8px 0 0}
 </style></head><body>
-<form id="f"><h1>Blue Moon Deal Finder</h1><p><!--HINT--></p>
+<form id="f"><div class="logo"><img src="/static/brand/stool-320.webp" width="211" height="320" alt=""></div><h1>Blue Moon Deal Finder</h1><p><!--HINT--></p>
 <!--EMAIL-->
 <input id="pw" type="password" autocomplete="current-password" aria-label="Team password" placeholder="Team password" required<!--PWFOCUS-->>
 <button type="submit">Sign in</button><div class="err" id="err" role="alert"></div></form>

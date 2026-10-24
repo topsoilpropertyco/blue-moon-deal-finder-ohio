@@ -5,15 +5,15 @@ Mark an item done (with the date) when it ships; never delete it.
 
 ## Design and usability (requested 2026-10-21)
 
-1. **Calmer top menu.** Replace the long menu row with three buttons: **Work** (or "Work to do"), **Insights** and **Setup** (or "Settings"). Clicking one opens its menu; clicking it again hides it.
-2. **More space.** The layout feels tight and dense. Make it elegant and spacious: more breathing room around sections, cards, rows and text.
-3. **Lighter feel, same depth.** Keep every deep technical capability, but make the app feel less heavy: show less at once, reveal detail on demand.
+1. **Calmer top menu.** Replace the long menu row with three buttons: **Work** (or "Work to do"), **Insights** and **Setup** (or "Settings"). Clicking one opens its menu; clicking it again hides it. **Done 2026-10-24:** three buttons, the current screen's group open by default, a dot on a closed button when it holds a count, Escape closes.
+2. **More space.** The layout feels tight and dense. Make it elegant and spacious: more breathing room around sections, cards, rows and text. **Done 2026-10-24:** spacing scale (`--s1`..`--s8`, `--pad`) used across all screens.
+3. **Lighter feel, same depth.** Keep every deep technical capability, but make the app feel less heavy: show less at once, reveal detail on demand. **Done 2026-10-24:** folded notes on the Deals Why panel, "What this step does" on Run, folded Settings panels and Exports help.
 4. **Run screen as one top-to-bottom list.** Replace the grid of boxes with one row per step, top to bottom, so nothing is missed. Make it obvious where you are now and what to do next. **Done 2026-10-21:** numbered steps from import to Crexi credits, each Done / To do / Waiting / Blocked, with "Do this next" at the top.
-5. **Blue Moon branding.** Use the Find / Fund / Operate stool logo with a bright, glowing blue moon behind it (like the bright moon photo Seth shared), and bring the moon more into the design style. Needs the logo file from Seth (put it in `docs/brand/`); the moon photo needs a license or a moon drawn in code.
+5. **Blue Moon branding.** Use the Find / Fund / Operate stool logo with a bright, glowing blue moon behind it (like the bright moon photo Seth shared), and bring the moon more into the design style. The logo is in `docs/brand/`. **Done 2026-10-24:** stool with a soft moon glow (dark mode) in the header, sign-in page, empty Deals and Import screens and the tab icon.
 
 ## Exports and the CRM (requested 2026-10-21)
 
-6. **Exports screen wording.** "Files for Brad" isn't quite right. Rework how the exports are named and grouped.
+6. **Exports screen wording.** "Files for Brad" isn't quite right. Rework how the exports are named and grouped. **Done 2026-10-24:** Work lists, Hand off, Fix data in a spreadsheet, Summary.
 7. **An export for Crexi.** A clear export meant for Crexi (ask Seth exactly what it should contain and how he'll use it, for example a list of properties to spend credits on).
 8. **Built around the end goal.** The flow is: enrich and improve the data, then put it into the CRM. Make the app's structure follow that path. Seth is thinking more about what this means. (2026-10-22: buy-box decisions, AI research and the Excel round trip are steps toward this.)
 

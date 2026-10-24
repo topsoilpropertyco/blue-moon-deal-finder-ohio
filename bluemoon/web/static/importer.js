@@ -326,8 +326,15 @@
     if (box) box.innerHTML = stepHtml();
   }
 
+  /** A market with nothing in it yet: the logo and one welcoming line above the drop zone. */
+  function welcome() {
+    const sum = BM.state.summary;
+    if (!sum || sum.properties !== 0 || !BM.ui.logo) return '';
+    return '<div class="im-welcome">' + BM.ui.logo('') + '<p class="note">Nothing here yet. Drop your first Crexi export below to begin.</p></div>';
+  }
+
   function page() {
-    return heading() + '<div class="im-wrap"><div data-im-step>' + stepHtml() + '</div>' +
+    return heading() + welcome() + '<div class="im-wrap"><div data-im-step>' + stepHtml() + '</div>' +
       '<section class="vw-sec"><h2 class="vw-sub">Past imports</h2><div data-im-history>' + historyHtml() + '</div></section></div>';
   }
 

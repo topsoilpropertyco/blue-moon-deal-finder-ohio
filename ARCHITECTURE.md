@@ -15,7 +15,7 @@ Crexi CSV/XLSX ─► ingest ─► properties (master list, every original colu
                              equity)      Claude vision)   rank)             contacts, credits)
                                 │
                                 ▼
-                 web dashboard  +  exports (xlsx/csv for Brad, CRM handoff, mailing list)
+                 web dashboard  +  exports (xlsx/csv work lists, CRM handoff, mailing list)
 ```
 
 ## Concepts
@@ -418,3 +418,8 @@ the toast's Undo posts `buybox/undo` with the `batch_id`). Set-aside rows have A
 hand Undo (`POST properties/{id}/buybox` with include / rules); on phones these buttons sit beside the card
 button, never inside it. The drawer's Buy box section (`property_detail.buybox`) shows each rule, the decisions
 with who and when, the history, and Add to buy box / Set aside / Undo: follow the rules.
+
+
+### Top menu and logo (2026-10-24)
+
+The top bar is three group buttons (Work, Insights, Setup; `GROUPS` in core.js) that open one group's screens at a time (`aria-expanded`, Escape closes; the current screen's group opens on arrival). A group's badges show as a dot on its button. The logo files live in `static/brand/` (served by the existing `/static/` route; CSP `img-src 'self'` already covers them). No routes changed.

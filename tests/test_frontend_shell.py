@@ -206,3 +206,23 @@ def test_a_refresh_after_a_write_never_shows_an_older_summary(tmp_path):
     assert out["emittedAfterOld"] == []          # the answer from before the write is not shown
     assert out["requestsAfter"] == 2             # a new request starts once the old one is done
     assert out["got"] == 2 and out["emitted"] == [2] and out["state"] == 2
+
+
+def test_top_menu_is_three_group_buttons_with_keyboard_support():
+    js = read("core.js")
+    assert "['work', 'Work'], ['insight', 'Insights'], ['setup', 'Setup']" in js
+    assert "aria-expanded" in js and "aria-controls" in js and "data-navgroup" in js
+    assert "ev.key === 'Escape' && navOpen" in js            # Escape closes the open menu
+    assert "navOpen = groupOf(key)" in js                     # the current screen's group opens by itself
+    assert "localStorage" not in js.split("function renderNav", 1)[1].split("function defaultView", 1)[0]
+    assert "navgroup" not in read("styles.css") and ".navbtn" in read("styles.css")
+
+
+def test_logo_files_exist_and_are_served_by_the_csp():
+    brand = STATIC / "brand"
+    for name in ("stool.webp", "stool-320.webp", "stool-120.webp", "stool-64.png"):
+        assert (brand / name).stat().st_size > 1000, name
+    assert (STATIC.parent.parent.parent / "docs/brand/find-fund-operate-stool.webp").exists()
+    assert "/static/brand/stool-120.webp" in read("index.html")
+    from bluemoon.web.app import CSP
+    assert "img-src 'self'" in CSP

@@ -772,5 +772,7 @@ def test_import_and_exports_screens_show_the_round_trip(settings, sample_csv, tm
     assert "Undo the buy box decisions" not in r["undone"] and "Undone" in r["undone"]
     undo = [c for c in r["calls"] if c["key"] == f"POST {base}/buybox/undo"]
     assert undo and undo[0]["body"] == {"batch_id": batch}
-    assert "Fix data in a spreadsheet, then bring it back" in r["exports"]
+    for heading in ("Work lists", "Hand off", "Fix data in a spreadsheet", "Summary"):   # the four Exports groups
+        assert f'<h2 class="vw-sub">{heading}</h2>' in r["exports"], heading
+    assert "Files for Brad" not in r["exports"] and "for Brad" not in r["exports"].split("Hand off", 1)[0]
     assert 'data-ex="review"' in r["exports"] and 'value="drive_time:76-90"' in r["exports"]

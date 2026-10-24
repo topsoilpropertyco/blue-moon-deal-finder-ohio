@@ -11,6 +11,8 @@ Everything runs on the Mac Mini. Private data (Crexi exports, owner names, photo
 
 ## What's inside
 
+The top bar has three buttons: **Work**, **Insights** and **Setup**. Click one to open its screens; click it again (or press Escape) to hide them. The group you are in is open by itself, and a dot on a closed button means something inside has a count waiting (hover it to see which).
+
 | Screen | What it's for |
 |---|---|
 | **Deals** | Every property ranked by Blue Moon score (how worth chasing the owner is), with contact level, next DRILL step, size, drive time, photo check, rent fit and owner type. List or drive-time rings. |
@@ -18,7 +20,11 @@ Everything runs on the Mac Mini. Private data (Crexi exports, owner names, photo
 | **Credits** | Crexi credits left this month and which owners to spend them on. |
 | **Photo review** | The photos the AI wasn't sure about. Answer with number keys. |
 | **Funnel, Analytics, The score** | How the list narrows, what's in the data, how the score works and learns. |
-| **Import, Run, Exports, Data sources, Settings** | Add Crexi files, run steps (cost estimate first), download files for Brad and the CRM, the free source list, settings. |
+| **Import, Run, Exports, Data sources, Settings** | Add Crexi files, run steps (cost estimate first), download files (below), the free source list, settings. |
+
+**Exports** groups the downloads by what you are about to do: **Work lists** (ranked list, DRILL worklist, mailing list), **Hand off** (CRM handoff, set-aside zip), **Fix data in a spreadsheet** (download, fix in Excel, drop it back on Import) and **Summary** (run summary). Each one says what it is and when to use it.
+
+**Logo:** the Find / Fund / Operate stool is in `docs/brand/` (original) and, with the white background removed, in `bluemoon/web/static/brand/` (header, sign-in page, empty screens, browser tab icon). `python3 scripts/make_logo.py` rebuilds those files from the original.
 
 The switcher in the top bar moves between markets: apartments, self-storage, warehouses, campgrounds and RV parks, mobile home parks, outdoor storage and raw land. Every market has the same screens.
 
@@ -127,7 +133,7 @@ uv run run.py parcels --limit 5 --dry-run   # County records: what it would look
 uv run run.py parcels --limit 5   # County records for 5 properties; then without --limit
 uv run run.py research --limit 5 --dry-run   # AI research: what it would do (owners, properties, minutes)
 uv run run.py research --limit 5  # AI research on 5 owners; then without --limit (asks first over 50 properties)
-uv run run.py export              # files for Brad in output/<market>/ (--dry-run: say what it would write)
+uv run run.py export              # the export files in output/<market>/ (--dry-run: say what it would write)
 uv run run.py status              # where every market stands
 uv run run.py calibrate           # re-check the photos you reviewed; updates the Scorecard (90% check)
 ```
@@ -167,7 +173,7 @@ Running drive, rent, photos or classify on its own updates the buy box, scores a
 - **Credits:** one plan for the whole Crexi account (credits are shared by every market), with how many of the 500 are left and the daily pace to spend them all. Owners rank by score x Crexi's hit rate for their owner type; owners with an untested phone wait in Reach out first. If the possible owners can't use every credit, the rest go to buy-box owners with no name yet, then the best owners just outside the buy box (`crexi: plan_fallbacks`). How to spend one: **Open in Crexi** on the next owner in the plan, unlock the owner's contact info in Crexi (the app never logs in to Crexi), then **Used a credit** and record what Crexi showed.
 - **Photo review:** the photos the AI was unsure about (the AI looks first: run **Photo check** on the Run screen, and only the ones it can't call come here). Each card shows the full address with city, state and zip. If the pictures don't help, find one yourself (Google, the property's website) and use **Add a photo** (or copy it and press Ctrl/Cmd+V on the page): it shows first and the photo check reads it first. JPEG or PNG only. Press 1-5 to answer, S to skip. **Scorecard** shows whether the AI passes the 90% check.
 - **Funnel, Analytics, The score:** how the list narrows, what's in the data, and how the Blue Moon score works. Mark how deals ended ("How did it end?" in the property panel) and the score tunes itself.
-- **Exports:** `ranked_list.xlsx` for Brad (Google Sheets: File > Import > Upload), plus the CSVs. The ranked list explains each score ("Why this score") and the photo check ("Photo reasons"), and after "Why set aside" shows the buy-box decision ("Rules", "Added by hand", "Rule waived: too far to drive", "Set aside by hand"), what the rules said, who decided and when, and the set-aside groups. Properties set aside by hand are in `excluded_manual.csv`. Every property list ends with "Property ID" and "Row as of" (when that row last changed), so an edited copy can come back in (see "Fix data in Excel and bring it back" above). `mailing_list.csv` holds buy-box owners whose mailing address is untested plus any owner whose next step is a letter, never a do-not-contact or wrong address. Getting `crm_handoff.csv` from the Exports screen marks those owners as handed off (a plain link to the file changes nothing).
+- **Exports:** `ranked_list.xlsx` (Google Sheets: File > Import > Upload), plus the CSVs. The ranked list explains each score ("Why this score") and the photo check ("Photo reasons"), and after "Why set aside" shows the buy-box decision ("Rules", "Added by hand", "Rule waived: too far to drive", "Set aside by hand"), what the rules said, who decided and when, and the set-aside groups. Properties set aside by hand are in `excluded_manual.csv`. Every property list ends with "Property ID" and "Row as of" (when that row last changed), so an edited copy can come back in (see "Fix data in Excel and bring it back" above). `mailing_list.csv` holds buy-box owners whose mailing address is untested plus any owner whose next step is a letter, never a do-not-contact or wrong address. Getting `crm_handoff.csv` from the Exports screen marks those owners as handed off (a plain link to the file changes nothing).
 - **Settings / Data sources:** read-only settings, which keys are set (yes or no only), and every free source by DRILL stage, with the county links.
 
 ## What it costs

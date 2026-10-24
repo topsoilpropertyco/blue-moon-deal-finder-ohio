@@ -50,6 +50,12 @@
     return '<div class="panel' + (cls ? ' ' + cls : '') + '"><h2>' + esc(title) + '</h2>' + inner + '</div>';
   }
 
+  /** A panel that starts folded: its title is the button. For read-only detail nobody needs every day. */
+  function fold(title, hint, inner, cls) {
+    return '<details class="panel se-fold' + (cls ? ' ' + cls : '') + '"><summary><h2>' + esc(title) + '</h2>' +
+      (hint ? '<span class="note">' + esc(hint) + '</span>' : '') + '</summary><div class="se-fold-body">' + inner + '</div></details>';
+  }
+
   function kv(pairs) {
     return '<dl class="kv">' + pairs.filter(Boolean).map(([k, v]) => '<dt>' + esc(k) + '</dt><dd>' + v + '</dd>').join('') + '</dl>';
   }
@@ -121,7 +127,7 @@
     const backend = (health && health.vision_backend) || v.backend || '';
     const cli = (v.claude_cli || {});
     const found = health ? !!health.claude_cli : null;
-    return panel('Photo check', kv([
+    return fold('Photo check', 'What runs the photo check', kv([
       ['Runs on', esc(BACKENDS[backend] || backend || 'Unknown')],
       backend === 'claude_cli' ? ['Claude Code found', found === null ? 'Unknown' : yesNo(found)] : null,
       backend === 'claude_cli' && cli.model ? ['Model', esc(cli.model)] : null,
@@ -148,7 +154,7 @@
     }).join('');
     const note = usage === null ? 'Usage this month could not be loaded.' :
       'Calls this month across all markets. After the free calls, Google bills the price per 1,000.';
-    return panel('Google free usage this month', '<p class="note vw-tight">' + esc(note) + '</p>' +
+    return fold('Google free usage this month', 'Calls used and free calls left', '<p class="note vw-tight">' + esc(note) + '</p>' +
       '<div class="vw-scroll"><table class="wt"><thead><tr><th>Service</th><th class="c">Used</th><th class="c">Free a month</th>' +
       '<th class="c">Free left</th><th class="c">Per 1,000 after</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<p class="note vw-tight">Prices are in config.yaml (google.prices). Check them against Google\'s pricing page now and then.</p>');
@@ -157,7 +163,7 @@
   function pathsPanel(cfg) {
     const paths = cfg.paths || {};
     const rows = PATHS.filter(([k]) => paths[k]).map(([k, what]) => [what, '<code class="se-code">' + esc(paths[k]) + '</code>']);
-    return panel('Where the data lives', kv(rows) +
+    return fold('Where the data lives', 'Folders on the Mac Mini', kv(rows) +
       '<p class="note vw-tight">Inside the Blue Moon folder on the Mac Mini. All private: none of it goes to GitHub.</p>');
   }
 
@@ -165,7 +171,7 @@
     const safety = cfg.safety || {};
     const crexi = cfg.crexi || {};
     const scoring = cfg.scoring || {};
-    return panel('Safety and limits', kv([
+    return fold('Safety and limits', 'Ask-first limit, credits, score odds', kv([
       ['Ask before paid runs over', esc(num(safety.confirm_over_properties || 50) + ' properties')],
       ['Crexi credits a month', esc(num(crexi.credits_per_month || 0) + ' (no roll-over)')],
       ['Blue Moon starting odds', esc(BM.fmt.pct(scoring.base_rate))],
@@ -174,7 +180,7 @@
   }
 
   function howPanel() {
-    return panel('How to change a setting',
+    return fold('How to change a setting', 'Three steps, with copy-paste commands',
       '<ol class="se-steps"><li><p>Open the settings file. Most settings are in <b>config.yaml</b>; buy boxes and score weights are in ' +
       '<b>config/asset_classes.yaml</b>; DRILL stages in <b>config/drill.yaml</b>; data sources in <b>config/sources.yaml</b>.</p>' +
       H.command('cd ' + APP_FOLDER + ' && open -e config.yaml') +

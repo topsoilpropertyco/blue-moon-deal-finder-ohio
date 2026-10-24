@@ -173,7 +173,8 @@
       '<b>' + fmt.num(sa.total) + '</b> are set aside (never deleted)' +
       (hand.set_aside ? ', ' + fmt.num(hand.set_aside) + ' of them by you' : '') + '. <span class="why-toggle">Why?</span></summary>' +
       '<ul class="why-list">' + rows + '</ul>' +
-      notes.map((n) => '<p class="note">' + esc(n) + '</p>').join('') +
+      '<details class="im-more why-notes"><summary>How to read these numbers</summary>' +
+      notes.map((n) => '<p class="note">' + esc(n) + '</p>').join('') + '</details>' +
       '<div class="why-acts"><button type="button" class="btn" data-why-view="excluded">See the ' + fmt.num(sa.total) + ' set aside</button>' +
       '<button type="button" class="btn quiet" data-why-view="everything">See all ' + fmt.num(s.properties) + '</button></div></details>';
   }

@@ -1,4 +1,4 @@
-/* Exports (Setup): download each file for Brad, the CRM and the mail house. Every download is built
+/* Exports (Setup): download the files, grouped as Work lists, Hand off, Fix data in a spreadsheet and Summary. Every download is built
  * fresh from the current data (a copy also lands in output/<market>/ on the Mac Mini).
  * "Fix data in a spreadsheet" explains the round trip (download, fix in Excel, drop it on Import) and offers
  * one set-aside group as a small review workbook (GET /export/review.xlsx?bucket=<group key>).
@@ -14,48 +14,63 @@
   }
   const {esc, toNum, num, plural} = H;
 
-  /* [file, title, what it is for, count(summary) -> text or ''] */
-  const FILES = [
-    ['ranked_list.xlsx', 'Ranked list for Brad', 'Excel workbook for Brad and Google Sheets: the ranked buy box, every property, the set-aside ones, ' +
-      'the DRILL worklist and a summary, each on its own sheet, with every original Crexi column.',
-    (s) => (toNum(s.in_buybox) ? plural(s.in_buybox, 'property', 'properties') + ' ranked' : '')],
-    ['ranked_list.csv', 'Ranked list (CSV)', 'The same list as one plain CSV, ranked ones first. Opens anywhere.',
-      (s) => (toNum(s.properties) ? plural(s.properties, 'row') : '')],
-    ['crm_handoff.csv', 'CRM handoff', 'Confirmed owners (level 3) to load into your CRM. Downloading it marks them as handed off.',
-      (s) => plural(toNum(s.levels && s.levels['3']) || 0, 'confirmed owner')],
-    ['mailing_list.csv', 'Mailing list', 'Names and mailing addresses for owners whose next step is a letter.', () => ''],
-    ['drill_worklist.csv', 'DRILL worklist', 'What to do next for every owner still being worked, best first.', () => ''],
-    ['excluded.zip', 'Set-aside properties', 'One CSV per filter (too far, wrong size, built too early...) with the reason. Nothing is ever deleted.',
-      (s) => (toNum(s.excluded) ? plural(s.excluded, 'property', 'properties') : '')],
-    ['run_summary.md', 'Run summary', 'A one-page report: counts per step and color, API calls and cost this month, and how far the credits reach.', () => ''],
+  /* The Exports screen, in four groups. [file, title, what it is, when to use it, count(summary) -> text or '']
+     The file names are fixed (the server, Brad's Sheets and the tests use them); only the wording here changes. */
+  const GROUPS = [
+    {key: 'work', title: 'Work lists', blurb: 'The lists you work from day to day.', files: [
+      ['ranked_list.xlsx', 'Ranked list (Excel)', 'Every property, best first, with the buy box, the set-aside ones and the DRILL worklist on their own sheets.',
+        'you want to review the list, or open it in Google Sheets.',
+        (s) => (toNum(s.in_buybox) ? plural(s.in_buybox, 'property', 'properties') + ' ranked' : '')],
+      ['ranked_list.csv', 'Ranked list (plain CSV)', 'The same ranked list as one plain file.',
+        'a tool cannot open Excel files.',
+        (s) => (toNum(s.properties) ? plural(s.properties, 'row') : '')],
+      ['drill_worklist.csv', 'DRILL worklist', 'What to do next for every owner still being worked, best first.',
+        'you are about to make calls, write letters or spend Crexi credits.', () => ''],
+      ['mailing_list.csv', 'Mailing list', 'Names and mailing addresses of owners whose next step is a letter.',
+        'you are sending letters or giving the addresses to the mail house.', () => ''],
+    ]},
+    {key: 'handoff', title: 'Hand off', blurb: 'Files that leave Blue Moon: to your CRM, or to someone who checks the filters.', files: [
+      ['crm_handoff.csv', 'CRM handoff', 'Confirmed owners (level 3), ready to load into your CRM.',
+        'a conversation confirmed the owner. Downloading it marks them as handed off.',
+        (s) => plural(toNum(s.levels && s.levels['3']) || 0, 'confirmed owner')],
+      ['excluded.zip', 'Set-aside properties (zip)', 'One CSV per filter (too far, wrong size, built too early...) with the reason. Nothing is ever deleted.',
+        'you want to double-check what the filters left out.',
+        (s) => (toNum(s.excluded) ? plural(s.excluded, 'property', 'properties') : '')],
+    ]},
   ];
+  const SUMMARY = ['run_summary.md', 'Run summary', 'A one-page report: counts per step and color, API calls and cost this month, and how far the credits reach.',
+    'you want the numbers at a glance, or something to paste into an update.', () => ''];
 
   const busy = new Set();
 
-  function fileRow([name, title, what, count], s) {
+  function fileRow([name, title, what, when, count], s) {
     const extra = count(s || {});
     const working = busy.has(name);
     return '<li class="ex-row"><div class="ex-text"><div class="ex-title"><b>' + esc(title) + '</b>' +
       '<code class="ex-name">' + esc(name) + '</code>' + (extra ? '<span class="pill">' + esc(extra) + '</span>' : '') + '</div>' +
-      '<p class="note vw-tight">' + esc(what) + '</p></div>' +
+      '<p class="note vw-tight">' + esc(what) + ' <span class="ex-when">Use it when ' + esc(when) + '</span></p></div>' +
       '<button type="button" class="btn' + (name === 'ranked_list.xlsx' ? ' primary' : '') + '" data-ex="' + esc(name) + '"' +
       (working ? ' disabled' : '') + '>' + (working ? 'Preparing…' : 'Download') + '</button></li>';
   }
 
+  function group(title, blurb, inner) {
+    return '<section class="ex-group"><h2 class="vw-sub">' + esc(title) + '</h2><p class="note ex-blurb">' + esc(blurb) + '</p>' + inner + '</section>';
+  }
+
   function heading() {
-    return H.head('Setup · Exports', 'Files to share', [
+    return H.head('Setup · Exports', 'Files to download', [
       'Each download is built fresh from what is in the app right now.',
-      'The ranked list is the one for Brad.',
+      'Pick the group that matches what you are about to do.',
     ]);
   }
 
   function sheetsNote() {
-    return '<div class="panel ex-sheets"><h2>Put the ranked list in Google Sheets</h2>' +
+    return '<details class="ex-more"><summary>Put the ranked list in Google Sheets</summary>' +
       '<ol class="ex-steps"><li>Download <b>ranked_list.xlsx</b> above.</li>' +
       '<li>Open <a href="https://sheets.google.com" target="_blank" rel="noopener noreferrer">Google Sheets</a> and open Brad\'s sheet (or a blank one).</li>' +
       '<li>Choose <b>File &gt; Import &gt; Upload</b> and pick the file.</li>' +
       '<li>Pick <b>Replace spreadsheet</b> to refresh it, or <b>Insert new sheet(s)</b> to keep the old tabs.</li></ol>' +
-      '<p class="note vw-tight">Copies are also saved on the Mac Mini in the output folder. They hold owner data, so they never go to GitHub.</p></div>';
+      '<p class="note vw-tight">Copies are also saved on the Mac Mini in the output folder. They hold owner data, so they never go to GitHub.</p></details>';
   }
 
   /** The set-aside groups with properties in them, from the summary's Why? panel data. */
@@ -72,23 +87,27 @@
   function roundTripNote(s) {
     const opts = groupOptions(s);
     const working = busy.has('review');
-    return '<div class="panel ex-sheets"><h2>Fix data in a spreadsheet, then bring it back</h2>' +
+    return '<div class="panel ex-sheets">' +
       '<ol class="ex-steps"><li>Download <b>ranked_list.xlsx</b> above, or just one set-aside group below.</li>' +
       '<li>In Excel, fix <b>Units</b>, <b>Building sq ft</b>, <b>Year built</b>, <b>Property type</b>, <b>County</b>, <b>ZIP</b> or ' +
       '<b>Lot acres</b>. In <b>Buy box decision</b> you can type <b>Add to buy box</b>, <b>Set aside</b> or <b>Follow the rules</b>.</li>' +
       '<li>Save it and drop it on the Import screen. It shows what will change before anything is saved.</li></ol>' +
-      '<p class="note vw-tight">Only those columns are read. Nothing is added or deleted, a row changed in the app after you ' +
-      'downloaded the file is left alone, and a later Crexi import keeps your fixes.</p>' +
       (opts.length ? '<div class="ex-review"><label class="sr" for="ex-group">Set-aside group</label>' +
         '<select class="select" id="ex-group" data-ex-group>' + opts.join('') + '</select>' +
         '<button type="button" class="btn" data-ex="review"' + (working ? ' disabled' : '') + '>' +
         (working ? 'Preparing…' : 'Download this group') + '</button></div>' : '') +
-      '<div class="bar vw-actions"><button class="btn quiet" type="button" data-go="import">Go to Import</button></div></div>';
+      '<div class="bar vw-actions"><button class="btn quiet" type="button" data-go="import">Go to Import</button></div>' +
+      '<details class="ex-more"><summary>What is read, and what is left alone</summary>' +
+      '<p class="note vw-tight">Only those columns are read. Nothing is added or deleted, a row changed in the app after you ' +
+      'downloaded the file is left alone, and a later Crexi import keeps your fixes.</p></details></div>';
   }
 
   function page(s) {
-    return heading() + '<ul class="ex-list panel">' + FILES.map((f) => fileRow(f, s)).join('') + '</ul>' + sheetsNote() +
-      roundTripNote(s);
+    const lists = GROUPS.map((g) => group(g.title, g.blurb,
+      '<ul class="ex-list panel">' + g.files.map((f) => fileRow(f, s)).join('') + '</ul>' + (g.key === 'work' ? sheetsNote() : ''))).join('');
+    return heading() + lists +
+      group('Fix data in a spreadsheet', 'Download, correct it in Excel, and drop it back on Import. Use it when Crexi has a unit count, year or type wrong.', roundTripNote(s)) +
+      group('Summary', 'The numbers on one page.', '<ul class="ex-list panel">' + fileRow(SUMMARY, s) + '</ul>');
   }
 
   function fileName(res, name) {

@@ -1,4 +1,4 @@
-"""Files for Brad, the CRM and the mail house, written to output/<market>/.
+"""Files for your CRM, the mail house and your own lists, written to output/<market>/.
 
     export_market(conn, "apartments-springfield-oh")      # -> {file name: Path}
     export_zip(conn, "apartments-springfield-oh", "excluded")

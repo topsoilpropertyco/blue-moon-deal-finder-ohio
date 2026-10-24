@@ -479,7 +479,8 @@
     const showWork = !off && !(st && (st.state === 'wait' || (st.state === 'blocked' && step.key === 'photos')));
     return '<div class="ru-top"><h2>' + esc(step.title) + '</h2>' + (step.go ? '<span class="pill">You</span>' : costChip(step, c)) + '</div>' +
       statusHtml(step, c) +
-      '<p class="note vw-tight">' + step.what(c) + '</p>' +
+      (step.wide ? '<p class="note vw-tight">' + step.what(c) + '</p>'
+        : '<details class="im-more ru-help"><summary>What this step does</summary><p class="note vw-tight">' + step.what(c) + '</p></details>') +
       (off || step.go ? '' : layerHtml(step, c)) +
       (note ? '<p class="note vw-tight ru-note">' + esc(note) + '</p>' : '') +
       (showWork || isActive(S.jobs[step.key]) ? buttonsHtml(step, c) : '') +
