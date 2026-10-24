@@ -1,5 +1,7 @@
 # Secrets
 .env
+# Your own settings on this computer (they win over config.yaml, so updates never clash with them)
+config.local.yaml
 .env.*
 !.env.example
 

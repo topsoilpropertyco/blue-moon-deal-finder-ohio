@@ -229,3 +229,14 @@ def test_photo_check_with_nothing_to_check_says_what_to_do(conn, settings):
     from bluemoon.imagery.vision import MockBackend, classify_properties
     res = classify_properties(conn, MARKET, backend=MockBackend())
     assert res["classified"] == 0 and "nothing new to check" in res["message"] and "Photos" in res["message"]
+
+
+def test_config_local_yaml_wins_over_config_yaml(tmp_path):
+    import shutil
+    from bluemoon.config import REPO_ROOT, Settings
+    shutil.copy(REPO_ROOT / "config.yaml", tmp_path / "config.yaml")
+    shutil.copytree(REPO_ROOT / "config", tmp_path / "config")
+    (tmp_path / "config.local.yaml").write_text("share:\n  provider: ngrok\n  ngrok_domain: x.ngrok-free.dev\nsafety:\n  confirm_over_properties: 7\n")
+    s = Settings(root=tmp_path)
+    assert s.raw["share"]["provider"] == "ngrok" and s.raw["safety"]["confirm_over_properties"] == 7
+    assert s.raw["safety"]["confirm_clears_over"] == 10      # the rest of config.yaml still applies

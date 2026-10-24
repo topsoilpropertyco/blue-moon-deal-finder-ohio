@@ -1,0 +1,7 @@
+# Copy to config.local.yaml to keep YOUR settings here. Anything in it wins over config.yaml, and updates
+# from GitHub never touch it (so `git pull` never complains about config.yaml).
+# Only put the settings you change; for example, your permanent ngrok address:
+#
+# share:
+#   provider: ngrok
+#   ngrok_domain: something.ngrok-free.dev

@@ -94,6 +94,8 @@ class Settings:
         self.root = Path(root) if root else project_root()
         load_dotenv(self.root / ".env", override=False)
         self.raw: dict = _load_yaml(Path(config_path) if config_path else self.root / "config.yaml")
+        if not config_path:   # your own settings (config.local.yaml, never in git) win over config.yaml
+            self.raw = _deep_merge(self.raw, _load_yaml(self.root / "config.local.yaml"))
         ac_raw = _load_yaml(self.root / "config" / "asset_classes.yaml")
         self.drill: dict = _load_yaml(self.root / "config" / "drill.yaml")
         self.sources: dict = _load_yaml(self.root / "config" / "sources.yaml")

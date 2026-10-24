@@ -81,7 +81,7 @@ The link changes whenever sharing restarts (for example after the Mac restarts),
 scripts/install_ngrok.sh
 uv run run.py key ngrok
 ```
-3. In `config.yaml`, under `share:`, set `provider: ngrok` and `ngrok_domain: something.ngrok-free.app`, then restart sharing: `launchctl kickstart -k gui/$(id -u)/com.bluemoon.share`. Settings then shows the same address every time.
+3. Put your own settings in `config.local.yaml` (copy `config.local.yaml.example`; it is never in git and wins over `config.yaml`, so updates never clash with it): `share:` with `provider: ngrok` and `ngrok_domain: something.ngrok-free.dev`. Then restart sharing: `launchctl kickstart -k gui/$(id -u)/com.bluemoon.share`. Settings then shows the same address every time. (Don't edit `config.yaml` itself: `git pull` stops when you and an update both changed it.)
 
 To go back to the temporary Cloudflare link, set `provider: cloudflare`.
 
