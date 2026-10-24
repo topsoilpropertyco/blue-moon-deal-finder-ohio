@@ -280,7 +280,7 @@ def on_this_computer(peer: str | None, host_header: str, headers) -> bool:
     return is_local_host(host_header)
 
 
-def client_ip(peer: str | None, headers) -> str:
+def client_ip(peer: str | None, headers) -> str:  # noqa: D401
     """The visitor's address for login throttling. Behind the tunnel every request comes from this computer,
     so trust Cloudflare's CF-Connecting-IP only when the direct peer is this computer."""
     peer = peer or "unknown"
@@ -288,6 +288,9 @@ def client_ip(peer: str | None, headers) -> str:
         cf = (headers.get("cf-connecting-ip") or "").strip()
         if cf:
             return cf
+        fwd = (headers.get("x-forwarded-for") or "").split(",")[-1].strip()   # ngrok adds the visitor last
+        if fwd:
+            return fwd
     return peer
 
 
@@ -303,6 +306,32 @@ def find_cloudflared() -> str | None:
     return None
 
 
+NGROK_PLACES = ("/opt/homebrew/bin/ngrok", "/usr/local/bin/ngrok", str(Path.home() / ".local" / "bin" / "ngrok"))
+NGROK_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+$")
+
+
+def find_ngrok() -> str | None:
+    found = shutil.which("ngrok")
+    if found:
+        return found
+    for place in NGROK_PLACES:
+        if Path(place).is_file() and os.access(place, os.X_OK):
+            return place
+    return None
+
+
+def share_settings(settings: Settings | None = None) -> dict:
+    """`share:` from config.yaml: provider (cloudflare | ngrok) and ngrok_domain (your free permanent address)."""
+    raw = ((settings or get_settings()).raw.get("share") or {})
+    domain = str(raw.get("ngrok_domain") or "").strip().lower().removeprefix("https://").strip("/")
+    provider = str(raw.get("provider") or "cloudflare").strip().lower()
+    return {"provider": provider if provider in ("cloudflare", "ngrok") else "cloudflare", "ngrok_domain": domain}
+
+
+def ngrok_command(binary: str, port: int, domain: str) -> list[str]:
+    return [binary, "http", str(int(port)), f"--url=https://{domain}", "--log=stdout", "--log-format=logfmt"]
+
+
 def build_command(binary: str, port: int) -> list[str]:
     return [binary, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{int(port)}"]
 
@@ -314,7 +343,16 @@ def plan(settings: Settings | None = None) -> dict:
     emails = list_emails(s)
     mode = "team" if emails else "password"
     problem = None
-    if not find_cloudflared():
+    cfg = share_settings(s)
+    if cfg["provider"] == "ngrok":
+        if not cfg["ngrok_domain"] or not NGROK_DOMAIN_RE.match(cfg["ngrok_domain"]):
+            problem = ("ngrok is chosen but your free permanent address isn't set. "
+                       "Set share: ngrok_domain: in config.yaml (see the README, 'A link that never changes').")
+        elif not find_ngrok():
+            problem = "ngrok isn't installed. Install it with: scripts/install_ngrok.sh"
+        elif not has_secret("NGROK_AUTHTOKEN"):
+            problem = "ngrok needs your free account token. Save it with: uv run run.py key ngrok"
+    elif not find_cloudflared():
         problem = ("Cloudflare's free connector (cloudflared) isn't installed. "
                    "Install it with: scripts/install_cloudflared.sh")
     elif not has_secret("APP_PASSWORD"):
@@ -330,9 +368,15 @@ def run(settings: Settings | None = None, on_url: Callable[[str], None] | None =
     p = plan(s)
     if p["problem"]:
         raise ShareError(p["problem"])
-    cmd = build_command(find_cloudflared(), p["port"])
+    cfg = share_settings(s)
+    env = None
+    if cfg["provider"] == "ngrok":
+        cmd = ngrok_command(find_ngrok(), p["port"], cfg["ngrok_domain"])
+        env = {**os.environ, "NGROK_AUTHTOKEN": os.environ.get("NGROK_AUTHTOKEN", "")}
+    else:
+        cmd = build_command(find_cloudflared(), p["port"])
     echo = echo or (lambda line: None)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
 
     def _stop(signum, frame):  # pragma: no cover - signal path
         proc.terminate()
@@ -343,9 +387,14 @@ def run(settings: Settings | None = None, on_url: Callable[[str], None] | None =
         for line in proc.stdout:  # type: ignore[union-attr]
             echo(line.rstrip())
             if url is None:
-                m = URL_RE.search(line)
-                if m:
-                    url = m.group(0)
+                if cfg["provider"] == "ngrok":
+                    # the address is fixed; wait until ngrok says the tunnel is up
+                    m = re.search(r"msg=\"?started tunnel", line) or re.search(r"url=https://\S+", line)
+                    url = f"https://{cfg['ngrok_domain']}" if m else None
+                else:
+                    m = URL_RE.search(line)
+                    url = m.group(0) if m else None
+                if url:
                     _save_state(url, p["mode"], p["emails"], s)
                     if on_url:
                         on_url(url)

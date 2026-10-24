@@ -201,3 +201,7 @@ owners:
   portfolio_exempt_types: [institutional, government]
   institutional_names: []        # extra big-operator names
   overrides: {}                  # "EXACT OWNER NAME": owner_type  (fix a wrong guess)
+
+share:
+  provider: cloudflare           # cloudflare = a new temporary link each time | ngrok = your free permanent address
+  ngrok_domain: ""               # for ngrok: the free address from dashboard.ngrok.com > Domains, e.g. something.ngrok-free.app

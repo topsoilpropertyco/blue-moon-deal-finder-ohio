@@ -1006,7 +1006,7 @@ def host_allowed(host_header: str) -> bool:
     """Is this a name the dashboard may be opened under? Raw IP addresses (DNS rebinding needs a domain name),
     localhost, this computer's own name, Tailscale names and app.allowed_hosts in config.yaml."""
     h = _host_name(host_header)
-    if not h or h in ("localhost", "testserver") or h.endswith((".ts.net", ".localhost", ".trycloudflare.com")):
+    if not h or h in ("localhost", "testserver") or h.endswith((".ts.net", ".localhost", ".trycloudflare.com", ".ngrok-free.app", ".ngrok-free.dev", ".ngrok.app", ".ngrok.dev", ".ngrok.io")):
         return True
     try:
         ipaddress.ip_address(h)

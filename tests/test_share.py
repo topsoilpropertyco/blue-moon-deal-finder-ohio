@@ -206,3 +206,35 @@ def test_password_only_cookie_needs_an_email_once_people_are_listed(settings, mo
         share.add_emails(["pat@example.com"])
         r = c.get("/api/markets")
         assert r.status_code == 401 and r.json()["email"] is True
+
+
+def test_ngrok_gives_a_permanent_address_and_needs_its_setup(settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("APP_PASSWORD", "four random words here")
+    monkeypatch.setenv("NGROK_AUTHTOKEN", "")
+    monkeypatch.setattr(share, "find_cloudflared", lambda: "/x/cloudflared")
+    settings.raw["share"] = {"provider": "ngrok", "ngrok_domain": ""}
+    assert "isn't set" in share.plan(settings)["problem"]
+    settings.raw["share"] = {"provider": "ngrok", "ngrok_domain": "https://Deals-Example.ngrok-free.app/"}
+    assert share.share_settings(settings)["ngrok_domain"] == "deals-example.ngrok-free.app"
+    monkeypatch.setattr(share, "find_ngrok", lambda: None)
+    assert "install_ngrok" in share.plan(settings)["problem"]
+    monkeypatch.setattr(share, "find_ngrok", lambda: "/x/ngrok")
+    assert "key ngrok" in share.plan(settings)["problem"]
+    monkeypatch.setenv("NGROK_AUTHTOKEN", "tok" * 10)
+    assert share.plan(settings)["problem"] is None
+    assert share.ngrok_command("/x/ngrok", 8765, "deals-example.ngrok-free.app")[:3] == [
+        "/x/ngrok", "http", "8765"]
+
+
+def test_run_with_ngrok_reports_the_fixed_address(settings, monkeypatch, tmp_path):
+    fake = tmp_path / "ngrok"
+    fake.write_text('#!/bin/sh\necho \'t=1 lvl=info msg="started tunnel" obj=tunnels url=https://deals-example.ngrok-free.app\'\nsleep 0.2\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("APP_PASSWORD", "four random words here")
+    monkeypatch.setenv("NGROK_AUTHTOKEN", "tok" * 10)
+    monkeypatch.setattr(share, "find_ngrok", lambda: str(fake))
+    settings.raw["share"] = {"provider": "ngrok", "ngrok_domain": "deals-example.ngrok-free.app"}
+    seen = {}
+    assert share.run(settings, on_url=lambda u: seen.setdefault("url", u)) == 0
+    assert seen["url"] == "https://deals-example.ngrok-free.app"
+    assert share.client_ip("127.0.0.1", {"x-forwarded-for": "9.9.9.9, 203.0.113.7"}) == "203.0.113.7"

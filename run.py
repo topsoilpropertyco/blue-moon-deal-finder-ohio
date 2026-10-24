@@ -430,7 +430,7 @@ def cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
 
 
 KEY_ENV = {"google": ("GOOGLE_MAPS_API_KEY", "Google Maps"), "anthropic": ("ANTHROPIC_API_KEY", "Anthropic API"),
-           "census": ("CENSUS_API_KEY", "Census")}
+           "census": ("CENSUS_API_KEY", "Census"), "ngrok": ("NGROK_AUTHTOKEN", "ngrok account token")}
 
 
 def cmd_key(args: argparse.Namespace, settings: Settings) -> int:

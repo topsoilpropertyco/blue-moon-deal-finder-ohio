@@ -73,6 +73,18 @@ scripts/install_service.sh --share
 
 The link changes whenever sharing restarts (for example after the Mac restarts), so send the new one when that happens. Cloudflare's own email-code gate (`cloudflared --allowed-mail`) isn't used: its sign-in runs out a few seconds after the code is accepted, so every screen said "Can't reach the Blue Moon server" ([cloudflared issue #1752](https://github.com/cloudflare/cloudflared/issues/1752)). The dashboard itself only listens on this computer; outside visitors reach it only through the link, and only with the team password.
 
+**A link that never changes (free):** the free Cloudflare link gets a new name whenever sharing restarts. ngrok's free plan gives one permanent address instead, with no domain and no website to pay for. Your data still stays on the Mac Mini; ngrok only passes visitors through, and they still sign in with their email and the team password. Free ngrok links show each visitor a one-time "you are about to visit" button the first time, and free bandwidth is limited (check ngrok's current limits).
+
+1. Make a free account at ngrok.com. In its dashboard open **Domains** and create your free domain (it looks like `something.ngrok-free.app`). Copy your **Authtoken** from the dashboard too.
+2. Install ngrok and save the token (paste it at the hidden prompt, nowhere else):
+```bash
+scripts/install_ngrok.sh
+uv run run.py key ngrok
+```
+3. In `config.yaml`, under `share:`, set `provider: ngrok` and `ngrok_domain: something.ngrok-free.app`, then restart sharing: `launchctl kickstart -k gui/$(id -u)/com.bluemoon.share`. Settings then shows the same address every time.
+
+To go back to the temporary Cloudflare link, set `provider: cloudflare`.
+
 To restart the background service after a settings change:
 
 ```bash

@@ -125,7 +125,7 @@
 
   function unreachableText() {
     if (navigator.onLine === false) return "You're offline. Check your internet connection, then try again.";
-    if (/\.trycloudflare\.com$/i.test(window.location.hostname)) {
+    if (/\.(trycloudflare\.com|ngrok[a-z.-]*)$/i.test(window.location.hostname)) {
       return "Can't reach the Blue Moon server through the team link. If the Mac Mini restarted sharing, the link " +
         'changed: ask Seth for the new one (it is on his Settings screen). Otherwise reload the page.';
     }
