@@ -531,3 +531,6 @@ details.p-more[open] > summary{margin-bottom:8px}
   .linkbtn{min-height:40px;padding-inline:8px}
   .card-acts{padding-left:14px}
 }
+.p-crexi,.p-alts{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;font-size:13px}
+.p-alts li{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--line);padding-top:8px}
+.p-alts li:first-child{border-top:0;padding-top:0}

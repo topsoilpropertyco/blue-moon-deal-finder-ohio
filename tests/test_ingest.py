@@ -82,6 +82,12 @@ def prop(conn, **where) -> dict:
     return r
 
 
+def prop_alternates(conn, pid: int, field: str) -> list:
+    """The values Crexi sent that differ from the stored property (crexi/merge.py), oldest first."""
+    return [json.loads(r["value"]) for r in conn.execute(
+        "SELECT value FROM property_alternates WHERE property_id=? AND field=? ORDER BY id", (pid, field))]
+
+
 # --- column mapping --------------------------------------------------------------------------
 
 def test_every_crexi_header_maps(sample_csv):
@@ -472,7 +478,10 @@ def test_reimport_updates_values_but_never_wipes(conn, sample_csv, tmp_path):
     import_file(conn, MARKET, write_csv(tmp_path / "update.csv", headers, [row]))
     p = prop(conn, id=pid)
     assert p["owner_name"] == "HOLLOWAY FAMILY TRUST"  # blank cell did not wipe it
-    assert p["sale_price"] == 450000                    # new value won
+    assert p["sale_price"] == 410000                    # the original value stays (keep-the-original rule) ...
+    alt = conn.execute("SELECT value FROM property_alternates WHERE property_id=? AND field='sale_price'",
+                       (pid,)).fetchone()
+    assert alt is not None and json.loads(alt[0]) == 450000      # ... and the new one waits as an alternate
     assert p["lat"] == 39.9501                          # coordinates kept
     assert p["units"] == 28
     flags = json.loads(p["flags_json"])
@@ -548,6 +557,8 @@ def test_reimport_counts_rows_whose_values_did_not_change(conn, sample_csv, tmp_
     assert again["rows_updated"] == 11 and again["rows_unchanged"] == 11       # same file: nothing changed
     headers, data = fixture_rows(sample_csv)
     edited = [dict(r) for r in data]
+    conn.execute("UPDATE properties SET sale_price = NULL WHERE source_id = 'sample-0'")    # a blank the file fills
+    conn.commit()
     edited[0]["Sold Price"] = "451000"
     res = import_file(conn, MARKET, write_csv(tmp_path / "edited.csv", headers, edited))
     assert res["rows_updated"] == 11 and res["rows_unchanged"] == 10
@@ -579,7 +590,8 @@ def test_apn_punctuation_variants_collapse(conn, sample_csv, tmp_path):
     res = import_file(conn, MARKET, write_csv(tmp_path / "v.csv", headers, [a, b]))
     assert res["rows_new"] == 1 and res["duplicates_collapsed"] == 1
     p = prop(conn, property_key="apn:OH:MONTGOMERY:A0100010001")
-    assert p["units"] == 44  # the larger count wins when one parcel is listed twice
+    assert p["units"] == 1   # the first row is the original; the second row's 44 is kept as an alternate
+    assert prop_alternates(conn, p["id"], "units") == [44]
     assert p["apn"] == "A01-0001 0001"
     assert "shared_apn" in json.loads(p["flags_json"])
 

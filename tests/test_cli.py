@@ -96,19 +96,34 @@ def _owner_of(settings) -> str:
         conn.close()
 
 
-def test_folder_import_keeps_the_newest_owner_and_skips_old_files(cli, settings, sample_csv):
+def _alternate_owners(settings) -> list[str]:
+    conn = connect(settings=settings)
+    try:
+        return [r["value"] for r in conn.execute(
+            "SELECT a.value FROM property_alternates a JOIN properties p ON p.id = a.property_id "
+            "WHERE p.address = '1200 SAMPLE RIDGE DR' AND a.field = 'owner_name' ORDER BY a.id")]
+    finally:
+        conn.close()
+
+
+def test_folder_import_keeps_the_first_owner_saves_the_newest_as_an_alternate_and_skips_old_files(cli, settings,
+                                                                                                    sample_csv):
+    """Deliberate change (the keep-the-original rule, bluemoon/crexi/merge.py): a later Crexi file no longer
+    replaces the owner; the original stays and the newer name waits as an alternate ('Use this one') and is also
+    added as another person for the DRILL."""
     folder = settings.path("crexi_dir")
     older = _owner_file(sample_csv, folder / "crexi_october.csv", "OLD OWNER TEST LLC", "1998-05-01", 1_700_000_000)
     newer = _owner_file(sample_csv, folder / "20261101-090000_crexi_november.csv", "NEW BUYER TEST LLC",
                         "2026-09-15", 1_800_000_000)
     assert cli("import", older)[0] == 0 and cli("import", newer)[0] == 0
-    assert _owner_of(settings) == "NEW BUYER TEST LLC"
+    assert _owner_of(settings) == "OLD OWNER TEST LLC"
+    assert _alternate_owners(settings) == ['"NEW BUYER TEST LLC"']
     code, text = cli("import")
     assert code == 0 and "Skipped 2" in text and "Nothing new in data/crexi/" in text
-    assert _owner_of(settings) == "NEW BUYER TEST LLC"
-    code, text = cli("import", "--force")                     # oldest first, so the newest still wins
+    code, text = cli("import", "--force")                     # oldest first; nothing is stored twice
     assert code == 0 and "Imported 2 files" in text
-    assert _owner_of(settings) == "NEW BUYER TEST LLC"
+    assert _owner_of(settings) == "OLD OWNER TEST LLC"
+    assert _alternate_owners(settings) == ['"NEW BUYER TEST LLC"']
 
 
 def test_folder_import_skips_another_markets_upload(cli, settings, sample_csv):

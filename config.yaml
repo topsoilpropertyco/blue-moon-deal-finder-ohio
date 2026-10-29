@@ -75,7 +75,8 @@ markets:
     max_drive_minutes: 60
 
 crexi:
-  credits_per_month: 500          # owner-contact credits; they do not roll over
+  credits_per_month: 500          # owner-contact credits per credit period; they do not roll over
+  reset_day: 29                   # a new credit period starts on this day of every month (29: Oct 29 to Nov 28, then Nov 29...)
   # When the possible owners in the buy box (all markets together) can't use every credit, the rest go to
   # these, in this order, so none expire. Seth: please confirm the order. [] turns this off.
   #   level1_buybox = buy-box owners with no owner name yet (a credit may show it)

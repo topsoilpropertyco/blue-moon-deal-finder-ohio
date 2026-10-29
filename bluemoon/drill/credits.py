@@ -1,6 +1,14 @@
-"""Crexi owner-contact credits: a fixed number per month (config.yaml crexi.credits_per_month), no roll-over.
+"""Crexi owner-contact credits: a fixed number per credit period (config.yaml crexi.credits_per_month), no
+roll-over. A period starts on crexi.reset_day (29 by default: Oct 29 to Nov 28, then Nov 29...); see
+bluemoon/crexi/period.py. Bulk batches (bluemoon/crexi) spend them.
 
-Because unused credits are lost at the end of the month, the plan spends them ALL, at a steady daily pace,
+Credits used = credits Crexi already spent (the ledger: rows Crexi matched and returned in a batch, or used by
+hand) + the properties sent to Crexi that are still waiting ("in flight"). Counting the waiting ones is what
+stops the 500 being overspent. Crexi charges a credit only for a row it MATCHES (a matched row costs one even
+with no phone or email; a 'Not Matched' row costs nothing), so a batch closed with rows that never came back
+frees those credits again.
+
+Because unused credits are lost when the period ends, the plan spends them ALL, at a steady daily pace,
 on the best possible owners the free stages could not reach. Credits belong to the Crexi account, so there
 is ONE plan for every market; each market's Credits screen shows its share of it.
 
@@ -17,7 +25,6 @@ The app never touches Crexi itself: you open the Crexi link, use the credit ther
 """
 from __future__ import annotations
 
-import calendar
 import math
 import sqlite3
 from collections.abc import Iterable, Mapping
@@ -26,6 +33,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from ..config import Settings, get_settings
+from ..crexi import period as P
 from ..db import loads, market_by_slug, now_iso, one, rows, scalar
 from ..scoring.buybox import EXCLUSION_LABELS, MANUAL_REASON
 from ..util import clean_str
@@ -49,38 +57,62 @@ def _today(today: date | None) -> date:
     return today or datetime.now().date()
 
 
-def days_left_in_month(today: date | None = None) -> int:
-    """Days left including today (31 on the 1st of a 31-day month, 1 on the last day)."""
-    d = _today(today)
-    return calendar.monthrange(d.year, d.month)[1] - d.day + 1
+def days_left_in_month(today: date | None = None, settings: Settings | None = None) -> int:
+    """Days left in the credit period, counting today (the name is from when periods were calendar months)."""
+    return P.days_left(_today(today), settings)
+
+
+def _ledger_in_period(conn: sqlite3.Connection, start: date, end: date, key: str) -> list[dict]:
+    """The ledger rows of one credit period. A row made before periods existed (period NULL) belongs to the
+    period its local day falls in."""
+    return rows(conn, "SELECT id, property_id, result, batch_id, date(created_at, 'localtime') AS day "
+                      "FROM credit_ledger WHERE period = ? OR "
+                      "(period IS NULL AND date(created_at, 'localtime') BETWEEN ? AND ?)",
+                (key, start.isoformat(), end.isoformat()))
 
 
 def credit_status(conn: sqlite3.Connection, *, today: date | None = None, settings: Settings | None = None) -> dict:
-    """{month, per_month, used, left, used_today, days_left, daily_pace, today_left, found, nothing, pending,
-    hit_rate, message}.
+    """{month, period, period_end, next_reset, reset_day, per_month, used, left, returned, in_flight, used_today,
+    days_left, daily_pace, today_left, found, nothing, pending, hit_rate, message}.
 
-    Credits belong to the Crexi account, so they are counted across every market.
+    Credits belong to the Crexi account, so they are counted across every market, per credit period.
+    used = returned + in_flight (spent, or waiting at Crexi); left = per_month - used, so the budget can never
+    be overspent. `returned` counts the period's ledger rows (rows Crexi matched and returned in a batch, and
+    credits used by hand); `in_flight` the properties sent in a batch and not returned yet. `month` is the
+    'YYYY-MM' the period started in.
 
     The daily pace is worked out from the credits left when today began, so it stays the same all day while
     credits are used (it would otherwise drop with every credit used today). `today_left` is how many more to
     use today at that pace; the plan gives today exactly that many and `daily_pace` to every later day.
     """
     d = _today(today)
-    month = d.strftime("%Y-%m")
+    info = P.describe(d, settings)
+    start, end = date.fromisoformat(info["start"]), date.fromisoformat(info["end"])
     per = credits_per_month(settings)
-    r = one(conn, "SELECT COUNT(*) AS n_used, SUM(result='found') AS n_found, SUM(result='nothing') AS n_nothing, "
-                  "SUM(result IS NULL) AS n_pending FROM credit_ledger WHERE month=?", (month,)) or {}
-    used = int(r.get("n_used") or 0)
-    found, nothing, pending = (int(r.get(k) or 0) for k in ("n_found", "n_nothing", "n_pending"))
+    ledger = _ledger_in_period(conn, start, end, info["key"])
+    returned = len(ledger)
+    found = sum(1 for r in ledger if r["result"] == "found")
+    nothing = sum(1 for r in ledger if r["result"] == "nothing")
+    pending = sum(1 for r in ledger if r["result"] is None)
+    in_flight = int(scalar(conn, "SELECT COUNT(*) FROM crexi_batch_items i JOIN crexi_batches b ON b.id = i.batch_id "
+                                 "WHERE b.period = ? AND i.status = 'sent'", (info["key"],)) or 0)
     # created_at is stored in UTC; 'localtime' turns it into this computer's date, the same clock as `d`.
-    used_today = int(scalar(conn, "SELECT COUNT(*) FROM credit_ledger WHERE month=? AND "
-                                  "date(created_at, 'localtime')=?", (month, d.isoformat())) or 0)
+    # Today's use: credits used by hand today, plus everything sent in a batch today.
+    sent_today = int(scalar(conn, "SELECT COUNT(*) FROM crexi_batch_items i JOIN crexi_batches b ON b.id = i.batch_id "
+                                  "WHERE b.period = ? AND i.status IN ('sent', 'returned') "
+                                  "AND date(i.sent_at, 'localtime') = ?", (info["key"], d.isoformat())) or 0)
+    used_today = sum(1 for r in ledger if r["batch_id"] is None and r["day"] == d.isoformat()) + sent_today
+    used = returned + in_flight
     left = max(0, per - used)
-    days = days_left_in_month(d)
-    left_this_morning = max(0, per - (used - used_today))
+    days = P.days_left(d, settings)
+    left_this_morning = max(0, per - max(0, used - used_today))
     pace = math.ceil(left_this_morning / days) if left else 0
-    status = {"month": month, "per_month": per, "used": used, "left": left, "used_today": used_today,
-              "days_left": days, "daily_pace": pace, "today_left": min(left, max(0, pace - used_today)),
+    status = {"month": info["key"][:7], "period": info["key"], "period_label": P.label(info["key"], settings),
+              "period_end": info["end"],
+              "next_reset": info["next_reset"], "reset_day": info["reset_day"],
+              "per_month": per, "used": used, "left": left, "returned": returned, "in_flight": in_flight,
+              "used_today": used_today, "days_left": days, "daily_pace": pace,
+              "today_left": min(left, max(0, pace - used_today)),
               "found": found, "nothing": nothing, "pending": pending,
               "hit_rate": round(found / (found + nothing), 4) if (found + nothing) else None}
     status["message"] = _status_message(status)
@@ -90,13 +122,16 @@ def credit_status(conn: sqlite3.Connection, *, today: date | None = None, settin
 def _status_message(s: dict) -> str:
     if not s["per_month"]:
         return "No Crexi credits are set up (config.yaml crexi.credits_per_month)."
-    if not s["left"]:
-        return (f"All {s['per_month']:,} Crexi credits are used for {s['month']} (every market shares them). "
-                f"New ones arrive next month.")
     day_word = "day" if s["days_left"] == 1 else "days"
+    waiting = f", {s['in_flight']:,} waiting at Crexi" if s["in_flight"] else ""
+    if not s["left"]:
+        return (f"All {s['per_month']:,} Crexi credits are used or waiting at Crexi for this period "
+                f"({s['returned']:,} returned{waiting}). New ones arrive on {s['next_reset']} "
+                f"({s['days_left']} {day_word} to go).")
     today = f" ({s['today_left']:,} more today)" if s["used_today"] else ""
-    return (f"{s['left']:,} of {s['per_month']:,} Crexi credits left this month, shared by every market, and "
-            f"{s['days_left']} {day_word} to go: use about {s['daily_pace']:,} a day{today}. They do not roll over.")
+    return (f"{s['left']:,} of {s['per_month']:,} Crexi credits free this period ({s['returned']:,} returned"
+            f"{waiting}), shared by every market, and {s['days_left']} {day_word} to go: use about "
+            f"{s['daily_pace']:,} a day{today}. They do not roll over.")
 
 
 def use_credit(conn: sqlite3.Connection, property_id: int, result: str | None = None, *,
@@ -116,14 +151,15 @@ def use_credit(conn: sqlite3.Connection, property_id: int, result: str | None = 
         E.normalize_contact(c.channel, c.value)
     E._require_property(conn, property_id)
     before = credit_status(conn, today=today, settings=settings)
-    month = _today(today).strftime("%Y-%m")
+    period = P.period_key(_today(today), settings)
+    month = period[:7]
     pending = one(conn, "SELECT id FROM credit_ledger WHERE property_id=? AND result IS NULL ORDER BY id DESC LIMIT 1",
                   (property_id,))
     warn = "" if before["left"] or pending else " Your credits for this month look used up; Crexi may not allow it."
     if pending is None:
         with E._tx(conn):
-            conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at) VALUES(?,?,?,?)",
-                         (property_id, month, None, now_iso()))
+            conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at, period) VALUES(?,?,?,?,?)",
+                         (property_id, month, None, now_iso(), period))
     elif res is None:
         return _done(conn, property_id, "A credit is already open on this property. Record what Crexi showed.",
                      None, today, settings)
@@ -152,7 +188,8 @@ def _done(conn: sqlite3.Connection, property_id: int, message: str, result: str 
 
 def credit_log(conn: sqlite3.Connection, market_slug: str | None = None, limit: int = 100) -> list[dict]:
     """Credits used, newest first, with the property address."""
-    sql = ("SELECT c.id, c.property_id, c.month, c.result, c.created_at, p.address, p.city, p.state, p.owner_name "
+    sql = ("SELECT c.id, c.property_id, c.month, c.period, c.batch_id, c.result, c.created_at, p.address, p.city, "
+           "p.state, p.owner_name "
            "FROM credit_ledger c LEFT JOIN properties p ON p.id=c.property_id")
     params: list[Any] = []
     if market_slug:
@@ -321,6 +358,7 @@ def _open_rows(conn: sqlite3.Connection, market_id: int) -> list[dict]:
         LEFT JOIN scores s ON s.property_id = p.id
         WHERE p.market_id = ? AND COALESCE(d.status, 'active') = 'active'
           AND p.id NOT IN (SELECT property_id FROM credit_ledger WHERE property_id IS NOT NULL)
+          AND p.id NOT IN (SELECT property_id FROM crexi_batch_items WHERE status IN ('sent', 'returned'))
           AND p.id NOT IN (SELECT property_id FROM contact_points WHERE status = 'verified' AND channel IN ({marks}))
         ORDER BY p.id""", (market_id, *E.REACH_CHANNELS))
 
@@ -336,7 +374,8 @@ class Schedule:
 SET_ASIDE_BATCH = 50    # at least this many set-aside owners are worked out at a time
 
 
-def _schedule(conn: sqlite3.Connection, *, today: date | None = None, settings: Settings | None = None) -> Schedule:
+def _schedule(conn: sqlite3.Connection, *, today: date | None = None, settings: Settings | None = None,
+              want: int | None = None) -> Schedule:
     """The one plan for the whole Crexi account.
 
     Credits belong to the account, so every market's owners compete for them: the main candidates of every
@@ -349,7 +388,9 @@ def _schedule(conn: sqlite3.Connection, *, today: date | None = None, settings: 
     set-aside owners are worked out best first, only until the credits left are all planned."""
     cfg = E.drill_config(settings)
     status = credit_status(conn, today=today, settings=settings)
-    if status["left"] <= 0:
+    if want is None:
+        want = status["left"]      # a bulk export asks for its own N (bluemoon/crexi/batches.py)
+    if want <= 0:
         return Schedule(status)
     tiers, hard = _fallbacks(settings)
     main: list[dict] = []
@@ -405,7 +446,7 @@ def _schedule(conn: sqlite3.Connection, *, today: date | None = None, settings: 
         take(box_ids)
     main.sort(key=_plan_sort)
     plan = main
-    left = status["left"]
+    left = want
     aside.sort()
     done = 0
     for t in tiers:
@@ -419,7 +460,7 @@ def _schedule(conn: sqlite3.Connection, *, today: date | None = None, settings: 
     pace = max(1, status["daily_pace"])
     first = min(status["today_left"], len(plan))
     start = _today(today)
-    last = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
+    last = date.fromisoformat(status["period_end"])
     for i, c in enumerate(plan):
         day = start if i < first else min(start + timedelta(days=1 + (i - first) // pace), last)
         c["order"], c["day"] = i + 1, day

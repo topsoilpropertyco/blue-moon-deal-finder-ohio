@@ -36,6 +36,11 @@
       ['excluded.zip', 'Set-aside properties (zip)', 'One CSV per filter (too far, wrong size, built too early...) with the reason. Nothing is ever deleted.',
         'you want to double-check what the filters left out.',
         (s) => (toNum(s.excluded) ? plural(s.excluded, 'property', 'properties') : '')],
+    ], links: [
+      // Not a download here: the batch file is made on the Credits screen (it counts against the 500 credits).
+      ['Crexi batch', 'The next batch of owners to send to Crexi, as a file to upload in Crexi\'s bulk tool. It is made on the Credits screen, ' +
+        'where you also drop Crexi\'s reply back.', 'you are ready to spend Crexi credits.', 'credits', 'Open Credits',
+        (s) => (toNum(s.credits && s.credits.left) !== null ? num(toNum(s.credits.left)) + ' credits free' : '')],
     ]},
   ];
   const SUMMARY = ['run_summary.md', 'Run summary', 'A one-page report: counts per step and color, API calls and cost this month, and how far the credits reach.',
@@ -51,6 +56,14 @@
       '<p class="note vw-tight">' + esc(what) + ' <span class="ex-when">Use it when ' + esc(when) + '</span></p></div>' +
       '<button type="button" class="btn' + (name === 'ranked_list.xlsx' ? ' primary' : '') + '" data-ex="' + esc(name) + '"' +
       (working ? ' disabled' : '') + '>' + (working ? 'Preparing…' : 'Download') + '</button></li>';
+  }
+
+  function linkRow([title, what, when, go, label, count], s) {
+    const extra = count(s || {});
+    return '<li class="ex-row"><div class="ex-text"><div class="ex-title"><b>' + esc(title) + '</b>' +
+      (extra ? '<span class="pill">' + esc(extra) + '</span>' : '') + '</div>' +
+      '<p class="note vw-tight">' + esc(what) + ' <span class="ex-when">Use it when ' + esc(when) + '</span></p></div>' +
+      '<button type="button" class="btn" data-go="' + esc(go) + '">' + esc(label) + '</button></li>';
   }
 
   function group(title, blurb, inner) {
@@ -104,7 +117,7 @@
 
   function page(s) {
     const lists = GROUPS.map((g) => group(g.title, g.blurb,
-      '<ul class="ex-list panel">' + g.files.map((f) => fileRow(f, s)).join('') + '</ul>' + (g.key === 'work' ? sheetsNote() : ''))).join('');
+      '<ul class="ex-list panel">' + g.files.map((f) => fileRow(f, s)).join('') + (g.links || []).map((l) => linkRow(l, s)).join('') + '</ul>' + (g.key === 'work' ? sheetsNote() : ''))).join('');
     return heading() + lists +
       group('Fix data in a spreadsheet', 'Download, correct it in Excel, and drop it back on Import. Use it when Crexi has a unit count, year or type wrong.', roundTripNote(s)) +
       group('Summary', 'The numbers on one page.', '<ul class="ex-list panel">' + fileRow(SUMMARY, s) + '</ul>');

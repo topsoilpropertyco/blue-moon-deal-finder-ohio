@@ -21,6 +21,8 @@ SCHEMA_VERSION = 2
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("scores", "rule_reasons", "TEXT"),      # version 2: buy-box decisions by hand
     ("scores", "aside_buckets", "TEXT"),
+    ("credit_ledger", "period", "TEXT"),     # Crexi credit periods (bluemoon/crexi/period.py)
+    ("credit_ledger", "batch_id", "INTEGER"),
 )
 # meta key: markets whose scores were saved before version 2. The dashboard re-scores each one once, so the
 # set-aside groups (scores.aside_buckets) exist. JSON list of market ids.
@@ -247,9 +249,66 @@ CREATE TABLE IF NOT EXISTS parcel_lookups (
 CREATE TABLE IF NOT EXISTS credit_ledger (
   id INTEGER PRIMARY KEY,
   property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
-  month TEXT NOT NULL,             -- YYYY-MM
+  month TEXT NOT NULL,             -- YYYY-MM of the day the credit period started
   result TEXT,                     -- found | nothing
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  period TEXT,                     -- credit period start 'YYYY-MM-DD' (NULL on rows made before periods existed)
+  batch_id INTEGER                 -- crexi_batches.id when the credit came back in a batch
+);
+
+-- Crexi bulk batches (bluemoon/crexi): Blue Moon exports a CSV, Seth uploads it to Crexi by hand, Crexi spends
+-- credits and sends a file back, Seth imports it. Credits are shared by every market, so a batch can hold
+-- properties from several markets (markets = JSON list of slugs; market_id is set only when there is one).
+CREATE TABLE IF NOT EXISTS crexi_batches (
+  id INTEGER PRIMARY KEY,
+  market_id INTEGER REFERENCES markets(id),
+  markets TEXT NOT NULL DEFAULT '[]',
+  period TEXT NOT NULL,            -- credit period start 'YYYY-MM-DD' the batch is counted in
+  kind TEXT NOT NULL CHECK (kind IN ('first', 'topup', 'manual')),
+  requested INTEGER NOT NULL,      -- how many properties it holds
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL DEFAULT 'cli',
+  file_name TEXT,                  -- the export file, relative to the output folder
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'imported', 'closed')),
+  note TEXT,
+  column_overrides TEXT,           -- JSON: which columns hold phones/emails/the contact name, set at import
+  closed_at TEXT, closed_by TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_crexi_batches_period ON crexi_batches(period);
+
+-- One row per property sent in a batch. 'sent' = waiting for Crexi (an in-flight credit), 'returned' = Crexi
+-- sent the row back (the credit is spent), 'not_returned' = the batch was closed without it (no credit spent),
+-- 'withdrawn' = the batch was cancelled before it was uploaded.
+CREATE TABLE IF NOT EXISTS crexi_batch_items (
+  batch_id INTEGER NOT NULL REFERENCES crexi_batches(id),
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  sent_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'returned', 'not_returned', 'withdrawn')),
+  returned_at TEXT,
+  import_id INTEGER,               -- crexi_batch_imports.id that returned it
+  result TEXT,                     -- found (phone or email) | owner_only (a name, no phone or email) | nothing
+  phones INTEGER NOT NULL DEFAULT 0,
+  emails INTEGER NOT NULL DEFAULT 0,
+  is_retry INTEGER NOT NULL DEFAULT 0,       -- a second pass for a property Crexi did not return before
+  not_matched_at TEXT,             -- Crexi's reply said 'Not Matched' for it (still counted until the batch closes)
+  UNIQUE (batch_id, property_id)
+);
+CREATE INDEX IF NOT EXISTS ix_crexi_items_property ON crexi_batch_items(property_id);
+
+-- Every Crexi reply file imported (what it held and what came of it).
+CREATE TABLE IF NOT EXISTS crexi_batch_imports (
+  id INTEGER PRIMARY KEY,
+  batch_ids TEXT NOT NULL DEFAULT '[]',
+  file_name TEXT, saved_as TEXT, file_hash TEXT,
+  rows_total INTEGER NOT NULL DEFAULT 0,
+  returned INTEGER NOT NULL DEFAULT 0,       -- items newly marked returned
+  found INTEGER NOT NULL DEFAULT 0, owner_only INTEGER NOT NULL DEFAULT 0, no_data INTEGER NOT NULL DEFAULT 0,
+  not_matched INTEGER NOT NULL DEFAULT 0,    -- rows Crexi marked 'Not Matched'
+  duplicates INTEGER NOT NULL DEFAULT 0, unmatched INTEGER NOT NULL DEFAULT 0,
+  contacts_added INTEGER NOT NULL DEFAULT 0, dnc_marked INTEGER NOT NULL DEFAULT 0, unreadable INTEGER NOT NULL DEFAULT 0,
+  columns_json TEXT, summary_json TEXT,
+  created_at TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT 'cli'
 );
 
 -- Deals that worked out (or not), entered by you. Used to tune the score.
@@ -311,6 +370,23 @@ CREATE TABLE IF NOT EXISTS property_edits (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_property_edits_property ON property_edits(property_id, field);
+
+-- A later Crexi row (a second copy of a property, a reply file, a re-import) that disagrees with what a property
+-- already holds. The original value is kept; the new one waits here until it is used or ignored
+-- (bluemoon/crexi/merge.py). Append-only: a row is never deleted, only decided.
+CREATE TABLE IF NOT EXISTS property_alternates (
+  id INTEGER PRIMARY KEY,
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  field TEXT NOT NULL,             -- a properties column (units, year_built, owner_name, mailing_address...)
+  value TEXT,                      -- JSON: the value Crexi sent
+  original TEXT,                   -- JSON: the value held when it was sent
+  source TEXT NOT NULL DEFAULT 'crexi',
+  import_id INTEGER,               -- imports.id of the file that held it
+  seen_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'used', 'dismissed')),
+  decided_by TEXT, decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_alternates_property ON property_alternates(property_id, status);
 
 -- Cache of every external API response, so re-runs never re-pay.
 CREATE TABLE IF NOT EXISTS api_cache (

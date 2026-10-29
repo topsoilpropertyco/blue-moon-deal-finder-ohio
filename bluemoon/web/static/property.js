@@ -33,6 +33,7 @@
     units_from_addresses: 'Units estimated from the number of addresses', shared_apn: 'Shares a parcel number with another row',
     no_owner_name: 'No owner name in the export', no_coordinates: 'No map location yet', no_address: 'No street address',
     county_owner_differs: 'The county tax record shows a different owner than the Crexi export',
+    crexi_differs: 'Crexi sent different data than we hold (see the Crexi section)',
   };
   const RENT_FIT = {in: ['g', 'Area rents match the scale'], near: ['y', 'Area rents are close to the scale'], out: ['r', 'Area rents are off the scale'], na: ['n', 'No HUD rent for this area']};
   const RENT_SOURCE = {hud_arcgis: 'HUD Fair Market Rents (HUD map service)', hud_file: 'HUD Fair Market Rents (downloaded file)', hud_api: 'HUD Fair Market Rents (HUD API)'};
@@ -94,7 +95,7 @@
       c.outcomeEarly = Number((d.drill || {}).level || d.level || 1) === 3 || !!(d.outcome && d.outcome.value);
     }
     const early = c.outcomeEarly;
-    root.innerHTML = headerHtml(d) + scoreHtml(d) + buyboxHtml(d) + (early ? outcomeHtml(d) : '') + contactHtml(d) + whyHtml(d) + photoHtml(d) +
+    root.innerHTML = headerHtml(d) + scoreHtml(d) + buyboxHtml(d) + (early ? outcomeHtml(d) : '') + contactHtml(d) + crexiHtml(d) + whyHtml(d) + photoHtml(d) +
       rentHtml(d) + buildingHtml(d) + ownerHtml(d) + linksHtml(d) + (early ? '' : outcomeHtml(d)) + rawHtml(d);
     root.querySelectorAll('details[data-keep]').forEach((el) => { if (c.kept.has(el.getAttribute('data-keep'))) el.open = true; });
     box.scrollTop = opts && opts.keepScroll ? top : 0;
@@ -317,6 +318,35 @@
       (dr.notes ? '<h3>Notes</h3><pre class="p-notes">' + esc(dr.notes) + '</pre>' : '') + '</section>';
   }
 
+  /* ---------- Crexi: batches and values that differ ---------- */
+
+  function crexiHtml(d) {
+    const cx = d.crexi || {};
+    const events = cx.events || [];
+    const alts = (cx.alternates || []).filter((a) => a.status === 'open');
+    if (!events.length && !alts.length) return '';
+    const show = (v) => (v == null || v === '' ? 'blank' : String(v));
+    const lines = events.map((e) => '<li>' + esc(e.text) + '</li>').join('');
+    const altHtml = alts.length
+      ? '<h3 style="margin-top:6px">Crexi sent different data (' + alts.length + ')</h3>' +
+        '<p class="note" style="margin:0">We kept what we already had. Choose “Use this one” to switch (you can undo it from the edit history), or Ignore.</p>' +
+        '<ul class="p-alts">' + alts.map((a) => '<li><div><b>' + esc(a.label) + '</b>: we have <span class="muted">' + esc(show(a.original)) +
+          '</span>, Crexi says <b>' + esc(show(a.value)) + '</b></div><div class="p-actions">' +
+          (a.usable ? '<button type="button" class="btn small" data-act="alt" data-id="' + Number(a.id) + '" data-do="use">Use this one</button>' : '') +
+          '<button type="button" class="btn small" data-act="alt" data-id="' + Number(a.id) + '" data-do="ignore">Ignore</button></div></li>').join('') + '</ul>'
+      : '';
+    return '<section class="sec" data-part="crexi"><h2>Crexi</h2>' + (lines ? '<ul class="p-crexi">' + lines + '</ul>' : '') + altHtml + '</section>';
+  }
+
+  async function decideAlt(b) {
+    const c = cur;
+    const res = await write(BM.m('/properties/' + c.id + '/alternates/' + Number(b.getAttribute('data-id'))),
+      {action: b.getAttribute('data-do')});
+    if (!res || cur !== c) return;
+    await load(c, {keepScroll: true, quiet: true});
+    changed(c);
+  }
+
   function bannerHtml(dr, status) {
     if (status === 'dnc') return '<div class="p-banner bad">Do not contact. This owner is off every list until you allow contact again.</div>';
     if (status === 'exhausted') return '<div class="p-banner">Every source has been tried. Reopen it when something new turns up.</div>';
@@ -363,6 +393,10 @@
     });
     (dr.credits || []).filter((cr) => !cr.result).forEach((cr) => events.push({at: cr.created_at || '', id: Number(cr.id) || 0, order: 2,
       cls: '', src: 'Crexi credit', res: 'Used. Record what Crexi showed.', who: ''}));
+    const cx = (cur && cur.detail && cur.detail.crexi) || {};
+    (cx.events || []).filter((e) => e.kind === 'batch').forEach((e, i) => events.push({at: e.at || '', id: 1000 + i, order: 0,
+      cls: e.status === 'returned' && (e.result === 'found' || e.result === 'owner_only') ? 'hit' : (e.status === 'sent' ? 'next' : 'skip'),
+      src: 'Crexi batch #' + e.batch_id, res: e.text.replace(/^Crexi: /, ''), who: ''}));
     events.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order || a.id - b.id);
     const next = dr.next_step || {};
     const tail = {stage: ['next', 'Next'], validate: ['next', 'Next'], handoff: ['hit', 'Done'], dnc: ['miss', 'Stopped'], exhausted: ['skip', 'Paused']}[next.kind];
@@ -1066,6 +1100,8 @@
       cur.open = 'attempt';
       cur.mode = {outcome: b.getAttribute('data-outcome') || 'found', stage: b.getAttribute('data-stage')};
       redrawContact(true);
+    } else if (act === 'alt') {
+      decideAlt(b);
     } else if (act === 'outreach') {
       outreach(b);
     } else if (act === 'cwrong') {

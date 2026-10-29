@@ -427,15 +427,15 @@
     const left = Number(c.left) || 0;
     const line = per
       ? (left ? `Use about <b>${num(c.daily_pace)} a day</b> for the next ${num(c.days_left)} ${c.days_left === 1 ? 'day' : 'days'} to spend them all. They don't roll over.`
-              : 'All used for this month. New ones arrive on the 1st.')
+              : 'All used or waiting at Crexi. New ones arrive when the next credit period starts.')
       : esc(c.message || 'No Crexi credits are set up.');
     return `
       <section class="panel" aria-label="Crexi credits">
-        <h2>Crexi credits · ${esc(W.monthName(c.month))}</h2>
-        <div class="dr-hero-num"><span class="big num">${num(left)}</span><span class="note">of ${num(per)} left</span></div>
+        <h2>Crexi credits · ${esc(c.period_label || W.monthName(c.month))}</h2>
+        <div class="dr-hero-num"><span class="big num">${num(left)}</span><span class="note">of ${num(per)} free${Number(c.in_flight) ? ` · ${num(c.in_flight)} waiting at Crexi` : ''}</span></div>
         <p class="note dr-tight">${line}</p>
         <p class="note dr-tight">The credit plan picks the best possible owners the free stages could not reach.</p>
-        <div><button class="btn" data-go="credits">Open the credit plan</button></div>
+        <div><button class="btn" data-go="credits">Open Crexi credits</button></div>
       </section>`;
   }
 

@@ -69,7 +69,7 @@ from ..imagery import streetview
 from ..ingest import IngestError, import_file, preview_file
 from ..scoring import overrides
 from ..scoring.learn import model_summary, set_outcome
-from . import auth, queries
+from . import auth, crexi_api, queries
 
 log = logging.getLogger("bluemoon.web")
 
@@ -1120,6 +1120,7 @@ def create_app() -> FastAPI:
     install_error_handlers(app)
     install_middleware(app)
     app.include_router(router)
+    app.include_router(crexi_api.router)      # Crexi bulk batches (bluemoon/web/crexi_api.py)
     return app
 
 
