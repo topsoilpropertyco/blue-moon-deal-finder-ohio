@@ -7,7 +7,8 @@
 #   (apartments: units from building sq ft / sqft_per_unit).
 # size.set_aside_below / set_aside_above: how the Why? panel groups properties set aside for their size.
 #   Apartments: [5] and [100, 200] give 1-4, 5-9 (under 10) and 81-100, 101-200, 201+ (over 80) units.
-# visual_check: what the Street View + satellite photo check decides.
+# visual_check: what the Street View + satellite photo check decides. details: true also asks for the building
+#   style, estimated stories, buildings visible and condition (apartments).
 # signals: Blue Moon score multipliers (likelihood ratios). Missing data = skipped.
 
 default_signals:
@@ -48,6 +49,7 @@ asset_classes:
       margin: 0.15                 # within 15% of the scale = "in", within 30% = "near"
     visual_check:
       enabled: true
+      details: true          # the first-pass AI review also gives style, stories, buildings and condition
       question: Is it a walk-up? How do residents reach their front doors?
       target_name: Walk-up   # what a good photo verdict is called on screens
       labels: [EXTERIOR_CORRIDOR, DIRECT_ENTRY, INTERIOR_CORRIDOR, MIXED, UNKNOWN]
@@ -68,7 +70,11 @@ asset_classes:
         stories_4_plus: -15          # lean interior corridor
         stories_3_less_built_1970_1995: 15
         units_12_or_less: 10
-    signals: {}
+    # Walk-ups are what Blue Moon wants, so a green (walk-up) photo verdict counts for more here than the 1.4
+    # default: x1.8, level with the strongest owner signals (an individual owner x1.8, owned 20+ years x2.0).
+    # A walk-up is never required: no photo verdict skips the signal, and a red (not a walk-up) is only x0.4.
+    signals:
+      visual: {green: 1.8}
 
   self_storage:
     label: Self-storage

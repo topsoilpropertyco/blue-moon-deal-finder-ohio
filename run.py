@@ -53,6 +53,10 @@ STEP_HELP = {
     "drill": "DRILL automatic stages and contact levels (free).",
     "all": "Every step in order: owners, drive, rent, score, county records, photos, classify, score, drill.",
     "calibrate": "Re-check the photos you reviewed and report the photo check's accuracy.",
+    "photo_batch": "Photos, then the AI check, for the next batch of this month's photo goal (config.yaml photos: "
+                   "batch, default 100). Try --limit 5 first.",
+    "photo_keep_going": "Photos and the AI check, batch after batch, until this month's photo goal "
+                        "(photos: monthly_target, default 600) is reached.",
     "research": "AI research: Claude searches the web for each buy-box owner's business filing, officers and agent, "
                 "website, business phone and email, and social pages (your Claude plan; never people-search sites "
                 "or Crexi). Everything it finds stays 'not tested yet'. Try --limit 5 first.",

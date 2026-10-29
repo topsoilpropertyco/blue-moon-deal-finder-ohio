@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, NoReturn, Sequence
+from typing import Any, Callable, Iterable, Literal, Mapping, NoReturn, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -50,6 +50,8 @@ Progress = Callable[[float, str], None] | None
 UNKNOWN = "UNKNOWN"
 QUALITIES = ("good", "partial", "poor", "none")
 NO_VERDICT_QUALITIES = ("poor", "none")
+STYLES = ("garden", "townhome-row", "mid-rise", "high-rise", "converted", "other")
+CONDITIONS = ("good", "fair", "poor", "unknown")
 CACHE_PROVIDER = "vision"
 API_KEY_NAME = "ANTHROPIC_API_KEY"
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -157,6 +159,50 @@ def _to_number(v: Any) -> float:
     return float(s)
 
 
+def _small_int(v: Any, lo: int, hi: int) -> int | None:
+    """A whole number inside lo..hi from whatever Claude wrote ('3', 3.0, 'about 3'); None when it isn't one."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        n = int(round(float(v)))
+    except (TypeError, ValueError):
+        m = re.search(r"\d+", str(v))
+        if not m:
+            return None
+        n = int(m.group())
+    return n if lo <= n <= hi else None
+
+
+def normalize_style(v: Any) -> str | None:
+    """One of STYLES (None when nothing was said). Unfamiliar words become 'other'."""
+    text = str(v or "").strip().lower().replace("_", "-").replace(" ", "-")
+    if not text or text in ("none", "null", "n/a", "unknown"):
+        return None
+    if text in STYLES:
+        return text
+    for word, style in (("garden", "garden"), ("walk", "garden"), ("townhome", "townhome-row"),
+                        ("town-home", "townhome-row"), ("townhouse", "townhome-row"), ("row", "townhome-row"),
+                        ("high", "high-rise"), ("tower", "high-rise"), ("mid", "mid-rise"),
+                        ("convert", "converted"), ("adaptive", "converted")):
+        if word in text:
+            return style
+    return "other"
+
+
+def normalize_condition(v: Any) -> str | None:
+    text = str(v or "").strip().lower()
+    if not text:
+        return None
+    if text in CONDITIONS:
+        return text
+    for word, cond in (("excellent", "good"), ("great", "good"), ("well", "good"), ("average", "fair"),
+                       ("ok", "fair"), ("moderate", "fair"), ("worn", "poor"), ("bad", "poor"),
+                       ("rough", "poor"), ("deteriorat", "poor"), ("dilapidat", "poor")):
+        if word in text:
+            return cond
+    return "unknown"
+
+
 class VisualResult(BaseModel):
     """Claude's answer about one property's photos."""
     model_config = ConfigDict(extra="ignore")
@@ -166,6 +212,11 @@ class VisualResult(BaseModel):
     visible_cues: list[str] = Field(default_factory=list)
     reasons: str = ""
     property_visible: bool = True
+    # first-pass building details (asked only when the asset class has `visual_check.details: true`)
+    building_style: str | None = None
+    estimated_stories: int | None = None
+    buildings_visible: int | None = None
+    condition: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -214,6 +265,26 @@ class VisualResult(BaseModel):
             return "; ".join(str(x).strip() for x in v if str(x).strip())[:500]
         return str(v).strip()[:500]
 
+    @field_validator("building_style", mode="before")
+    @classmethod
+    def _style(cls, v: Any) -> str | None:
+        return normalize_style(v)
+
+    @field_validator("condition", mode="before")
+    @classmethod
+    def _condition(cls, v: Any) -> str | None:
+        return normalize_condition(v)
+
+    @field_validator("estimated_stories", mode="before")
+    @classmethod
+    def _stories(cls, v: Any) -> int | None:
+        return _small_int(v, 1, 80)
+
+    @field_validator("buildings_visible", mode="before")
+    @classmethod
+    def _buildings(cls, v: Any) -> int | None:
+        return _small_int(v, 0, 200)
+
     @field_validator("property_visible", mode="before")
     @classmethod
     def _visible(cls, v: Any) -> bool:
@@ -229,21 +300,35 @@ class VisualResult(BaseModel):
         raise ValueError("property_visible must be true or false")
 
 
-def result_schema(labels: Sequence[str]) -> dict:
-    """JSON Schema for the reply (Claude Code --json-schema and API structured outputs)."""
-    return {
-        "type": "object",
-        "properties": {
-            "label": {"type": "string", "enum": list(labels)},
-            "p_target": {"type": "number"},
-            "image_quality": {"type": "string", "enum": list(QUALITIES)},
-            "visible_cues": {"type": "array", "items": {"type": "string"}},
-            "reasons": {"type": "string"},
-            "property_visible": {"type": "boolean"},
-        },
-        "required": ["label", "p_target", "image_quality", "visible_cues", "reasons", "property_visible"],
-        "additionalProperties": False,
+DETAIL_PROPERTIES: dict[str, dict] = {
+    "building_style": {"type": "string", "enum": list(STYLES)},
+    "estimated_stories": {"type": "integer"},
+    "buildings_visible": {"type": "integer"},
+    "condition": {"type": "string", "enum": list(CONDITIONS)},
+}
+
+
+def result_schema(labels: Sequence[str], details: bool = False) -> dict:
+    """JSON Schema for the reply (Claude Code --json-schema and API structured outputs).
+    details: also ask for the building style, stories, number of buildings and condition."""
+    props: dict[str, Any] = {
+        "label": {"type": "string", "enum": list(labels)},
+        "p_target": {"type": "number"},
+        "image_quality": {"type": "string", "enum": list(QUALITIES)},
+        "visible_cues": {"type": "array", "items": {"type": "string"}},
+        "reasons": {"type": "string"},
+        "property_visible": {"type": "boolean"},
     }
+    required = ["label", "p_target", "image_quality", "visible_cues", "reasons", "property_visible"]
+    if details:
+        props.update({k: dict(v) for k, v in DETAIL_PROPERTIES.items()})
+        required += list(DETAIL_PROPERTIES)
+    return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
+
+
+def wants_details(ac: AssetClass) -> bool:
+    """Does this asset class's photo check also qualify the building (style, stories, buildings, condition)?"""
+    return bool((ac.visual_check or {}).get("details"))
 
 
 def _strip_fences(text: str) -> str:
@@ -353,6 +438,8 @@ def build_prompt(asset_class: str | AssetClass, examples: Sequence[Mapping[str, 
                 continue
             where = f"Image {n}" if k == 1 else f"Images {n}-{n + k - 1}"
             note = f' Why: "{ex["note"]}"' if ex.get("note") else ""
+            if ex.get("agreed") is False and ex.get("ai_label"):
+                note += f" An earlier AI guess of {ex['ai_label']} was wrong here."
             lines.append(f"- {where}: example {i}, true label {ex['label']}.{note}")
             n += k
     names = [Path(p).name for p in property_images] if property_images else \
@@ -363,8 +450,22 @@ def build_prompt(asset_class: str | AssetClass, examples: Sequence[Mapping[str, 
         n += 1
     unknown_rule = " Then use the label UNKNOWN." if UNKNOWN in labels else ""
     target_text = " or ".join(targets) if targets else "the kind the investor wants"
-    lines += ["", REPLY_INSTRUCTIONS.format(targets=target_text, unknown_rule=unknown_rule)]
+    template = DETAIL_REPLY_INSTRUCTIONS if wants_details(ac) else REPLY_INSTRUCTIONS
+    lines += ["", template.format(targets=target_text, unknown_rule=unknown_rule)]
     return "\n".join(lines).strip() + "\n"
+
+
+DETAIL_REPLY_INSTRUCTIONS = """Reply with ONLY this JSON object and nothing else (no code fences, no other words):
+{{"label": "<one label from the list>", "p_target": <number 0-100>, "image_quality": "good|partial|poor|none", "visible_cues": ["<short cue>", "..."], "reasons": "<ONE plain sentence>", "property_visible": true, "building_style": "garden|townhome-row|mid-rise|high-rise|converted|other", "estimated_stories": <whole number>, "buildings_visible": <whole number>, "condition": "good|fair|poor|unknown"}}
+- p_target: your probability, 0 to 100, that the property is {targets}. Keep it consistent with the label: high for a target label, low for the others. Be honest: use 40 to 60 when the photos don't settle it, so a person looks.
+- image_quality: good = the property's buildings are clearly visible; partial = partly visible or partly blocked; poor = blurry, far away or mostly blocked; none = no usable photo of the property.
+- property_visible: false when you can't tell which building is the property, or it is hidden.{unknown_rule}
+- visible_cues: the things you actually saw that drove your answer.
+- building_style: garden = low-rise buildings in a landscaped or parking-lot setting, often with outside stairs or breezeways; townhome-row = attached units side by side, each with its own door; mid-rise = about 4 to 7 stories, usually an elevator and interior halls; high-rise = 8 or more stories; converted = an older building (school, hotel, factory, house) turned into apartments; other = none of these.
+- estimated_stories: how many stories the tallest residential building has (count floors by rows of windows and doors). Your best whole-number guess, never 0.
+- buildings_visible: how many separate residential buildings you can see on the property (0 when you can't tell).
+- condition: good = clean and well kept; fair = normal wear; poor = visible damage, boarded windows, heavy wear; unknown = can't tell from these photos.
+- reasons: one short plain sentence a busy investor can read in two seconds."""
 
 
 RETRY_NOTE = ("\n\nIMPORTANT: your last reply could not be read. Reply with ONLY the JSON object described above, "
@@ -448,9 +549,17 @@ class MockBackend(VisionBackend):
             pool = [x for x in labels if (x in targets) == (p >= 50) and x != UNKNOWN] or \
                    [x for x in labels if x != UNKNOWN] or labels
             label = pool[(h >> 24) % len(pool)]
-        return json.dumps({"label": label, "p_target": p, "image_quality": q,
-                           "visible_cues": [f"mock cue {(h >> 32) % 7}"], "reasons": "Mock answer (offline test mode).",
-                           "property_visible": visible})
+        out: dict[str, Any] = {"label": label, "p_target": p, "image_quality": q,
+                               "visible_cues": [f"mock cue {(h >> 32) % 7}"],
+                               "reasons": "Mock answer (offline test mode).", "property_visible": visible}
+        if "building_style" in prompt or "building_style" in ((schema or {}).get("properties") or {}):
+            hit = label in targets
+            out.update(building_style=("garden", "townhome-row")[(h >> 40) % 2] if hit else
+                       ("mid-rise", "high-rise", "converted", "other")[(h >> 40) % 4],
+                       estimated_stories=int(1 + (h >> 44) % 3) if hit else int(3 + (h >> 44) % 6),
+                       buildings_visible=int(1 + (h >> 48) % 6),
+                       condition=("good", "fair", "poor", "unknown")[(h >> 52) % 4])
+        return json.dumps(out)
 
 
 def _labels_from(prompt: str, schema: dict | None) -> tuple[list[str], set[str]]:
@@ -1000,8 +1109,9 @@ WHERE p.market_id = ?
 
 
 def _targets(conn: sqlite3.Connection, market: dict, settings: Settings, *, reviewed_only: bool,
-             reclassify: bool, limit: int | None) -> list[_Target]:
+             reclassify: bool, limit: int | None, prefer_ids: Iterable[int] = ()) -> list[_Target]:
     found: list[tuple[tuple, _Target]] = []
+    first = {int(x) for x in prefer_ids}
     for r in rows(conn, _TARGET_SQL, (market["id"],)):
         reviewed = bool(r.get("reviewed_label"))
         if reviewed != reviewed_only:
@@ -1013,7 +1123,8 @@ def _targets(conn: sqlite3.Connection, market: dict, settings: Settings, *, revi
         if not images:
             continue
         rank = r.get("rank")
-        order = (classified, r.get("in_buybox") == 0, rank is None, rank or 0, -(r.get("score") or 0.0), r["id"])
+        order = (classified, r["id"] not in first, r.get("in_buybox") == 0, rank is None, rank or 0,
+                 -(r.get("score") or 0.0), r["id"])
         found.append((order, _Target(r["id"], r, images, classified)))
     found.sort(key=lambda t: t[0])
     out = [t for _, t in found]
@@ -1034,7 +1145,7 @@ class _Asker:
     def __init__(self, ac: AssetClass, backend: VisionBackend, cfg: VisionConfig, settings: Settings):
         self.ac, self.backend, self.cfg, self.settings = ac, backend, cfg, settings
         self.labels = review.labels_of(ac)
-        self.schema = result_schema(self.labels)
+        self.schema = result_schema(self.labels, details=wants_details(ac))
         k = cfg.examples_per_call
         self.pool = review.examples_for(ac, k + 1, settings=settings) if k else []
 
@@ -1106,6 +1217,8 @@ def _save(conn: sqlite3.Connection, t: _Target, res: VisualResult, ac: AssetClas
         "ai_label": res.label, "ai_p": res.p_target, "image_quality": res.image_quality,
         "property_visible": int(res.property_visible), "cues_json": dumps(res.visible_cues), "reasons": res.reasons,
         "prior": prior, "model": f"{backend.name}:{backend.model}", "error": None, "checked_at": now_iso(),
+        "ai_style": res.building_style, "ai_stories": res.estimated_stories, "ai_buildings": res.buildings_visible,
+        "ai_condition": res.condition,
     }
     if not keep_final:
         row["final_p"] = fp
@@ -1160,15 +1273,16 @@ def _estimate(conn: sqlite3.Connection, slug: str, ac: AssetClass, targets: list
 
 def classify_estimate(conn: sqlite3.Connection, market_slug: str, limit: int | None = None,
                       backend: VisionBackend | str | None = None, *, reviewed_only: bool = False,
-                      reclassify: bool = False) -> dict:
+                      reclassify: bool = False, prefer_ids: Iterable[int] = ()) -> dict:
     """What a photo-check run would do, without asking Claude anything."""
     return classify_properties(conn, market_slug, limit=limit, dry_run=True, backend=backend,
-                               reviewed_only=reviewed_only, reclassify=reclassify)
+                               reviewed_only=reviewed_only, reclassify=reclassify, prefer_ids=prefer_ids)
 
 
 def classify_properties(conn: sqlite3.Connection, market_slug: str, limit: int | None = None, dry_run: bool = False,
                         backend: VisionBackend | str | None = None, progress: Progress = None, confirm: bool = False,
-                        *, reviewed_only: bool = False, reclassify: bool = False) -> dict:
+                        *, reviewed_only: bool = False, reclassify: bool = False,
+                        prefer_ids: Iterable[int] = ()) -> dict:
     """Ask Claude about every property whose photos are saved but not yet checked.
 
     limit: at most this many properties (best-ranked first).
@@ -1177,6 +1291,7 @@ def classify_properties(conn: sqlite3.Connection, market_slug: str, limit: int |
     confirm: needed when more than safety.confirm_over_properties calls would be made (not for mock).
     reviewed_only: re-check the properties you reviewed (calibrate); your answers are kept.
     reclassify: also re-check properties the AI already answered (cached answers are reused).
+    prefer_ids: check these properties first (the batch whose photos were just pulled).
     """
     settings = get_settings()
     cfg = vision_config(settings)
@@ -1186,7 +1301,8 @@ def classify_properties(conn: sqlite3.Connection, market_slug: str, limit: int |
         return {"dry_run": dry_run, "enabled": False, "asset_class": ac.key, "properties": 0, "calls": 0,
                 "needs_confirm": False, "message": f"{ac.label} has no photo check."}
     be = backend if isinstance(backend, VisionBackend) else get_backend(backend, settings)
-    targets = _targets(conn, market, settings, reviewed_only=reviewed_only, reclassify=reclassify, limit=limit)
+    targets = _targets(conn, market, settings, reviewed_only=reviewed_only, reclassify=reclassify, limit=limit,
+                       prefer_ids=prefer_ids)
     asker = _Asker(ac, be, cfg, settings)
     estimate = _estimate(conn, market_slug, ac, targets, asker, be, cfg, reviewed_only)
     if dry_run:
@@ -1277,4 +1393,4 @@ __all__ = ["AnthropicAPIBackend", "ClaudeCLIBackend", "MockBackend", "VisionBack
            "VisionConfig", "VisionError", "VisionFatalError", "VisionParseError", "VisualResult", "ai_final_p",
            "build_prompt", "claude_cli_available", "classify_estimate", "classify_properties", "combine",
            "explain_prior", "extract_json_object", "final_p_for", "get_backend", "parse_cli_output",
-           "parse_prior_rule", "parse_result", "result_schema", "rules_prior", "vision_config"]
+           "parse_prior_rule", "parse_result", "result_schema", "rules_prior", "vision_config", "wants_details"]

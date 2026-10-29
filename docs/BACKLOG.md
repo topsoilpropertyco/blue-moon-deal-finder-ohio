@@ -11,6 +11,15 @@ Mark an item done (with the date) when it ships; never delete it.
 4. **Run screen as one top-to-bottom list.** Replace the grid of boxes with one row per step, top to bottom, so nothing is missed. Make it obvious where you are now and what to do next. **Done 2026-10-21:** numbered steps from import to Crexi credits, each Done / To do / Waiting / Blocked, with "Do this next" at the top.
 5. **Blue Moon branding.** Use the Find / Fund / Operate stool logo with a bright, glowing blue moon behind it (like the bright moon photo Seth shared), and bring the moon more into the design style. The logo is in `docs/brand/`. **Done 2026-10-24:** stool with a soft moon glow (dark mode) in the header, sign-in page, empty Deals and Import screens and the tab icon.
 
+## Photos, the AI first pass and the review loop (requested 2026-10-29)
+
+14. **Every lead gets Street View photos and an AI first pass; Seth reviews.** **Done 2026-10-29:**
+    - Run screen card **Photos and AI check for this month** ("412 of 600 done this month") with **Test on 5**, **Do the next 100** and **Keep going** (photos, then the AI check, in one job; the cost shown and one click to OK over 50). Goal and batch are `photos:` in `config.yaml`, set your own in `config.local.yaml` (shown in Settings).
+    - The AI also reads the building: style, estimated stories, buildings visible, condition (card, property panel, ranked export).
+    - Photo review: unsure first, then every AI call (**Yes, the AI is right** / **No, it's wrong**, keys Y and N), **Everything / Unsure only**; both answers feed `labels/examples.jsonl`. Scorecard: how often the AI is right, per label, and "Is it learning?" (latest 50 vs earlier).
+    - A walk-up now counts x1.8 (was x1.4) in the apartments Blue Moon score; still never required.
+    - Still open: photos and AI answers made before 2026-10-29 have no building details (re-run with Calibrate, or ask for a "re-read" button); a Settings screen editor for the goal (today it is a file); a monthly reset reminder.
+
 ## Exports and the CRM (requested 2026-10-21)
 
 6. **Exports screen wording.** "Files for Brad" isn't quite right. Rework how the exports are named and grouped. **Done 2026-10-24:** Work lists, Hand off, Fix data in a spreadsheet, Summary.
@@ -26,7 +35,7 @@ Mark an item done (with the date) when it ships; never delete it.
 
 ## Setup still open
 
-- Google Maps key: Google's "couldn't verify it's you" check blocked copying the key on the Mac Mini. Once copied: `uv run run.py key google`, restart the dashboard, then on Run: Drive times, Photos and Photo check with **Test on 5**.
+- Google Maps key: Google's "couldn't verify it's you" check blocked copying the key on the Mac Mini. Once copied: `uv run run.py key google`, restart the dashboard, then on Run: Drive times, then **Photos and AI check for this month** with **Test on 5**.
 - Delete the old `build/v1` branch on GitHub (it holds two owner names in an old commit).
 
 ## Done 2026-10-21 (asked for directly)

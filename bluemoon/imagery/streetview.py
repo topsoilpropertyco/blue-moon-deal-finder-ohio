@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from ..cache import cache_get, cache_put, estimate_cost, make_key, month_usage, record_call
 from ..config import AssetClass, Settings, get_settings, secret
-from ..db import dumps, market_by_slug, rows, upsert
+from ..db import dumps, market_by_slug, now_iso, rows, upsert
 from ..enrich import geo
 from ..util import bearing_deg, haversine_miles
 
@@ -348,10 +348,12 @@ def _drive_row(r: Mapping[str, Any]) -> dict | None:
 
 
 def _priority(r: Mapping[str, Any]) -> tuple:
+    """Buy-box properties first (best Blue Moon rank first), then the rest, ranked the same way."""
     rank = r.get("s_rank")
     score = r.get("s_score")
     minutes = r.get("d_minutes")
-    return (rank is None, rank or 0, -(score or 0.0), minutes if minutes is not None else 1e9, r["id"])
+    return (r.get("s_in_buybox") == 0, rank is None, rank or 0, -(score or 0.0),
+            minutes if minutes is not None else 1e9, r["id"])
 
 
 def _plan(conn: sqlite3.Connection, market_slug: str, cfg: ImageryConfig, settings: Settings,
@@ -670,6 +672,8 @@ def _absorb(conn: sqlite3.Connection, out: _Outcome, settings: Settings, cfg: Im
     if not out.attempted:
         return
     stats.attempted += 1
+    if out.saved:
+        record_pull(conn, job.pid)          # counts toward this month's photo goal (Run screen)
     files = existing_images(settings, job.pid)
     status, error = _status_after(out, cfg, files)
     stats.fetched += int(bool(out.saved))
@@ -871,7 +875,14 @@ def _result_message(plan: _Plan, stats: _Stats, skipped: int, cost: dict) -> str
 _VISUAL_COLUMNS = frozenset({
     "status", "pano_id", "pano_lat", "pano_lng", "pano_date", "heading", "images_json", "ai_label", "ai_p",
     "image_quality", "property_visible", "cues_json", "reasons", "prior", "final_p", "model", "error",
-    "reviewed_label", "reviewed_note", "reviewed_at", "checked_at"})
+    "reviewed_label", "reviewed_note", "reviewed_at", "checked_at", "ai_style", "ai_stories", "ai_buildings",
+    "ai_condition"})
+
+
+def record_pull(conn: sqlite3.Connection, property_id: int) -> None:
+    """Note that this property's photos were pulled from Google just now (one row per pull; commits)."""
+    with conn:
+        conn.execute("INSERT INTO photo_pulls(property_id, pulled_at) VALUES(?, ?)", (int(property_id), now_iso()))
 
 
 def update_visual(conn: sqlite3.Connection, property_id: int, data: Mapping[str, Any]) -> None:
@@ -913,4 +924,5 @@ def map_links(lat: float | None, lng: float | None, heading: float | None = None
 
 
 __all__ = ["add_your_image", "your_images", "ImageryConfig", "StreetViewMetadata", "existing_images", "fetch_imagery", "image_paths",
-           "imagery_config", "imagery_estimate", "images_for", "map_links", "street_view_shots", "update_visual"]
+           "imagery_config", "imagery_estimate", "images_for", "map_links", "record_pull", "street_view_shots",
+           "update_visual"]

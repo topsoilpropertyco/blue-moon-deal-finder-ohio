@@ -1,8 +1,10 @@
-/* Photo review: answer the photo check the AI was unsure about, one property at a time, with number keys.
- * Answers replace the AI's guess, update the Blue Moon score and become examples the AI reads next time.
+/* Photo review: the AI looks first, you check its work one property at a time. The ones it is unsure about come
+ * first; then every call it made ("Yes, the AI is right" / "No, it's wrong"), best prospects first. Number keys
+ * answer directly; Y and N confirm or correct the AI's call. Answers replace the AI's guess, update the Blue Moon
+ * score and become examples the AI reads next time. "Unsure only" hides the AI's calls.
  *
  *   #review             the review queue
- *   #review/scorecard   how often the AI agreed with you, and the acceptance check
+ *   #review/scorecard   how often the AI is right (overall, per label, learning over time), and the acceptance check
  *
  * Uses BM.work helpers from drill.js.
  */
@@ -28,10 +30,21 @@
     market: null,
     seq: 0,
     mode: 'queue',   // queue | scorecard
-    q: null,         // {items, total, counts, idx, done, busy, loadingMore: in-flight page request}
+    scope: null,     // everything | unsure (null until the first answer from the server)
+    q: null,         // {items, total, counts, idx, done, busy, wrongFor, loadingMore: in-flight page request}
   };
 
-  const newQueue = () => ({ items: [], total: 0, counts: {}, idx: 0, done: 0, busy: false, loadingMore: null });
+  const newQueue = () => ({ items: [], total: 0, counts: {}, idx: 0, done: 0, busy: false, wrongFor: null, loadingMore: null });
+  const STYLE = { garden: 'Garden style', 'townhome-row': 'Townhome row', 'mid-rise': 'Mid-rise', 'high-rise': 'High-rise',
+    converted: 'Converted building', other: 'Other style' };
+  const COND = { good: 'Good condition', fair: 'Fair condition', poor: 'Poor condition', unknown: 'Condition unclear' };
+
+  function savedScope() {
+    try { return window.localStorage.getItem('bm.review.scope'); } catch (e) { return null; }
+  }
+  function saveScope(v) {
+    try { window.localStorage.setItem('bm.review.scope', v); } catch (e) { /* a private window: nothing to remember */ }
+  }
 
   const asset = () => (BM.state.summary && BM.state.summary.asset_class) || {};
 
@@ -42,6 +55,7 @@
     if (S.market !== BM.state.market) {
       S.market = BM.state.market;
       S.q = null;
+      S.scope = null;
     }
     const ac = asset();
     if (ac.visual_enabled === false) {
@@ -77,13 +91,23 @@
         <button data-go="review" data-params="scorecard" aria-pressed="${tab === 'scorecard'}">Scorecard</button>
       </div>`;
     const lines = tab === 'scorecard'
-      ? '<li>How often the AI agreed with you on the properties you reviewed.</li><li>Goal: greens are 90% truly a target, reds 90% truly not.</li>'
-      : `${rest ? `<li>${esc(rest)}</li>` : ''}<li>The AI is unsure about these. Your answer replaces its guess and updates the Blue Moon score.</li>
-         <li>Each answer becomes an example the AI reads next time.</li><li class="dr-keys">Use the number keys to move fast.</li>`;
+      ? '<li>How often the AI is right on the properties you checked, which labels it gets right, and whether it is learning from you.</li><li>Goal: greens are 90% truly a target, reds 90% truly not.</li>'
+      : `${rest ? `<li>${esc(rest)}</li>` : ''}<li>The AI looked first. The ones it is unsure about come first, then each call it made, best prospects first.</li>
+         <li>Your answers (Yes, the AI is right / No, it's wrong) update the Blue Moon score and teach the AI.</li><li class="dr-keys">Keys: <kbd>Y</kbd> yes, <kbd>N</kbd> no, or a number to answer directly.</li>`;
     return `
       <div class="dr-row-between"><div class="eyebrow">Photo review</div>${tabs}</div>
       <h1>${esc(tab === 'scorecard' ? 'How well the AI sees' : title)}</h1>
-      <ul class="lines">${lines}</ul>`;
+      <ul class="lines">${lines}</ul>${tab === 'queue' ? scopeToggle() : ''}`;
+  }
+
+  /** "Everything / Unsure only" (the counts come from the server with each page). */
+  function scopeToggle() {
+    const sizes = (S.q && S.q.counts && S.q.counts.scopes) || {};
+    const n = (k) => (sizes[k] == null ? '' : ` (${num(sizes[k])})`);
+    return `<div class="seg dr-scope" role="group" aria-label="What to review">
+        <button data-act="scope" data-scope="everything" aria-pressed="${S.scope === 'everything'}">Everything${n('everything')}</button>
+        <button data-act="scope" data-scope="unsure" aria-pressed="${S.scope === 'unsure'}">Unsure only${n('unsure')}</button>
+      </div>`;
   }
 
   function noPhotoCheck(ac) {
@@ -100,11 +124,13 @@
     const seq = ++S.seq;
     S.mode = 'queue';
     if (!S.q) S.q = newQueue();
+    if (!S.scope) S.scope = savedScope() === 'unsure' ? 'unsure' : savedScope() === 'everything' ? 'everything' : null;
     const q = S.q;
     if (!q.items.length) paint(head('queue') + W.loading('Loading photos…'));
     try {
       const data = await fetchQueue(Math.max(PAGE, q.items.length), 0);
       if (seq !== S.seq) return;
+      if (!S.scope) S.scope = (data && data.scope) || 'everything';
       applyQueue(q, data);
       paintQueue();
     } catch (err) {
@@ -113,7 +139,8 @@
     }
   }
 
-  const fetchQueue = (limit, offset) => BM.api(W.mpath(`/review/queue?limit=${Math.min(200, limit)}&offset=${offset}`));
+  const fetchQueue = (limit, offset) => BM.api(W.mpath(
+    `/review/queue?limit=${Math.min(200, limit)}&offset=${offset}${S.scope ? `&scope=${S.scope}` : ''}`));
 
   function applyQueue(q, data) {
     const current = q.items[q.idx] && q.items[q.idx].id;
@@ -176,7 +203,9 @@
     const reviewed = Number(q.counts.reviewed) || 0;
     if (reviewed || q.done) {
       return BM.ui.empty('All caught up',
-        'Every unsure property has an answer. Your answers are now examples the AI reads before its next guesses.',
+        S.scope === 'unsure'
+          ? 'Every unsure property has an answer. Choose Everything above to check the calls the AI made.'
+          : 'Every property the AI looked at has your answer. Your answers are now examples the AI reads before its next guesses.',
         '<button class="btn" data-go="review" data-params="scorecard">See the scorecard</button>');
     }
     return BM.ui.empty('No photos to review yet',
@@ -229,10 +258,21 @@
         <dt>AI guess</dt><dd>${it.ai_label ? `<b>${esc(W.labelText(it.ai_label))}</b> <span class="dr-mono note">${esc(it.ai_label)}</span>` : '<span class="muted">None yet</span>'}</dd>
         <dt>Confidence</dt><dd><span class="dot ${COLOR_DOT[it.color] || 'n'}"></span>${conf}</dd>
         ${quality ? `<dt>Photos</dt><dd>${esc(quality)}${it.pano_date ? ` · taken ${esc(it.pano_date)}` : ''}</dd>` : ''}
+        ${detailsRow(it.details)}
         <dt>Blue Moon now</dt><dd>${W.moonScore(it.score)}${it.rank ? ` <span class="note">rank #${num(it.rank)}</span>` : ''}</dd>
       </dl>
       ${it.reasons ? `<p class="dr-reasons">${esc(it.reasons)}</p>` : ''}
       ${(it.cues || []).length ? `<div class="dr-tags">${it.cues.map((c) => `<span class="dr-tag">${esc(c)}</span>`).join('')}</div>` : ''}`;
+  }
+
+  /** The AI's first-pass building details as one line: style, stories, buildings, condition. */
+  function detailsRow(d) {
+    if (!d) return '';
+    const bits = [d.style ? (STYLE[d.style] || d.style) : '',
+      d.stories ? `about ${num(d.stories)} ${Number(d.stories) === 1 ? 'story' : 'stories'}` : '',
+      d.buildings ? `${num(d.buildings)} ${Number(d.buildings) === 1 ? 'building' : 'buildings'}` : '',
+      d.condition ? (COND[d.condition] || d.condition) : ''].filter(Boolean);
+    return bits.length ? `<dt>Building</dt><dd>${esc(bits.join(' · '))} <span class="note">(AI estimate)</span></dd>` : '';
   }
 
   function choicesHtml(it) {
@@ -241,6 +281,22 @@
         <span class="dr-choice-t"><b>${esc(W.labelText(c.label))}</b>${c.help ? `<span class="note">${esc(c.help)}</span>` : ''}</span>
         <kbd>${esc(c.key)}</kbd>
       </button>`).join('')}</div>`;
+  }
+
+  /** The two big buttons on a card where the AI made a call. "No" opens the label choices. */
+  function verdictButtons(it, wrong) {
+    const say = it.ai_label_name || W.labelText(it.ai_label);
+    const walk = it.ai_is_target ? `a ${esc(String(it.target_name || 'target').toLowerCase())}` : `not a ${esc(String(it.target_name || 'target').toLowerCase())}`;
+    return `
+      <div class="dr-verdict ${it.ai_is_target ? 'is-target' : 'not-target'}">
+        <div class="eyebrow">The AI's call</div>
+        <p class="dr-verdict-t"><b>${esc(say)}</b> <span class="note">so ${walk}</span></p>
+      </div>
+      <div class="dr-yn" role="group" aria-label="Is the AI right?">
+        <button class="dr-yes" data-act="yes"><b>Yes, the AI is right</b><kbd>Y</kbd></button>
+        <button class="dr-no" data-act="no" aria-expanded="${wrong ? 'true' : 'false'}"><b>No, it's wrong</b><kbd>N</kbd></button>
+      </div>
+      ${wrong ? `<h3 class="dr-q">What is it, really?</h3>${choicesHtml(it)}` : ''}`;
   }
 
   function linksHtml(it) {
@@ -273,8 +329,9 @@
             <p class="note dr-tight">${esc(it.why || '')}</p>
           </div>
           ${aiHtml(it)}
-          <h3 class="dr-q">${esc(it.question || asset().visual_question || 'What do you see?')}</h3>
-          ${choicesHtml(it)}
+          ${it.ai_called
+    ? verdictButtons(it, q.wrongFor === it.id)
+    : `<h3 class="dr-q">${esc(it.question || asset().visual_question || 'What do you see?')}</h3>${choicesHtml(it)}`}
           <label class="dr-field dr-note"><span>Note (optional): why, in a few words</span>
             <input data-f="note" autocomplete="off" placeholder="e.g. stairs and breezeway on the side"></label>
           ${linksHtml(it)}
@@ -286,24 +343,29 @@
             <button class="btn" data-act="prev" ${q.idx <= 0 ? 'disabled' : ''}>← Back <kbd>K</kbd></button>
             <button class="btn" data-act="skip">Skip for now <kbd>S</kbd></button>
           </div>
-          <p class="note dr-keys">Keys: <kbd>1</kbd>–<kbd>${keys}</kbd> answer · <kbd>S</kbd> skip · <kbd>K</kbd> back</p>
+          <p class="note dr-keys">Keys: ${it.ai_called ? '<kbd>Y</kbd> yes · <kbd>N</kbd> no · ' : ''}<kbd>1</kbd>–<kbd>${keys}</kbd> answer · <kbd>S</kbd> skip · <kbd>K</kbd> back</p>
         </section>
       </div>`;
   }
 
-  async function answer(label) {
+  /** Save your answer. On a card where the AI made a call: `agreed` true = "Yes, the AI is right" (its label is
+   *  yours), false = "No, it's wrong" (`label` is the right one). Picking the AI's own label counts as Yes. */
+  async function answer(label, agreed) {
     const q = S.q;
     const it = q && q.items[q.idx];
-    if (!it || q.busy || !label) return;
+    if (!it || q.busy || (!label && agreed !== true)) return;
+    if (it.ai_called && label && label === it.ai_label) { label = null; agreed = true; }
+    if (it.ai_called && label && agreed == null) agreed = false;
     const note = ((S.root.querySelector('[data-f="note"]') || {}).value || '').trim();
     q.busy = true;
-    const btns = [...S.root.querySelectorAll('.dr-choice, .dr-nav button')];
+    const btns = [...S.root.querySelectorAll('.dr-choice, .dr-yn button, .dr-nav button')];
     btns.forEach((b) => { b.disabled = true; });
     try {
-      const res = await BM.api(W.mpath(`/properties/${it.id}/review`), { method: 'POST', body: { label, note: note || null } });
-      const agreed = res && res.agreed_with_ai;
-      const extra = agreed === true ? ' The AI agreed.' : agreed === false ? ' The AI guessed differently; your answer wins.' : '';
-      BM.toast(`Saved: ${W.labelText((res && res.label) || label)}.${extra}`);
+      const body = { label: label || null, note: note || null };
+      if (it.ai_called) body.agreed = agreed === true;
+      const res = await BM.api(W.mpath(`/properties/${it.id}/review`), { method: 'POST', body });
+      BM.toast((res && res.message) || `Saved: ${W.labelText((res && res.label) || label)}.`);
+      q.wrongFor = null;
       q.done += 1;
       q.items.splice(q.idx, 1);
       q.total = Math.max(0, q.total - 1);
@@ -319,6 +381,25 @@
     }
   }
 
+  /** "No, it's wrong": show the label choices (keys 1-5 pick one). */
+  function openWrong() {
+    const q = S.q;
+    const it = q && q.items[q.idx];
+    if (!it || q.busy || !it.ai_called) return;
+    q.wrongFor = it.id;
+    paintQueue();
+    const first = S.root && S.root.querySelector('.dr-choice');
+    if (first) first.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+
+  function switchScope(scope) {
+    if (!scope || scope === S.scope || (S.q && S.q.busy)) return;
+    S.scope = scope === 'unsure' ? 'unsure' : 'everything';
+    saveScope(S.scope);
+    S.q = newQueue();
+    renderQueue();
+  }
+
   async function step(delta) {
     const q = S.q;
     if (!q || q.busy) return;
@@ -327,6 +408,7 @@
     await fillTo(q, target);
     if (S.q !== q) return;
     q.idx = Math.min(target, q.items.length);
+    q.wrongFor = null;
     paintQueue();
   }
 
@@ -426,6 +508,59 @@
       </section>`;
   }
 
+  function barCell(pct) {
+    if (pct == null) return '<span class="muted">—</span>';
+    return `<span class="dr-pctbar" role="img" aria-label="${Math.round(pct)}%"><i style="width:${Math.max(0, Math.min(100, pct))}%"></i></span> <b>${pctText(pct)}</b>`;
+  }
+
+  function byLabelHtml(card) {
+    const rows = (card.by_label || []).filter((b) => b.ai_said || b.you_said).map((b) => `
+      <tr>
+        <td>${esc(W.labelText(b.label))}${b.target ? ` <span class="pill good">${esc(card.target_name || 'Target')}</span>` : ''}</td>
+        <td class="num c">${num(b.ai_said)}</td>
+        <td class="num c">${num(b.right)}</td>
+        <td class="dr-pctcell">${barCell(b.pct)}</td>
+        <td class="num c">${num(b.you_said)}</td>
+        <td class="dr-pctcell">${barCell(b.found_pct)}</td>
+      </tr>`).join('');
+    if (!rows) return '';
+    return `
+      <section class="panel" aria-label="How often the AI is right, by label">
+        <h2>Right, label by label</h2>
+        <p class="note dr-tight">"Right when it says it" is how often your answer matched the AI when it called that label. "Found" is how many of the ones you say are that label the AI also called that.</p>
+        <div class="dr-scroll">
+          <table class="wt dr-label-table">
+            <thead><tr><th>Label</th><th class="c">AI said it</th><th class="c">You agreed</th><th>Right when it says it</th><th class="c">You say it is</th><th>Found by the AI</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </section>`;
+  }
+
+  function learningHtml(card) {
+    const L = card.learning || {};
+    const rec = L.recent || {};
+    const ear = L.earlier || {};
+    const trend = L.trend || [];
+    const word = { better: ['good', 'Getting better'], worse: ['bad', 'Slipping'], steady: ['na', 'Holding steady'] }[L.verdict] || ['na', 'Too early to say'];
+    const bars = trend.length > 1 ? `
+      <div class="dr-trend" role="img" aria-label="Share the AI got right in each run of reviews, oldest first: ${esc(trend.map((t) => pctText(t.pct)).join(', '))}">
+        ${trend.map((t) => `<div class="dr-tbar" title="Reviews ${num(t.from)}-${num(t.to)}${t.date ? `, up to ${esc(t.date)}` : ''}: ${pctText(t.pct)} right">
+          <i style="height:${Math.max(4, Math.min(100, t.pct || 0))}%"></i><span>${pctText(t.pct)}</span></div>`).join('')}
+      </div>
+      <p class="note dr-tight">Each bar is a run of reviews, oldest on the left: how often the AI was right in that run.</p>` : '';
+    return `
+      <section class="panel" aria-label="Learning over time">
+        <div class="dr-row-between"><h2>Is it learning?</h2><span class="dr-pass ${word[0]}">${word[1]}</span></div>
+        <p class="note dr-tight">${esc(L.message || '')}</p>
+        <div class="strip dr-strip">
+          ${BM.ui.stat(pctText(rec.pct), `Latest ${num(rec.n || 0)} reviews`)}
+          ${BM.ui.stat(ear.n ? pctText(ear.pct) : '—', `Earlier (${num(ear.n || 0)} reviews)`)}
+        </div>
+        ${bars}
+      </section>`;
+  }
+
   function scorecardHtml(card) {
     if (!card.reviewed) {
       return BM.ui.empty('No reviews yet',
@@ -433,16 +568,16 @@
         '<button class="btn primary" data-go="review">Start reviewing</button>');
     }
     const tiles = [
-      [num(card.reviewed), 'Properties you reviewed'],
-      [num(card.with_ai), 'Compared with the AI'],
-      [pctText(card.label_accuracy), 'Same label as you'],
-      [pctText(card.target_accuracy), 'Right on target vs not'],
+      [pctText(card.label_accuracy), 'How often the AI is right'],
+      [num(card.with_ai), `Checked against the AI (${num(card.reviewed)} reviewed)`],
+      [pctText(card.target_accuracy), `Right on ${String(card.target_name || 'target').toLowerCase()} or not`],
     ];
     return `
       <div class="strip dr-strip">${tiles.map(([v, l]) => BM.ui.stat(v, l)).join('')}</div>
       ${card.message ? `<p class="note dr-banner">${esc(card.message)}</p>` : ''}
+      ${learningHtml(card)}
       ${acceptanceHtml(card.acceptance || {})}
-      <div class="dr-stack">${confusionHtml(card)}${byColorHtml(card)}</div>
+      <div class="dr-stack">${byLabelHtml(card)}${confusionHtml(card)}${byColorHtml(card)}</div>
       <p class="note">To re-check everything you reviewed with the current examples: <button class="btn small" type="button" data-go="run">Calibrate on the Run screen</button></p>`;
   }
 
@@ -460,6 +595,9 @@
       skip: () => step(1),
       prev: () => step(-1),
       restart: () => { S.q.idx = 0; paintQueue(); },
+      yes: () => answer(null, true),
+      no: () => openWrong(),
+      scope: () => switchScope(b.dataset.scope),
       photo: () => {},
       'open-property': () => { const it = S.q && S.q.items[S.q.idx]; if (it) BM.openProperty(it.id); },
     };
@@ -510,6 +648,8 @@
     const choice = (it.choices || []).find((c) => String(c.key) === e.key);
     let act = null;
     if (choice) act = () => answer(choice.label);
+    else if (k === 'y' && it.ai_called) act = () => answer(null, true);
+    else if (k === 'n' && it.ai_called) act = () => openWrong();
     else if (k === 's' || k === 'j') act = () => step(1);
     else if (k === 'k') act = () => step(-1);
     if (!act) return;

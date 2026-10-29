@@ -169,7 +169,9 @@ Every function that writes commits its own transaction.
   Street View metadata first (free; no pano within radius -> status no_imagery). Bearing pano->property;
   3 images at heading, heading±35 (fov 80, pitch 5, 640x640) + 1 satellite (Maps Static zoom 19).
   Saves to `images/{property_id}/sv_0.jpg, sv_1.jpg, sv_2.jpg, sat.jpg`. Only for asset classes with
-  visual_check enabled and properties in the buy box (or all with `include_excluded=True`). Caps from config.
+  visual_check enabled and properties in the buy box (or all with `include_excluded=True`; buy-box properties always
+  go first, best Blue Moon rank first, then the rest the same way). Caps from config. Each time photos are saved
+  `record_pull(conn, property_id)` adds a row to `photo_pulls(property_id, pulled_at)`.
 - `vision.py`: backends with `.name` and `.classify(image_paths: list[Path], prompt: str) -> str` —
   `ClaudeCLIBackend` (runs `claude -p` with `--output-format json`, the Read tool allowed for the image dir,
   ANTHROPIC_API_KEY removed from the child env so the Claude plan is used), `AnthropicAPIBackend`, `MockBackend`.
@@ -178,11 +180,42 @@ Every function that writes commits its own transaction.
   `classify_properties(conn, market_slug, limit=None, dry_run=False, backend=None, progress=None, confirm=False) -> dict`.
   final_p = weight_vision*ai_p + (1-weight_vision)*(50+prior); NULL when image_quality poor/none or
   property_visible false (needs human review).
-- `review.py`: `review_queue(conn, market_slug, limit=50) -> list[dict]` (final_p NULL or 21-79 first, then a
-  random 5% spot-check of greens/reds); `save_review(conn, property_id, label, note=None) -> dict` (sets
-  reviewed_label, final_p 100/0/60 by label; copies images into `labels/examples/` + appends
-  `labels/examples.jsonl`; updates `labels/scorecard.json`); `examples_for(asset_class, k) -> list[dict]`;
-  `scorecard(conn, market_slug) -> dict`; `calibrate(conn, market_slug, backend=None) -> dict`.
+  First-pass building details: when the asset class has `visual_check.details: true` (apartments) the prompt and
+  the JSON schema also ask for `building_style` (garden | townhome-row | mid-rise | high-rise | converted | other),
+  `estimated_stories`, `buildings_visible`, `condition` (good | fair | poor | unknown) and a one-sentence `reasons`.
+  They are read leniently (`normalize_style`, `normalize_condition`, whole numbers in range) and saved in
+  `visual_checks.ai_style / ai_stories / ai_buildings / ai_condition` (added by `db.MIGRATIONS`, so an older
+  database gets the columns on its next connect). Answers saved before this have none. Colors and "unsure" still
+  come only from final_p (the same green/yellow/red thresholds). `classify_properties(..., prefer_ids=[...])`
+  checks those properties first (the batch whose photos were just pulled).
+- `monthly.py`: the monthly photo goal (`photos:` in config.yaml: `monthly_target` 600, `batch` 100; your own
+  numbers in config.local.yaml). `status(conn, slug)` -> `{done, target, remaining, reached, pool:{buybox, rest},
+  ai_waiting, batch, keep_going_to}` ("412 of 600 done this month": distinct properties in `photo_pulls` this
+  calendar month, local time; photos saved before the table existed are counted once from their files' dates,
+  `backfill`); `photo_pool(conn, slug)` = properties still needing photos, buy box first by rank, then the rest;
+  `estimate_batch(conn, slug, n)` = a dry run of photos + the AI check (calls nothing; `needs_confirm` over
+  `safety.confirm_over_properties`); `run_batch(conn, slug, limit=None, dry_run, confirm, progress)` = photos for
+  the next `limit` (default `batch`) properties with `include_excluded=True`, then the AI check, newly photographed
+  properties first; `run_keep_going(...)` = batches of `batch` until the month's goal (one batch when it is already
+  met), one OK for all of it, stopping at `google.max_*_per_run` and `vision.max_calls_per_run` counted over the
+  whole run, at a fatal problem, or when nothing is left. Never writes anything the two steps it calls would not.
+- `review.py`: `review_queue(conn, market_slug, limit=50, offset=0, include_excluded=False, scope=None) -> list[dict]`.
+  Order: needs-a-look (final_p NULL) and unsure (21-79) first, then checked-nothing/no-photos, then the AI's calls
+  (group `confirm`: green and red) most valuable first (in the buy box, the AI says target, best rank). `scope`
+  `everything` (default, `review.default_scope`) or `unsure` (no `confirm`; `review.spot_check_fraction`, default 0,
+  adds a stable random share of calls as group `spot_check`). Photos the AI hasn't looked at stay out
+  (`review.include_unchecked` false). Each card has `ai_called`, `ai_is_target`, `ai_label_name`, `target_name`,
+  `details {style, style_name, stories, buildings, condition, condition_name}` and a plain `why`.
+  `queue_counts(...)` returns the counts per group plus `scopes {everything, unsure}`.
+  `save_review(conn, property_id, label=None, note=None, agreed=None) -> dict`: `agreed=True` ("Yes, the AI is
+  right") uses the AI's own label; `agreed=False` ("No, it's wrong") needs a different label; the result has
+  `agreed` (None when the AI made no call). Sets reviewed_label, final_p 100/0/60 by label; copies images into
+  `labels/examples/` + appends `labels/examples.jsonl` (`ExampleRecord.agreed`); updates `labels/scorecard.json`.
+  `examples_for(asset_class, k)` also returns `ai_label` and `agreed`; the prompt tells the AI when its earlier guess
+  for an example was wrong. `scorecard(conn, market_slug)` adds `ai_right`, `by_label` (per label: AI said, right,
+  pct, you said, found_pct), `learning {recent, earlier, delta, verdict better|steady|worse|not_enough, trend[]}`
+  (your latest `review.learning_window`=50 reviews vs the earlier ones) to the confusion matrix, by-color accuracy and
+  acceptance check; `calibrate(conn, market_slug, backend=None) -> dict`.
 
 ### scoring (`bluemoon/scoring/`)
 - `buybox.py`: `evaluate(prop, enrich, asset_class, market, settings) -> dict`
@@ -288,6 +321,8 @@ Every function that writes commits its own transaction.
 
 ### pipeline + jobs + exports
 - `bluemoon/pipeline.py`: `STEPS = ["import","owners","drive","rent","parcels","photos","classify","score","drill","research","all"]`
+  (`EXTRA_STEPS` also holds `photo_batch` and `photo_keep_going`: the Run screen's monthly photo goal buttons, both
+  paid steps that re-score afterwards; `all` is unchanged)
   (`parcels`, label "County records", is free and not in `PAID_STEPS`; it runs inside `all` after the first `score`,
   so the buy box is known, and before the paid steps; `after_import` does not run it because it uses the network;
   aliases `county_records` and `county`)
@@ -300,7 +335,7 @@ Every function that writes commits its own transaction.
 - `bluemoon/exports.py`: `export_market(conn, market_slug, out_dir=None, only=None, stamp_handoffs=True) ->
   dict[str, Path]` (`ranked_list.xlsx`, `ranked_list.csv`, `excluded_<reason>.csv` incl. `excluded_manual.csv`,
   `crm_handoff.csv`, `mailing_list.csv`, `drill_worklist.csv`, `run_summary.md`). Property lists include "Why
-  this score", "Photo reasons" and, after "Why set aside": "Buy box decision", "Rules said", "Decided by",
+  this score", "Photo reasons" (followed by "Building style (AI)", "Stories (AI estimate)", "Buildings seen (AI)", "Condition (AI)" and "Photo answer from") and, after "Why set aside": "Buy box decision", "Rules said", "Decided by",
   "Decided on", "Set-aside groups", and end with "Property ID" and "Row as of" (max of `properties.updated_at` and the
   last buy-box decision; the round trip's staleness guard). Workbooks carry metadata creator "Blue Moon Deal Finder".
   `export_review(conn, market_slug, bucket) -> Path`: one set-aside group as `output/<market>/review/review_<group>.xlsx`
@@ -360,13 +395,14 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | POST | `/api/m/{slug}/properties/{id}/outreach` | body `{channel, outcome, contact_point_id?, notes?}` |
 | POST | `/api/m/{slug}/properties/{id}/level` | body `{action, person?, note?}` |
 | POST | `/api/m/{slug}/properties/{id}/credit` | body `{result?}` |
-| POST | `/api/m/{slug}/properties/{id}/review` | body `{label, note?}` |
+| POST | `/api/m/{slug}/properties/{id}/review` | body `{label?, note?, agreed?}`: `{agreed: true}` = "Yes, the AI is right" (no label needed), `{agreed: false, label}` = "No, it's wrong"; plain `{label}` as before. Answer has `agreed`, `message` |
 | POST | `/api/m/{slug}/properties/{id}/outcome` | body `{outcome, note?}` |
 | GET | `/api/m/{slug}/drill?scope=buybox\|all` | drill overview (default `buybox`: owners of buy-box properties; `all`: everyone) |
 | GET | `/api/m/{slug}/drill/queue/{stage_key}?limit=&offset=&scope=` | stage queue (`stage_key=validate` for reach-out queue; `scope` as above) |
 | GET | `/api/m/{slug}/credits` | `{status, plan:[...], extras:[...], planned, planned_all, extra_count, extras_all, other_markets, others:[{slug,name,planned,extras}], shortfall, level1_open, message, log:[...]}` (credits are shared: *_all, shortfall and level1_open count every market) |
-| GET | `/api/m/{slug}/review/queue` | review queue |
-| GET | `/api/m/{slug}/review/scorecard` | scorecard |
+| GET | `/api/m/{slug}/review/queue?limit=&offset=&include_excluded=&scope=` | `{total, scope, counts:{total, scope, scopes:{everything, unsure}, needs_review, unsure, not_checked, no_photos, confirm, spot_check, reviewed}, items}`; `scope` = everything (default) or unsure |
+| GET | `/api/m/{slug}/photos/month?estimate=` | the monthly photo goal: `{enabled, month, target, batch, done, remaining, reached, pct, pool:{buybox, rest, total}, ai_waiting, keep_going_to, message}`; with `estimate=1` also `estimate:{test, batch, keep_going}` each `{properties, photos, ai_checks, calls, usd, needs_confirm, ...}` (dry runs) |
+| GET | `/api/m/{slug}/review/scorecard` | scorecard: confusion matrix, by-color accuracy, acceptance, plus `ai_right`, `by_label`, `learning` |
 | GET | `/api/m/{slug}/funnel` | `{find:[{label,count}], reach:[{label,count}]}` |
 | GET | `/api/m/{slug}/analytics` | `{imports:[...], filter_funnel:[...], coverage:[{field,pct}], counties:[...], size_dist:[...], score_dist:[...], owner_types:[...], levels:[{key,level,label,count,in_buybox}], api_usage:[...]}` |
 | GET | `/api/m/{slug}/model` | score model summary (weights, learned, outcomes count) |

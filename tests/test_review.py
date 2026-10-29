@@ -88,7 +88,7 @@ def visual(conn, pid: int) -> dict:
 
 def test_colors_follow_config(tmp_root, settings):
     cfg = review_config()
-    assert (cfg.green_min, cfg.red_max, cfg.spot_check_fraction) == (80, 20, 0.05)
+    assert (cfg.green_min, cfg.red_max, cfg.spot_check_fraction) == (80, 20, 0)   # the AI's calls all show under Everything
     assert visual_color(80, cfg) == "green" and visual_color(79.9, cfg) == "yellow"
     assert visual_color(21, cfg) == "yellow" and visual_color(20, cfg) == "red" and visual_color(None, cfg) == "na"
     set_config(tmp_root, "scoring.visual_green_min", 75)
@@ -138,7 +138,9 @@ def test_queue_order_and_card_contents(tmp_root, conn, settings):
     add(conn, settings, in_buybox=0, **ai("MIXED", 50, 50))            # outside the buy box
     q = review_queue(conn, MARKET)          # photos the AI hasn't looked at yet wait for it: you see them after
     assert [c["id"] for c in q] == [unsure, yellow_top, yellow_low, no_photos, green]
-    assert [c["group"] for c in q] == ["needs_review", "unsure", "unsure", "no_photos", "spot_check"]
+    assert [c["group"] for c in q] == ["needs_review", "unsure", "unsure", "no_photos", "confirm"]
+    only = review_queue(conn, MARKET, scope="unsure")           # "Unsure only": the AI's calls are just spot checks
+    assert [c["group"] for c in only] == ["needs_review", "unsure", "unsure", "no_photos", "spot_check"]
     set_config(tmp_root, "review.include_unchecked", True)
     from bluemoon.config import reload_settings
     reload_settings()
@@ -166,7 +168,8 @@ def test_spot_checks_off(tmp_root, conn, settings):
     set_config(tmp_root, "review.spot_check_fraction", 0)
     add(conn, settings, **ai("EXTERIOR_CORRIDOR", 95, 92))
     add(conn, settings, **ai("INTERIOR_CORRIDOR", 5, 4))
-    assert review_queue(conn, MARKET) == []
+    assert review_queue(conn, MARKET, scope="unsure") == []       # unsure only, no spot checks: nothing to look at
+    assert [c["group"] for c in review_queue(conn, MARKET)] == ["confirm", "confirm"]   # everything: both calls
 
 
 def test_queue_counts(tmp_root, conn, settings):
@@ -174,8 +177,12 @@ def test_queue_counts(tmp_root, conn, settings):
     add(conn, settings, **ai("MIXED", 50, 50))
     add(conn, settings, **ai("UNKNOWN", 50, None, quality="none"))
     add(conn, settings, **ai("MIXED", 50, 50), reviewed_label="MIXED")
+    add(conn, settings, **ai("EXTERIOR_CORRIDOR", 95, 92))
     c = queue_counts(conn, MARKET)
-    assert c["total"] == 2 and c["unsure"] == 1 and c["needs_review"] == 1 and c["reviewed"] == 1
+    assert c["total"] == 3 and c["unsure"] == 1 and c["needs_review"] == 1 and c["confirm"] == 1 and c["reviewed"] == 1
+    assert c["scope"] == "everything" and c["scopes"] == {"everything": 3, "unsure": 2}
+    u = queue_counts(conn, MARKET, scope="unsure")
+    assert u["total"] == 2 and u["confirm"] == 0 and u["scope"] == "unsure"
 
 
 def test_queue_empty_for_raw_land(conn, settings):

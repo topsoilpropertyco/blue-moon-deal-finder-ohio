@@ -316,3 +316,13 @@ details[open] > .why-rs .why-more .hide{display:inline}
 .ru-status.blocked b,.ru-status.warn{color:var(--warn-ink)}
 .ru-status.warn b{color:var(--good)}
 .ru-wide{margin-top:4px}
+
+/* --- Run: Photos and AI check for this month ---------------------------------------------------------- */
+.ru-month{margin:var(--s6) 0 var(--s2);gap:var(--s4)}
+.ru-month .ru-top h2{font-size:17px;margin:0}
+.ru-monthhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.ru-monthnum{margin:0;font-size:18px}
+.ru-monthnum b{font-size:26px;font-variant-numeric:tabular-nums}
+.ru-monthest{margin:0}
+[data-ru-monthjobs]{display:flex;flex-direction:column;gap:var(--s3)}
+[data-ru-monthjobs]:empty{display:none}

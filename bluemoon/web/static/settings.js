@@ -139,6 +139,23 @@
       '<p class="note vw-tight">then type /login. Restart the app afterwards.</p>' : ''));
   }
 
+  function monthlyPanel(cfg) {
+    const ph = cfg.photos || {};
+    const target = toNum(ph.monthly_target) || 600;
+    const batch = toNum(ph.batch) || 100;
+    return fold('Monthly photo goal', num(target) + ' a month, ' + num(batch) + ' at a time', kv([
+      ['Photos and AI check each month', esc(num(target) + ' properties')],
+      ['"Do the next batch" does', esc(num(batch) + ' properties')],
+      ['Ask before paid runs over', esc(num(((cfg.safety || {}).confirm_over_properties) || 50) + ' properties')],
+    ]) +
+      '<p class="note vw-tight">The Run screen counts every property whose photos were pulled this calendar month. ' +
+      'To change the goal or the batch, put your own numbers in <b>config.local.yaml</b> (updates never touch that file). ' +
+      'Run this once to make it and open it:</p>' +
+      H.command('cd ' + APP_FOLDER + ' && cp -n config.local.yaml.example config.local.yaml && open -e config.local.yaml') +
+      '<p class="note vw-tight">Then add these lines at the end (change the numbers), save, and restart the app (step 2 below):</p>' +
+      '<pre class="se-code" style="white-space:pre-wrap;margin:0">photos:\n  monthly_target: 800\n  batch: 150</pre>');
+  }
+
   function usagePanel(cfg, usage) {
     const prices = ((cfg.google || {}).prices) || {};
     const used = {};
@@ -261,7 +278,7 @@
     const s = BM.state.summary;
     const acKey = (s && s.asset_class && s.asset_class.key) || ((H.currentMarket() || {}).asset_class);
     return HEAD + '<div class="grid2">' + sharePanel(st.share) + marketsPanel(cfg, acs) + buyBoxPanel(acs[acKey]) + keysPanel(st.keys) +
-      photoPanel(cfg, health) + usagePanel(cfg, usage) + pathsPanel(cfg) + safetyPanel(cfg) + howPanel() + '</div>';
+      photoPanel(cfg, health) + monthlyPanel(cfg) + usagePanel(cfg, usage) + pathsPanel(cfg) + safetyPanel(cfg) + howPanel() + '</div>';
   }
 
   async function render(root) {

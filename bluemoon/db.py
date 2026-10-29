@@ -21,6 +21,11 @@ SCHEMA_VERSION = 2
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("scores", "rule_reasons", "TEXT"),      # version 2: buy-box decisions by hand
     ("scores", "aside_buckets", "TEXT"),
+    # the AI's first-pass building details (photo check: style, stories, buildings, condition)
+    ("visual_checks", "ai_style", "TEXT"),
+    ("visual_checks", "ai_stories", "INTEGER"),
+    ("visual_checks", "ai_buildings", "INTEGER"),
+    ("visual_checks", "ai_condition", "TEXT"),
 )
 # meta key: markets whose scores were saved before version 2. The dashboard re-scores each one once, so the
 # set-aside groups (scores.aside_buckets) exist. JSON list of market ids.
@@ -108,6 +113,13 @@ CREATE TABLE IF NOT EXISTS visual_checks (
   reviewed_label TEXT, reviewed_note TEXT, reviewed_at TEXT,
   checked_at TEXT
 );
+
+-- One row each time a property's photos are pulled from Google (the monthly photo goal counts these).
+CREATE TABLE IF NOT EXISTS photo_pulls (
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  pulled_at TEXT NOT NULL          -- UTC, like every other timestamp
+);
+CREATE INDEX IF NOT EXISTS idx_photo_pulls_at ON photo_pulls(pulled_at);
 
 CREATE TABLE IF NOT EXISTS owners (
   property_id INTEGER PRIMARY KEY REFERENCES properties(id) ON DELETE CASCADE,

@@ -50,6 +50,7 @@ from .db import loads, market_by_slug, rows, this_month
 from .drill import credits as drill_credits
 from .drill import engine, links, stats
 from .enrich.owners import OWNER_TYPE_LABELS
+from .imagery.review import STYLE_NAMES
 from .ingest.edits import EDITABLE
 from .scoring import (
     EXCLUSION_LABELS,
@@ -127,7 +128,10 @@ def property_columns(ac: AssetClass) -> list[Col]:
     if ac.visual_enabled:
         cols += [_col("photo_label", "Photo label"), _col("photo_p", "Photo check %", "num"),
                  _col("photo_color", "Photo color", "color"), _col("photo_review", "Photo needs review"),
-                 _col("photo_reasons", "Photo reasons")]
+                 _col("photo_reasons", "Photo reasons"),
+                 _col("photo_style", "Building style (AI)"), _col("photo_stories", "Stories (AI estimate)", "int"),
+                 _col("photo_buildings", "Buildings seen (AI)", "int"), _col("photo_condition", "Condition (AI)"),
+                 _col("photo_checked_by", "Photo answer from")]
     if ac.rent_enabled:
         cols += [_col("rent_fit", "Rent fit"), _col("rent_color", "Rent color", "color"),
                  _col("rent_detail", "Rent detail")]
@@ -348,6 +352,15 @@ def _why_score(signals: list[dict], top: int = 4) -> str | None:
     return "; ".join(parts) or None
 
 
+def _photo_answer_from(visual: dict) -> str | None:
+    """Who gave the photo answer: 'You (agreed with the AI)', 'You (corrected the AI)', 'You' or 'AI'."""
+    if visual.get("reviewed_label"):
+        ai = visual.get("ai_label")
+        return "You" if not ai else "You (agreed with the AI)" if ai == visual["reviewed_label"] \
+            else "You (corrected the AI)"
+    return "AI" if visual.get("ai_label") else None
+
+
 def _photo_reasons(visual: dict) -> str | None:
     """What the photo check said: its reasons, the cues it saw, the image quality and your review note."""
     cues = loads(visual.get("cues_json"), []) or []
@@ -364,6 +377,10 @@ def _layer_fields(enrich: dict) -> dict:
     checked = bool(visual.get("ai_label") or visual.get("reviewed_label"))
     return {
         "photo_reasons": _photo_reasons(visual),
+        "photo_style": STYLE_NAMES.get(visual.get("ai_style") or "", visual.get("ai_style")),
+        "photo_stories": visual.get("ai_stories"), "photo_buildings": visual.get("ai_buildings"),
+        "photo_condition": visual.get("ai_condition"),
+        "photo_checked_by": _photo_answer_from(visual),
         "drive_minutes": _round(drive_row.get("minutes"), 1),
         "drive_method": DRIVE_LABELS.get(drive_row.get("method") or "", drive_row.get("method")),
         "photo_label": visual.get("reviewed_label") or visual.get("ai_label"),

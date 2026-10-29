@@ -5,3 +5,9 @@
 # share:
 #   provider: ngrok
 #   ngrok_domain: something.ngrok-free.dev
+
+# The monthly photo goal and how many properties one click does (the Run screen shows "412 of 600 done this month"):
+#
+# photos:
+#   monthly_target: 800
+#   batch: 150
