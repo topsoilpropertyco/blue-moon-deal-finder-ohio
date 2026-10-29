@@ -14,11 +14,11 @@ Mark an item done (with the date) when it ships; never delete it.
 ## Photos, the AI first pass and the review loop (requested 2026-10-29)
 
 14. **Every lead gets Street View photos and an AI first pass; Seth reviews.** **Done 2026-10-29:**
-    - Run screen card **Photos and AI check for this month** ("412 of 600 done this month") with **Test on 5**, **Do the next 100** and **Keep going** (photos, then the AI check, in one job; the cost shown and one click to OK over 50). Goal and batch are `photos:` in `config.yaml`, set your own in `config.local.yaml` (shown in Settings).
+    - Run screen: one button, **Get photos and the AI's walk-up call for every lead** ("312 of 2,981 done"), plus **Test on 5**. It shows the estimate first; one **Yes, start it** runs photos for every lead with none (buy box first) and then the AI's call on each, as one background job. Press again after a stop or a limit to carry on. Terminal: `uv run run.py photos all`. (Changed 2026-10-30 from a monthly goal with batches, at Seth's request.)
     - The AI also reads the building: style, estimated stories, buildings visible, condition (card, property panel, ranked export).
     - Photo review: unsure first, then every AI call (**Yes, the AI is right** / **No, it's wrong**, keys Y and N), **Everything / Unsure only**; both answers feed `labels/examples.jsonl`. Scorecard: how often the AI is right, per label, and "Is it learning?" (latest 50 vs earlier).
     - A walk-up now counts x1.8 (was x1.4) in the apartments Blue Moon score; still never required.
-    - Still open: photos and AI answers made before 2026-10-29 have no building details (re-run with Calibrate, or ask for a "re-read" button); a Settings screen editor for the goal (today it is a file); a monthly reset reminder.
+    - Still open: photos and AI answers made before 2026-10-29 have no building details (re-run with Calibrate, or ask for a "re-read" button); one press stops at the per-run limits (about 1,000 properties of photos, 400 AI calls); raise them in `config.local.yaml` if one press should do all 2,981.
 
 ## Exports and the CRM (requested 2026-10-21)
 

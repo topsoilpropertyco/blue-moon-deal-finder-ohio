@@ -64,7 +64,7 @@ from ..imagery import (
     scorecard,
     vision_config,
 )
-from ..imagery import monthly as photo_month
+from ..imagery import photos_all
 from ..imagery import queue_counts as review_counts
 from ..imagery import streetview
 from ..ingest import IngestError, import_file, preview_file
@@ -744,22 +744,19 @@ def review_queue_view(slug: str, conn: Conn, limit: int = Query(20, ge=1, le=200
             "items": items}
 
 
-@router.get("/api/m/{slug}/photos/month")
-def photos_month(slug: str, conn: Conn, estimate: bool = False) -> dict:
-    """The monthly photo goal ("412 of 600 done this month") and, with estimate=1, what the next batch and
-    Keep going would cost (a dry run: nothing is called)."""
+@router.get("/api/m/{slug}/photos/all")
+def photos_every_lead(slug: str, conn: Conn, estimate: bool = False,
+                      limit: Annotated[int | None, Query(ge=1)] = None) -> dict:
+    """The one photo button: "312 of 2,981 done" and, with estimate=1, what pressing it would do and cost
+    (a dry run: nothing is called). limit: the estimate for a test on that many properties."""
     require_market(conn, slug)
-    out = photo_month.status(conn, slug)
+    out = photos_all.status(conn, slug)
     if estimate and out.get("enabled"):
-        out["estimate"] = {"test": _brief(photo_month.estimate_batch(conn, slug, 5)),
-                           "batch": _brief(photo_month.estimate_batch(conn, slug, out["batch"])),
-                           "keep_going": _brief(photo_month.estimate_batch(conn, slug, out["keep_going_to"]))}
+        est = photos_all.estimate(conn, slug, limit)
+        est.pop("details", None)
+        est.pop("status", None)
+        out["estimate"] = est
     return out
-
-
-def _brief(est: dict) -> dict:
-    keys = ("properties", "photos", "ai_checks", "calls", "needs_confirm", "has_key", "backend", "ready", "message")
-    return {**{k: est.get(k) for k in keys}, "usd": (est.get("cost") or {}).get("usd", 0.0)}
 
 
 @router.get("/api/m/{slug}/review/scorecard")

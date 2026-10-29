@@ -6,8 +6,11 @@
 #   provider: ngrok
 #   ngrok_domain: something.ngrok-free.dev
 
-# The monthly photo goal and how many properties one click does (the Run screen shows "412 of 600 done this month"):
+# The Run screen's photo button stops at these per-run limits; press it again to carry on. To let one press
+# do more (Google's free monthly allowance is about 10,000 of each kind of photo):
 #
-# photos:
-#   monthly_target: 800
-#   batch: 150
+# google:
+#   max_street_view_images_per_run: 9000
+#   max_satellite_images_per_run: 3000
+# vision:
+#   max_calls_per_run: 3000

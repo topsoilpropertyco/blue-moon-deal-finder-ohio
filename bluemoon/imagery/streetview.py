@@ -430,6 +430,7 @@ def _estimate_from_plan(conn: sqlite3.Connection, plan: _Plan, cfg: ImageryConfi
     sat = sum(j.sat_needed for j in plan.jobs)
     sv_capped, sat_capped = min(sv, cfg.max_street_view_images_per_run), min(sat, cfg.max_satellite_images_per_run)
     to_fetch = sum(1 for j in plan.jobs if _charged(j))
+    within_caps = len(_within_caps([j for j in plan.jobs if _charged(j)], cfg)[0])
     metadata = sum(1 for j in plan.jobs if j.pano is None)
     cost = _costs(conn, sv_capped, sat_capped, settings)
     message = _estimate_message(plan, to_fetch, sv_capped, sat_capped, metadata, cost)
@@ -448,7 +449,8 @@ def _estimate_from_plan(conn: sqlite3.Connection, plan: _Plan, cfg: ImageryConfi
         "metadata_calls": metadata,
         "street_view_images": sv_capped,
         "satellite_images": sat_capped,
-        "capped": sv > sv_capped or sat > sat_capped,
+        "capped": sv > sv_capped or sat > sat_capped or within_caps < to_fetch,
+        "within_caps": within_caps,            # properties whose photos fit under the per-run caps
         "excluded": plan.excluded,
         "reviewed": plan.reviewed,
         "missing_coordinates": plan.missing_coordinates,
