@@ -5,8 +5,10 @@
  * The app tracks every export and import exactly, per credit period (Crexi resets on config.yaml crexi.reset_day).
  * It never logs in to Crexi or opens it. Server side: bluemoon/crexi/ and bluemoon/web/crexi_api.py.
  *
- * Parts: the credit period, 1 Export the next N, 2 Drop Crexi's file, batches still waiting (close or cancel),
- * History per credit period, and a folded "Do one by hand" for the old one-at-a-time plan.
+ * Parts: the credit period, 1 Export the next N, 2 Drop Crexi's file (importing it finishes the batch: "Crexi
+ * returned 450 of 500. 50 missing." with the missing list; the missing cost nothing and go to the DRILL's other
+ * sources), batches still waiting at Crexi (cancel one never uploaded), History per credit period, and a folded
+ * "Do one by hand" for the old one-at-a-time plan. There is no close step.
  * Uses BM.work helpers from drill.js.
  */
 (() => {
@@ -38,7 +40,7 @@
     main: 'Possible owner in the buy box', level1_buybox: 'Buy box, no owner name yet',
     set_aside: 'Just outside the buy box', retry: 'Second pass',
   };
-  const STATUS = { open: 'Waiting for Crexi', imported: 'Partly back', closed: 'Closed' };
+  const STATUS = { open: 'Waiting for Crexi', imported: 'Waiting for Crexi', closed: 'Finished' };
   const PICK_PAGE = 25;
 
   const S = {
@@ -46,7 +48,7 @@
     status: null, history: null, error: null,
     count: '', retry: false, preview: null, exported: null, exportBusy: '', exportError: '',
     imp: { file: null, preview: null, columns: null, adopt: false, busy: '', error: '', result: null, change: false },
-    confirm: null,        // {id, kind: 'close'|'withdraw', message}
+    confirm: null,        // {id, kind: 'withdraw', message}
     hand: { open: false, data: null, limit: PICK_PAGE, form: null, busy: false, error: null },
     note: '',
   };
@@ -118,11 +120,10 @@
     return `
       <div class="eyebrow">Crexi owner-contact credits</div>
       <h1>Send Crexi a batch, drop its answer back</h1>
-      <ol class="cr-how cr-how4" aria-label="How it works">
+      <ol class="cr-how" aria-label="How it works">
         <li><b>Export the next batch</b><span>The app picks the owners most worth a credit and makes a file.</span></li>
         <li><b>Upload it to Crexi</b><span>You do this in Crexi's bulk tool. The app never logs in to Crexi.</span></li>
-        <li><b>Drop Crexi's file here</b><span>See what it holds, then import it. Phones and emails are saved as not tested yet.</span></li>
-        <li><b>Close the batch</b><span>Rows Crexi never matched cost nothing and go back to the free pool.</span></li>
+        <li><b>Drop Crexi's file here</b><span>That finishes the batch. What Crexi didn't have costs nothing and goes to the DRILL's other sources.</span></li>
       </ol>`;
   }
 
@@ -171,10 +172,8 @@
     const left = Number(st.left) || 0;
     const n = S.count === '' ? left : S.count;
     const tip = info.topup || {};
-    const tipBtn = tip.close_first
-      ? `<button class="btn" data-cx="ask-close" data-id="${Number(tip.batch_id)}">Close batch #${Number(tip.batch_id)}</button>`
-      : (tip.suggested ? `<button class="btn" data-cx="use-count" data-n="${Number(tip.suggested)}">Use ${num(tip.suggested)}</button>` : '');
-    const banner = tip.message ? `<p class="dr-banner${tip.close_first ? ' warn' : ''}"><span>${esc(tip.message)}</span>${tipBtn}</p>` : '';
+    const tipBtn = tip.suggested ? `<button class="btn" data-cx="use-count" data-n="${Number(tip.suggested)}">Export the next ${num(tip.suggested)}</button>` : '';
+    const banner = tip.message ? `<p class="dr-banner"><span>${esc(tip.message)}</span>${tipBtn}</p>` : '';
     return `
       <section class="panel" aria-label="Export the next batch">
         <h2>1. Export the next <span class="num" data-cx-n>${esc(n || '')}</span> for Crexi</h2>
@@ -185,7 +184,7 @@
             <label class="dr-field cx-count"><span>How many (up to ${num(left)})</span>
               <input data-cx-count type="number" min="1" max="${left}" inputmode="numeric" value="${esc(S.count)}" ${left ? '' : 'disabled'}></label>
             <label class="cx-check"><input type="checkbox" data-cx-retry ${S.retry ? 'checked' : ''}>
-              <span>Also send the ones Crexi did not return before (second pass)</span></label>
+              <span>Also send the ones Crexi didn't have before (second pass)</span></label>
           </div>
           <p class="dr-form-err" role="alert" ${S.exportError ? '' : 'hidden'}>${esc(S.exportError)}</p>
           <div class="bar">
@@ -272,8 +271,8 @@
     const s = p.summary || {};
     const c = s.counts || {};
     const batches = (s.batches || []).map((b) => `<tr><td>#${Number(b.batch_id)}${b.kind === 'manual' ? ' (by hand)' : ''}</td><td class="num">${num(b.sent)}</td>
-      <td class="num">${num(b.new)}</td><td class="num">${num(b.not_matched)}</td><td class="num">${num(b.still_waiting)}</td>
-      <td>${b.closed ? '<span class="pill warn">Closed</span>' : esc(STATUS[b.status] || b.status)}</td></tr>`).join('');
+      <td class="num">${num(b.returned)}</td><td class="num">${num(b.missing)}</td><td class="num">${pct(b.matched_pct)}</td>
+      <td>${b.closed ? '<span class="pill">Finished before: a late reply</span>' : esc(STATUS[b.status] || b.status)}</td></tr>`).join('');
     const warns = (p.warnings || []).map((w) => `<li>${esc(w)}</li>`).join('');
     const hand = Number(c.no_batch) || Number(c.hand)
       ? `<label class="cx-check"><input type="checkbox" data-cx-adopt ${S.imp.adopt ? 'checked' : ''}>
@@ -281,7 +280,8 @@
     return `
       <div class="cx-box">
         <p><b>${esc(p.message)}</b></p>
-        ${batches ? `<div class="dr-scroll"><table class="cx-table"><thead><tr><th>Batch</th><th class="num">Sent</th><th class="num">Match</th><th class="num">Not matched</th><th class="num">Still waiting</th><th></th></tr></thead><tbody>${batches}</tbody></table></div>` : ''}
+        ${batches ? `<div class="dr-scroll"><table class="cx-table"><thead><tr><th>Batch</th><th class="num">Sent</th><th class="num">Returned</th><th class="num">Missing</th><th class="num">Matched</th><th></th></tr></thead><tbody>${batches}</tbody></table></div>
+          ${(s.batches || []).some((b) => !b.closed) ? `<p class="note dr-tight">Importing finishes ${(s.batches || []).length === 1 ? 'this batch' : 'these batches'}: the missing ones (Crexi said “Not Matched” or left them out) cost no credit and go to the DRILL's other sources right away.</p>` : ''}` : ''}
         <h3>What Crexi's file would add</h3>
         <p class="note dr-tight">${esc(p.enrichment_text || '')}</p>
         <h3>Columns I read</h3>${columnsHtml(p)}
@@ -300,9 +300,19 @@
     if (r.import_id && r.unmatched_file) links.push(`<a class="btn" href="/api/crexi/imports/${Number(r.import_id)}/files/unmatched" download>Rows that could not be matched</a>`);
     if (r.import_id && r.unreadable_file) links.push(`<a class="btn" href="/api/crexi/imports/${Number(r.import_id)}/files/unreadable" download>Phones and emails I could not read</a>`);
     const warns = (r.warnings || []).map((w) => `<li>${esc(w)}</li>`).join('');
+    const left = Number(((S.status || {}).status || {}).left ?? (r.status || {}).left) || 0;
+    const head = r.headline
+      ? `<p class="cx-headline">${esc(r.headline)}</p>`
+      : `<p><b>${esc(r.message)}</b></p>`;
+    const missing = r.missing && r.import_id && r.missing_file
+      ? `<div class="cx-missing"><p>${esc(r.missing_text || '')}</p>
+          <a class="btn" href="/api/crexi/imports/${Number(r.import_id)}/files/missing" download>Download the ${num(r.missing)} missing (address, owner, why)</a></div>` : '';
+    const credits = r.credits_text
+      ? `<div class="cx-next"><p><b>${esc(r.credits_text)}</b></p>${left ? `<button class="btn primary" data-cx="use-count" data-n="${left}" data-go-export="1">Export the next ${num(left)}</button>` : ''}</div>` : '';
     return `
-      <div class="cx-box good" role="status">
-        <p><b>${esc(r.message)}</b></p>
+      <div class="cx-box good cx-result" role="status">
+        ${head}${missing}${credits}
+        ${r.headline && r.found != null ? `<p class="note dr-tight">${esc(`${num(r.found)} with a phone or email, ${num(r.owner_only)} with a name only, ${num(r.no_data)} with nothing.`)}</p>` : ''}
         ${r.enrichment_text ? `<p class="note dr-tight">${esc(r.enrichment_text)}</p>` : ''}
         ${warns ? `<ul class="lines cx-warn">${warns}</ul>` : ''}
         <div class="bar">${links.join('')}<button class="btn" data-cx="again">Import another file</button></div>
@@ -319,7 +329,6 @@
         <div><b>Batch #${Number(b.id)}</b> <span class="note">${esc(b.created_at ? BM.fmt.date(b.created_at) : '')} · ${num(b.sent)} sent, ${num(b.returned)} returned, ${num(b.waiting)} waiting${b.not_matched ? `, ${num(b.not_matched)} Crexi could not match` : ''}</span></div>
         <div class="bar">
           ${b.has_file !== false && b.file_name ? `<a class="btn" href="/api/crexi/batches/${Number(b.id)}/file" download>Download the file</a>` : ''}
-          <button class="btn" data-cx="ask-close" data-id="${Number(b.id)}">Close this batch</button>
           ${Number(b.returned) === 0 ? `<button class="btn" data-cx="ask-withdraw" data-id="${Number(b.id)}">Cancel: I never uploaded it</button>` : ''}
         </div>
         ${S.confirm && S.confirm.id === b.id ? confirmHtml() : ''}
@@ -327,7 +336,7 @@
     return `
       <section class="panel" aria-label="Batches waiting for Crexi">
         <h2>Batches waiting for Crexi</h2>
-        <p class="note dr-tight">When Crexi has sent everything it will, close the batch. The rows that never came back are marked not found, and their credits go back to the free pool.</p>
+        <p class="note dr-tight">When Crexi's file comes back, drop it in step 2. That finishes the batch: what Crexi didn't have costs nothing and its credits are free again. Never uploaded a file? Cancel it.</p>
         <ul class="cx-batches">${rows}</ul>
       </section>`;
   }
@@ -335,7 +344,7 @@
   function confirmHtml() {
     const c = S.confirm;
     return `<div class="dr-banner warn cx-confirm" role="alert"><span>${esc(c.message)}</span>
-      <span class="dr-short-acts"><button class="btn primary" data-cx="do-${c.kind}" data-id="${Number(c.id)}">${c.kind === 'close' ? 'Yes, close it' : 'Yes, cancel it'}</button>
+      <span class="dr-short-acts"><button class="btn primary" data-cx="do-${c.kind}" data-id="${Number(c.id)}">Yes, cancel it</button>
       <button class="btn" data-cx="no-confirm">Not yet</button></span></div>`;
   }
 
@@ -352,14 +361,15 @@
     return `
       <section class="panel" aria-label="History">
         <h2>History</h2>
-        <p class="note dr-tight">Every credit period, every export and every import. “Matched” is the share of what you sent that Crexi matched and returned.</p>
+        <p class="note dr-tight">Every credit period, every export and every import. “Missing” means Crexi didn't have it (no credit spent). “Matched” is the share of what you sent that Crexi returned.</p>
         ${periods.map(periodHistory).join('')}
       </section>`;
   }
 
   function periodHistory(p) {
     const rows = p.batches.map((b) => {
-      const files = [b.file_name ? `<a href="/api/crexi/batches/${Number(b.id)}/file" download>Export file</a>` : ''];
+      const files = [b.file_name ? `<a href="/api/crexi/batches/${Number(b.id)}/file" download>Export file</a>` : '',
+        Number(b.missing) ? `<a href="/api/crexi/batches/${Number(b.id)}/missing" download>Missing list</a>` : ''];
       (b.imports || []).forEach((i) => {
         const sm = i.summary || {};
         if (sm.saved_as) files.push(`<a href="/api/crexi/imports/${Number(i.id)}/files/reply" download>Crexi's reply</a>`);
@@ -370,7 +380,7 @@
         <td>${esc(b.created_day || '')}</td><td class="cx-who">${esc(who(b.created_by))}</td>
         <td class="num">${num(b.sent)}</td>
         <td class="num" title="${num(b.found)} with a phone or email, ${num(b.owner_only)} with a name only, ${num(b.no_data)} with nothing">${num(b.returned)}</td>
-        <td class="num">${num(b.not_returned)}${b.second_pass ? ` <span class="note">(${num(b.second_pass)} second pass)</span>` : ''}</td>
+        <td class="num">${num(b.missing)}${b.second_pass ? ` <span class="note">(${num(b.second_pass)} second pass)</span>` : ''}</td>
         <td class="num">${b.waiting ? num(b.waiting) : '—'}</td><td class="num">${pct(b.matched_pct)}</td>
         <td><span class="pill${b.status === 'closed' ? '' : ' hot'}">${esc(STATUS[b.status] || b.status)}</span></td>
         <td class="cx-files">${files.filter(Boolean).join(' · ') || '—'}</td></tr>`;
@@ -381,15 +391,15 @@
     const detail = imports.filter(({ i }) => (seen.has(i.id) ? false : seen.add(i.id))).map(({ i }) => {
       const sm = i.summary || {};
       return `<li><b>${esc(i.file_name || 'Import')}</b> <span class="note">${esc(BM.fmt.date(i.created_at))} · ${esc(who(i.created_by))}</span><br>
-        <span class="note">${esc(sm.enrichment_text || `${num(i.returned)} returned, ${num(i.not_matched)} not matched, ${num(i.duplicates)} duplicates, ${num(i.unmatched)} unmatched.`)}</span></li>`;
+        ${sm.headline ? `<b>${esc(sm.headline)}</b><br>` : ''}<span class="note">${esc(sm.enrichment_text || `${num(i.returned)} returned, ${num(i.not_matched)} not matched, ${num(i.duplicates)} duplicates, ${num(i.unmatched)} unmatched.`)}</span></li>`;
     }).join('');
-    const totals = `${num(p.sent)} sent · ${num(p.returned)} returned (${pct(p.matched_pct)})${p.by_hand ? ` · ${num(p.by_hand)} used by hand` : ''} · ${num(p.not_returned)} not returned${p.waiting ? ` · ${num(p.waiting)} waiting` : ''}${p.second_passes ? ` · ${num(p.second_passes)} second pass` : ''}`;
+    const totals = `${num(p.sent)} sent · ${num(p.returned)} returned · ${num(p.missing)} missing · ${pct(p.matched_pct)} matched${p.by_hand ? ` · ${num(p.by_hand)} used by hand` : ''}${p.waiting ? ` · ${num(p.waiting)} waiting` : ''}${p.second_passes ? ` · ${num(p.second_passes)} second pass` : ''}`;
     return `
       <div class="cx-period">
         <div class="dr-row-between"><h3>${esc(p.label)}${p.current ? ' <span class="pill hot">This period</span>' : ''}</h3>
           <span class="note num">${num(p.credits_used)} of ${num(p.per_period)} credits used</span></div>
         <p class="note dr-tight">${esc(totals)}</p>
-        ${rows ? `<div class="dr-scroll"><table class="cx-table"><thead><tr><th>Batch</th><th>Date</th><th>Who</th><th class="num">Sent</th><th class="num">Returned</th><th class="num">Not returned</th><th class="num">Waiting</th><th class="num">Matched</th><th>Status</th><th>Files</th></tr></thead><tbody>${rows}</tbody></table></div>`
+        ${rows ? `<div class="dr-scroll"><table class="cx-table"><thead><tr><th>Batch</th><th>Date</th><th>Who</th><th class="num">Sent</th><th class="num">Returned</th><th class="num">Missing</th><th class="num">Waiting</th><th class="num">Matched</th><th>Status</th><th>Files</th></tr></thead><tbody>${rows}</tbody></table></div>`
         : '<p class="note dr-tight">No batches yet this period.</p>'}
         ${detail ? `<details><summary>What each import found</summary><ul class="cx-imports">${detail}</ul></details>` : ''}
       </div>`;
@@ -544,7 +554,7 @@
 
   async function askClose(id, kind) {
     try {
-      const res = await postJson(`/api/crexi/batches/${id}/${kind === 'close' ? 'close' : 'withdraw'}`, { confirm: false });
+      const res = await postJson(`/api/crexi/batches/${id}/withdraw`, { confirm: false });
       S.confirm = { id, kind, message: res.message };
     } catch (err) {
       S.confirm = { id, kind, message: W.errText(err) };
@@ -554,7 +564,7 @@
 
   async function doConfirm(id, kind) {
     try {
-      const res = await postJson(`/api/crexi/batches/${id}/${kind === 'close' ? 'close' : 'withdraw'}`, { confirm: true });
+      const res = await postJson(`/api/crexi/batches/${id}/withdraw`, { confirm: true });
       BM.toast(res.message);
       S.confirm = null;
       S.preview = null;
@@ -613,16 +623,23 @@
     const pid = Number(b.dataset.pid);
     if (act === 'retry') { e.preventDefault(); render(S.root); }
     else if (act === 'preview') { e.preventDefault(); doPreview(); }
-    else if (act === 'use-count') { e.preventDefault(); S.count = String(b.dataset.n); S.preview = null; paint(pageHtml()); }
+    else if (act === 'use-count') {
+      e.preventDefault();
+      S.count = String(b.dataset.n);
+      S.preview = null;
+      const el = paint(pageHtml());
+      if (b.dataset.goExport && el) {
+        const form = el.querySelector('[data-cx-form="export"]');
+        if (form) { form.scrollIntoView({ block: 'center' }); const inp = form.querySelector('[data-cx-count]'); if (inp) inp.focus(); }
+      }
+    }
     else if (act === 'apply') { e.preventDefault(); apply(); }
     else if (act === 'again') {
       e.preventDefault();
       S.imp = { file: null, preview: null, columns: null, adopt: false, busy: '', error: '', result: null, change: false };
       paint(pageHtml());
     } else if (act === 'recheck') { e.preventDefault(); S.imp.change = true; preview(); }
-    else if (act === 'ask-close') { e.preventDefault(); askClose(id, 'close'); }
     else if (act === 'ask-withdraw') { e.preventDefault(); askClose(id, 'withdraw'); }
-    else if (act === 'do-close') { e.preventDefault(); doConfirm(id, 'close'); }
     else if (act === 'do-withdraw') { e.preventDefault(); doConfirm(id, 'withdraw'); }
     else if (act === 'no-confirm') { e.preventDefault(); S.confirm = null; paint(pageHtml()); }
     else if (act === 'open' && pid) { e.preventDefault(); BM.openProperty(pid); }

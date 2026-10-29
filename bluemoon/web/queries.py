@@ -446,11 +446,11 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
 
 
 def _crexi_block(conn: sqlite3.Connection, pid: int) -> dict:
-    """What Crexi did for this property (batches, credits by hand) and any values Crexi sent that differ from
-    what we hold (alternates, with Use this one / Ignore)."""
+    """What Crexi did for this property (batches, credits by hand) and the extra values kept next to the main
+    ones ({field: [{n, header 'Units 2', value, source, day}]}), shown as "Units: 24 · Units 2: 26 (Crexi, Oct 29)"."""
     from ..crexi import batches as crexi_batches
     from ..crexi import merge as crexi_merge
-    return {**crexi_batches.property_history(conn, pid), "alternates": crexi_merge.open_alternates(conn, pid)}
+    return {**crexi_batches.property_history(conn, pid), "extras": crexi_merge.extra_values(conn, pid)}
 
 
 def _buybox_block(conn: sqlite3.Connection, mc: MarketCtx, prop: Mapping[str, Any], enrich: Mapping[str, Any],

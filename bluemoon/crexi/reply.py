@@ -10,13 +10,18 @@ back, so every row is matched to our batches by Property Link, then parcel numbe
 one file may hold several batches' rows.
 
 Credit rule: a matched row = one credit spent (even with no phone or email); a 'Not Matched' row costs
-nothing. 'Not Matched' rows are only flagged; the properties are marked not found when the batch is closed.
+nothing. Importing the reply FINISHES every batch the file touches at once (batches.finish_batches): rows that
+came back matched are returned; rows Crexi answered 'Not Matched' or left out of the file are missing ("Crexi
+didn't have it"): their credits are free again right away and the DRILL moves those owners on to its other
+sources. A batch with no row in the file is not touched. A later file that brings back a missing row records it
+as returned then (the credit is charged then and the DRILL result upgraded).
 
 Each matched row ends in one of three results: found (a phone or email), owner_only (an owner or contact name
 but no phone or email) or nothing. Contacts (up to 5 phones, 5 emails and the Contact Name, the phones and
 emails belong to that person) are added as untested, source 'crexi', respecting do-not-contact. Property facts
 (owner, mailing address, sizes...) go through the normal Crexi import and the keep-the-original rule in
-crexi/merge.py. Importing the same rows again changes nothing.
+crexi/merge.py (a different value is kept as "Units 2", "Owner 2"..., tagged with the batch). Importing the same
+rows again changes nothing.
 """
 from __future__ import annotations
 
@@ -512,32 +517,47 @@ def _summary(an: Analysis, conn: sqlite3.Connection) -> dict:
     for bid in sorted(per, reverse=True):
         b = B.get_batch(conn, bid)
         c = B.batch_counts(conn, bid)
-        still = c["waiting"] - per[bid]["new"] - per[bid]["not_matched"]
+        returned = c["returned"] + per[bid]["new"]
         out.append({**per[bid], "sent": c["sent"], "status": b["status"], "closed": b["status"] == "closed",
-                    "kind": b["kind"], "still_waiting": max(0, still)})
+                    "kind": b["kind"], "returned": returned, "missing": max(0, c["sent"] - returned),
+                    "not_in_file": max(0, c["waiting"] - per[bid]["new"] - per[bid]["not_matched"]),
+                    "matched_pct": round(returned / c["sent"], 4) if c["sent"] else None})
     return {"counts": dict(counts), "batches": out}
+
+
+def _totals(batches: list[dict]) -> dict:
+    t = {k: sum(int(b.get(k) or 0) for b in batches) for k in ("sent", "returned", "missing", "not_matched",
+                                                                 "not_in_file", "new")}
+    t["matched_pct"] = round(t["returned"] / t["sent"], 4) if t["sent"] else None
+    return t
 
 
 def _message(an: Analysis, summ: dict) -> str:
     c = summ["counts"]
-    new, nm = c.get("new", 0), c.get("not_matched", 0)
     cant = c.get("none", 0) + c.get("no_batch", 0)
     bs = summ["batches"]
+    t = _totals(bs)
+    why = []
+    if t["not_matched"]:
+        why.append(f"{t['not_matched']:,} 'Not Matched'")
+    if t["not_in_file"]:
+        why.append(f"{t['not_in_file']:,} not in the file")
+    tail = (f" ({', '.join(why)})" if why else "") + (f"; {cant:,} rows can't be matched to your properties"
+                                                       if cant else "")
     if len(bs) == 1:
         b = bs[0]
-        head = (f"This looks like Crexi's reply to batch #{b['batch_id']} ({b['sent']:,} sent): {new:,} match, "
-                f"{b['still_waiting']:,} look like they weren't returned yet, {cant:,} can't be matched.")
+        head = (f"This looks like Crexi's reply to batch #{b['batch_id']} ({b['sent']:,} sent): Crexi returned "
+                f"{t['returned']:,} of {t['sent']:,}, {t['missing']:,} missing{tail}.")
     elif bs:
         names = ", ".join(f"#{b['batch_id']}" for b in bs)
-        waiting = sum(b["still_waiting"] for b in bs)
-        head = (f"This file holds rows for batches {names}: {new:,} match, {waiting:,} look like they weren't "
-                f"returned yet, {cant:,} can't be matched.")
+        head = (f"This file holds rows for batches {names}: Crexi returned {t['returned']:,} of {t['sent']:,}, "
+                f"{t['missing']:,} missing{tail}.")
     else:
         head = (f"None of the {len(an.rows):,} rows match a property waiting at Crexi: {cant:,} can't be matched"
                 + (f", {c.get('already', 0):,} were already recorded" if c.get("already") else "") + ".")
     extra = []
-    if nm:
-        extra.append(f"{nm:,} rows are 'Not Matched' by Crexi (no credit is spent on them)")
+    if bs and t["missing"]:
+        head += f" The {t['missing']:,} missing cost no credit and go to the DRILL's other sources."
     if c.get("already"):
         extra.append(f"{c['already']:,} rows were already imported (nothing changes for them)")
     if c.get("duplicate"):
@@ -564,8 +584,8 @@ def preview(conn: sqlite3.Connection, path: Path, filename: str | None = None, *
     warnings = list(cols["notes"])
     closed = [b["batch_id"] for b in summ["batches"] if b["closed"] and (b["new"] or b["not_matched"])]
     for bid in closed:
-        warnings.append(f"Batch #{bid} is already closed. Rows for it are still recorded (a late reply), and the "
-                        f"credits they use are counted.")
+        warnings.append(f"Batch #{bid} was already finished. Rows for it that come back now are recorded (a late "
+                        f"reply): each one Crexi matched is charged a credit now.")
     bad = sum(len(r.unreadable) for r in an.rows)
     if bad:
         warnings.append(f"{bad:,} phone or email value{'s' if bad != 1 else ''} could not be read and will be listed "
@@ -621,9 +641,13 @@ def _write_unreadable(an: Analysis, import_id: int, settings: Settings) -> str |
     return rel
 
 
-def _merge_facts(conn: sqlite3.Connection, an: Analysis, table: ing.Table, actor: str, warnings: list[str]) -> dict:
+def _merge_facts(conn: sqlite3.Connection, an: Analysis, table: ing.Table, actor: str, warnings: list[str],
+                 skip: set[str] | None = None) -> dict:
     """Property facts (owner, mailing address, sizes...) through the normal Crexi import, one market at a time,
-    for the rows that matched. Never adds a property: a row that would create one is only reported."""
+    for the rows that matched. Never adds a property: a row that would create one is only reported. `skip`: the
+    phone, email and contact-name columns; they are saved as contacts, so they are left out of the property's
+    original columns (the exports number contacts themselves: Phone 1..N, Email 1..N)."""
+    headers = [h for h in table.headers if h not in (skip or set())]
     by_market: dict[int, list[Row]] = defaultdict(list)
     for r in an.rows:
         if r.kind in ("new", "duplicate", "hand") and not r.not_matched and r.pid is not None and r.link_key:
@@ -637,13 +661,18 @@ def _merge_facts(conn: sqlite3.Connection, an: Analysis, table: ing.Table, actor
         try:
             with tmp.open("w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(table.headers)
+                w.writerow(headers)
                 for r in sorted(rs, key=lambda x: (x.kind == "duplicate", x.i)):
-                    w.writerow([("" if r.raw.get(h) is None else r.raw.get(h)) for h in table.headers])
+                    w.writerow([("" if r.raw.get(h) is None else r.raw.get(h)) for h in headers])
             res = ing.import_file(conn, slugs[mid], tmp, actor=actor)
             out["markets"][slugs[mid]] = {"import_id": res["import_id"], "rows_new": res["rows_new"],
                                           "rows_updated": res["rows_updated"], "enrichment": res.get("enrichment")}
             out["new_rows"] += int(res["rows_new"])
+            # tag the extra values this reply kept (Units 2, Owner 2...) with the batch they came back in
+            for pid, bid in {(r.pid, r.batch_id) for r in rs if r.batch_id}:
+                conn.execute("UPDATE property_alternates SET batch_id=? WHERE property_id=? AND import_id=? "
+                             "AND batch_id IS NULL", (bid, pid, res["import_id"]))
+            conn.commit()
             if res["rows_new"]:
                 warnings.append(f"{res['rows_new']:,} row(s) did not match a stored property when their facts were "
                                 f"merged and were added as new properties in {slugs[mid]}. Check them in Deals.")
@@ -732,9 +761,10 @@ def _make_hand_batch(conn: sqlite3.Connection, an: Analysis, actor: str, setting
 
 def apply_reply(conn: sqlite3.Connection, path: Path, filename: str | None = None, *, columns: dict | None = None,
                 adopt_hand: bool = False, actor: str = "cli", settings: Settings | None = None) -> dict:
-    """Import Crexi's reply: mark matched rows returned (a credit spent each), flag 'Not Matched' rows, add
-    the contacts, merge the property facts, write the unmatched file and the history row. Safe to run twice: rows
-    already recorded are skipped, so nothing is added the second time."""
+    """Import Crexi's reply: mark matched rows returned (a credit spent each), add the contacts, merge the property
+    facts, then finish every batch the file touches (the rest of its rows are missing: no credit, the DRILL moves
+    on), write the unmatched and missing files and the history row. Safe to run twice: rows already recorded are
+    skipped, so nothing is added the second time."""
     s = settings or get_settings()
     table = read_reply(path)
     column_map, _ = map_columns(table.headers, ing._merged_overrides(s, None))
@@ -754,9 +784,6 @@ def apply_reply(conn: sqlite3.Connection, path: Path, filename: str | None = Non
                 "enrichment_text": plan.text(), "warnings": warnings,
                 "message": "Nothing new: every row in this file was already recorded (or matches none of your "
                            "properties). Nothing was added."}
-    for b in summ["batches"]:
-        if b["closed"] and (b["new"] or b["not_matched"]):
-            warnings.append(f"Batch #{b['batch_id']} was already closed; its late rows were recorded anyway.")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     batch_ids = sorted({k[0] for k in an.claimed} | {k[0] for k in an.flagged})
     stamp = now_iso()
@@ -771,7 +798,8 @@ def apply_reply(conn: sqlite3.Connection, path: Path, filename: str | None = Non
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(path, dest)
 
-    merged = _merge_facts(conn, an, table, actor, warnings)
+    merged = _merge_facts(conn, an, table, actor, warnings,
+                          skip={*cols["phone"], *cols["email"], *([cols["name"]] if cols["name"] else [])})
     cfg = E.drill_config(s)
     dnc = E._dnc_keys(conn)
     totals: dict[str, int] = defaultdict(int)
@@ -781,26 +809,29 @@ def apply_reply(conn: sqlite3.Connection, path: Path, filename: str | None = Non
     for key, row in an.flagged.items():
         conn.execute("UPDATE crexi_batch_items SET not_matched_at=? WHERE batch_id=? AND property_id=? "
                      "AND status IN ('sent', 'not_returned')", (stamp, key[0], key[1]))
+    # Every batch this file touches is finished now: what did not come back matched is missing (no credit; the
+    # DRILL moves on). A batch with no row in the file is not touched.
+    finished = B.finish_batches(conn, batch_ids, settings=s, actor="auto")
     for bid in batch_ids:
-        counts = B.batch_counts(conn, bid)
-        b = batches_cache[bid]
-        if b["status"] != "closed":
-            if counts["waiting"] == 0:
-                conn.execute("UPDATE crexi_batches SET status='closed', closed_at=?, closed_by='auto' WHERE id=?",
-                             (stamp, bid))
-            elif b["status"] == "open":
-                conn.execute("UPDATE crexi_batches SET status='imported' WHERE id=?", (bid,))
         if overrides:
             conn.execute("UPDATE crexi_batches SET column_overrides=? WHERE id=?", (dumps(overrides), bid))
     conn.commit()
 
     unmatched = _write_unmatched(conn, an, table.headers, import_id, s)
     unreadable = _write_unreadable(an, import_id, s)
+    missing_file = B.write_missing(conn, batch_ids, f"crexi/{P.period_key(None, s)}/missing-{import_id}.csv", s)
     bad = sum(len(r.unreadable) for r in an.rows)
     rep = plan.to_dict()
     rep["rows_read"] = len(an.rows)
+    per_batch = [{"batch_id": bid, **{k: c2[k] for k in ("sent", "returned", "missing", "found", "owner_only",
+                                                           "no_data", "matched_pct")}}
+                 for bid, c2 in sorted(finished.items())]
+    t = {k: sum(b[k] for b in per_batch) for k in ("sent", "returned", "missing")}
+    t["matched_pct"] = round(t["returned"] / t["sent"], 4) if t["sent"] else None
+    headline = B.returned_text({**t, "waiting": 0}) if per_batch else ""
     summary = {"enrichment": rep, "enrichment_text": M.report_text(rep), "batches": summ["batches"],
                "counts": summ["counts"], "unmatched_file": unmatched, "unreadable_file": unreadable,
+               "missing_file": missing_file, "finished": per_batch, "totals": t, "headline": headline,
                "saved_as": saved, "merge": merged, "dnc_marked": totals["dnc"]}
     conn.execute("UPDATE crexi_batch_imports SET saved_as=?, returned=?, found=?, owner_only=?, no_data=?, "
                  "not_matched=?, duplicates=?, unmatched=?, contacts_added=?, dnc_marked=?, unreadable=?, "
@@ -811,11 +842,17 @@ def apply_reply(conn: sqlite3.Connection, path: Path, filename: str | None = Non
     conn.commit()
     status = drill_credits.credit_status(conn, settings=s)
     after = B.topup_suggestion(conn, status)
-    text = (f"Recorded {len(an.claimed):,} returned ({totals['found']:,} with a phone or email, "
-            f"{totals['owner_only']:,} with a name only, {totals['nothing']:,} with nothing). "
-            f"{len(an.flagged):,} 'Not Matched' rows flagged. "
-            f"{status['left']:,} credits free, {status['in_flight']:,} still waiting. " + after["message"])
+    credits = B.credits_left_text(status) + (f" Export the next {status['left']:,}." if status["left"] else "")
+    missing_text = (f"The {t['missing']:,} missing go to the DRILL's other sources (county records, AI research...)."
+                    if t["missing"] else "")
+    text = " ".join(x for x in (
+        headline,
+        f"Of the {len(an.claimed):,} returned now: {totals['found']:,} with a phone or email, "
+        f"{totals['owner_only']:,} with a name only, {totals['nothing']:,} with nothing." if an.claimed else "",
+        missing_text, credits) if x)
     return {"ok": True, "changed": True, "import_id": import_id, "batch_ids": batch_ids, "summary": summ,
+            "headline": headline, "totals": t, "finished": per_batch, "missing": t["missing"],
+            "missing_file": missing_file, "missing_text": missing_text, "credits_text": credits,
             "returned": len(an.claimed), "found": totals["found"], "owner_only": totals["owner_only"],
             "no_data": totals["nothing"], "not_matched": len(an.flagged), "duplicates": c.get("duplicate", 0),
             "unmatched": c.get("none", 0) + c.get("no_batch", 0), "contacts_added": totals["phones"] + totals["emails"],

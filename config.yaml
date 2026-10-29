@@ -188,6 +188,11 @@ rent:
   concurrency: 3                 # be polite to HUD
   after_import: true             # run the free HUD rent check in the background after a dashboard import
 
+exports:
+  # When Crexi sends a second owner, phone, email, unit count..., the first value stays and the new one is kept
+  # next to it. The exports then get numbered columns: Owner, Owner 2...; Phone 1..N; Email 1..N; Units 2...
+  max_numbered: 5                # the most numbered columns of one kind (Owner .. Owner 5, Phone 1 .. Phone 5)
+
 safety:
   confirm_over_properties: 50    # paid runs bigger than this need an explicit OK
   confirm_clears_over: 10        # a Blue Moon file whose empty cells would erase more values than this asks first

@@ -4,9 +4,14 @@ The flow (files only; the app never logs in to Crexi or opens it):
   1. export  `export_batch` picks the best N possible owners (the plan in drill/credits.py), writes
              output/crexi/<period>/batch-<id>-<N>.csv, and counts the N as "in flight" against the 500.
   2. upload  Seth uploads that file to Crexi's bulk tool by hand.
-  3. import  `reply.apply_reply` reads Crexi's file back (a matched row = one credit spent).
-  4. close   `close_batch`: the rows that never came back are given back to the free pool (and marked
-             "nothing" in the DRILL), only when Seth confirms.
+  3. import  `reply.apply_reply` reads Crexi's file back and FINISHES every batch the file touches at once
+             (`finish_batches`): a row Crexi matched is 'returned' (one credit spent); a row it answered
+             'Not Matched', or left out of the file, is 'missing' (stored as status 'not_returned'): it costs
+             nothing, its credit is free again right away, and the DRILL's Crexi stage records "nothing" so the
+             DRILL moves that owner on to its other sources (county records, AI research...). There is no
+             close step. A batch with no row in the file is not touched (that file was not its reply).
+  A late file: a row that comes back after it was marked missing is recorded as returned then (the credit is
+  charged then, and the DRILL result is upgraded).
 
 Credit rule: Crexi charges one credit for each row it MATCHES (even with no phone or email) and nothing for
 a "Not Matched" row. used = returned + in flight; free = per period - used.
@@ -141,6 +146,7 @@ def batch_counts(conn: sqlite3.Connection, batch_id: int) -> dict:
     out = {k: int(v or 0) for k, v in r.items()}
     sent = out.get("total", 0) - out.get("withdrawn", 0)
     out["sent"] = sent
+    out["missing"] = out.get("not_returned", 0)          # Crexi didn't have it (Not Matched or left out)
     out["matched_pct"] = round(out.get("returned", 0) / sent, 4) if sent else None
     return out
 
@@ -165,39 +171,65 @@ def open_batches(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
+def returned_text(c: dict) -> str:
+    """'Crexi returned 450 of 500. 50 missing.' for one batch (or totals with the same keys)."""
+    return (f"Crexi returned {c['returned']:,} of {c['sent']:,}. {c['missing']:,} missing."
+            + (f" {c['waiting']:,} still waiting." if c.get("waiting") else ""))
+
+
+def credits_left_text(st: dict) -> str:
+    """'You have 50 credits left until Nov 28.'"""
+    n = st["left"]
+    return f"You have {n:,} credit{'s' if n != 1 else ''} left until {_short_day(st['period_end'])}."
+
+
+def _short_day(iso: str | None) -> str:
+    try:
+        d = date.fromisoformat(str(iso)[:10])
+    except ValueError:
+        return str(iso or "")
+    return f"{d.strftime('%b')} {d.day}"
+
+
 def topup_suggestion(conn: sqlite3.Connection, st: dict) -> dict:
-    """What to do next, in plain English: {suggested, message, close_first, batch_id}. 'suggested' is the number
-    to export next (None while a batch still has rows waiting: close it first to give those credits back)."""
-    latest = one(conn, "SELECT id FROM crexi_batches WHERE period = ? ORDER BY id DESC LIMIT 1", (st["period"],))
+    """What to do next, in plain English: {suggested, message, batch_id, credits_text, last}. 'suggested' is the
+    number to export next (every credit left)."""
+    latest = one(conn, "SELECT id FROM crexi_batches WHERE period = ? AND status = 'closed' AND "
+                       "(note IS NULL OR note NOT LIKE '%Cancelled%') ORDER BY id DESC LIMIT 1", (st["period"],))
     waiting = open_batches(conn)
-    if waiting:
-        b = max(waiting, key=lambda x: x["id"])
-        sent = b["sent"]
-        msg = (f"{b['returned']:,} of {sent:,} came back from Crexi (batch #{b['id']}), {b['waiting']:,} still "
-               f"waiting. If Crexi has sent everything it will, close the batch: the {b['waiting']:,} that never "
-               f"matched cost no credit, so they go back to the free pool and you can export the next "
-               f"{b['waiting']:,}.")
-        return {"suggested": None, "message": msg, "close_first": True, "batch_id": b["id"],
-                "after_close": b["waiting"]}
+    last = None
+    parts = []
     if latest:
         c = batch_counts(conn, latest["id"])
-        gap = c["not_returned"]
-        if gap and st["left"]:
-            n = min(gap, st["left"])
-            return {"suggested": n, "close_first": False, "batch_id": latest["id"],
-                    "message": f"{c['returned']:,} of {c['sent']:,} came back from Crexi. Export the next {n:,} to "
-                               f"keep going ({st['left']:,} credits are free)."}
-    if st["left"]:
-        return {"suggested": st["left"], "close_first": False, "batch_id": None,
-                "message": f"{st['left']:,} credits are free. Export them, or type a smaller number."}
-    return {"suggested": 0, "close_first": False, "batch_id": None,
-            "message": "No credits are free this period. New ones arrive on " + st["next_reset"] + "."}
+        if c["sent"]:
+            last = {"batch_id": latest["id"], **c, "text": returned_text(c)}
+            parts.append(f"Batch #{latest['id']}: {returned_text(c)}")
+    if waiting:
+        b = max(waiting, key=lambda x: x["id"])
+        parts.append(f"Batch #{b['id']}: {b['waiting']:,} waiting at Crexi. Import Crexi's file when it comes back.")
+    left = st["left"]
+    credits = credits_left_text(st)
+    if left:
+        parts.append(f"{credits} Export the next {left:,}.")
+    else:
+        parts.append(f"No credits are free this period. New ones arrive on {_short_day(st['next_reset'])}.")
+    return {"suggested": left, "batch_id": (waiting[-1]["id"] if waiting else (latest or {}).get("id")),
+            "message": " ".join(parts), "credits_text": credits, "last": last}
+
+
+def _finish_legacy(conn: sqlite3.Connection, settings: Settings) -> None:
+    """Batches imported before the close step was retired ('Partly back'): a reply was imported, so they are
+    finished now, the same way an import finishes a batch today."""
+    ids = [int(r["id"]) for r in rows(conn, "SELECT id FROM crexi_batches WHERE status = 'imported'")]
+    if ids:
+        finish_batches(conn, ids, settings=settings, actor="auto")
 
 
 def status(conn: sqlite3.Connection, *, today: date | None = None, settings: Settings | None = None) -> dict:
     """The Credits screen's top: the credit period, returned / in flight / free, days left, open batches and what
     to do next."""
     s = settings or get_settings()
+    _finish_legacy(conn, s)
     st = drill_credits.credit_status(conn, today=today, settings=s)
     st["per_period"] = st["per_month"]
     return {"status": st, "open_batches": open_batches(conn), "topup": topup_suggestion(conn, st),
@@ -334,8 +366,8 @@ def _check_count(conn: sqlite3.Connection, n: int | None, st: dict) -> int:
     if n > free:
         raise CrexiError(
             f"Only {free:,} credits are free this period ({st['returned']:,} returned, {st['in_flight']:,} waiting "
-            f"at Crexi, {st['per_month']:,} in all), so I can't send {n:,}. Close the batch that is still waiting "
-            f"to give its unmatched credits back, or send {free:,} or fewer." if st["in_flight"] else
+            f"at Crexi, {st['per_month']:,} in all), so I can't send {n:,}. Send {free:,} or fewer, or import "
+            f"Crexi's file first: the rows it didn't have free their credits at once." if st["in_flight"] else
             f"Only {free:,} credits are free this period ({st['returned']:,} of {st['per_month']:,} are used), so "
             f"I can't send {n:,}. Send {free:,} or fewer.")
     return n
@@ -467,7 +499,7 @@ def export_file(conn: sqlite3.Connection, batch_id: int, settings: Settings | No
     return target
 
 
-# --- close and cancel -------------------------------------------------------------------------------------
+# --- finish and cancel ------------------------------------------------------------------------------------
 
 def _mark_nothing(conn: sqlite3.Connection, property_ids: list[int], detail: str, cfg: E.DrillConfig) -> int:
     """DRILL stage 'Crexi credit' = nothing, for properties Crexi never returned (no credit is counted)."""
@@ -483,37 +515,87 @@ def _mark_nothing(conn: sqlite3.Connection, property_ids: list[int], detail: str
     return n
 
 
-def close_batch(conn: sqlite3.Connection, batch_id: int, *, confirm: bool = False, actor: str = "cli",
-                settings: Settings | None = None) -> dict:
-    """Close a batch. Without confirm=True nothing changes: the answer says what closing would do. With it,
-    every row still waiting becomes 'not returned' (no credit was spent on it, so the credit goes back to the free
-    pool) and the DRILL's Crexi stage records 'nothing' for it."""
+def finish_batches(conn: sqlite3.Connection, batch_ids: list[int], *, settings: Settings | None = None,
+                   actor: str = "auto") -> dict[int, dict]:
+    """Finish batches after Crexi's reply: every row still waiting is 'missing' (Crexi didn't have it: it
+    answered 'Not Matched' or left the row out). Missing rows cost no credit, so their credits are free again
+    at once, and the DRILL's Crexi stage records 'nothing' right away, so the DRILL moves those owners on to its
+    other sources. Returns {batch id: counts after}."""
+    s = settings or get_settings()
+    cfg = E.drill_config(s)
+    out: dict[int, dict] = {}
+    stamp = now_iso()
+    for bid in sorted(set(int(b) for b in batch_ids)):
+        b = get_batch(conn, bid)
+        waiting = rows(conn, "SELECT property_id, not_matched_at FROM crexi_batch_items "
+                             "WHERE batch_id = ? AND status = 'sent'", (bid,))
+        conn.execute("UPDATE crexi_batch_items SET status = 'not_returned' WHERE batch_id = ? AND status = 'sent'",
+                     (bid,))
+        if b["status"] != "closed":
+            conn.execute("UPDATE crexi_batches SET status = 'closed', closed_at = ?, closed_by = ? WHERE id = ?",
+                         (stamp, (actor or "auto")[:320], bid))
+        conn.commit()
+        for nm in (True, False):
+            ids = [int(r["property_id"]) for r in waiting if bool(r["not_matched_at"]) == nm]
+            why = "answered 'Not Matched'" if nm else "left it out of its reply"
+            _mark_nothing(conn, ids, f"Crexi batch #{bid}: Crexi didn't have it ({why}). No credit was spent; "
+                                     f"the DRILL moves on to the other sources.", cfg)
+        out[bid] = batch_counts(conn, bid)
+    return out
+
+
+MISSING_HEADERS = ("Batch", "Address", "City", "State", "ZIP", "County", "APN", "Owner", "Why missing", "Property ID")
+
+
+def missing_rows(conn: sqlite3.Connection, batch_ids: list[int]) -> list[dict]:
+    """The missing rows of these batches (Crexi didn't have them), batch by batch in file order."""
+    if not batch_ids:
+        return []
+    mark = ",".join("?" for _ in batch_ids)
+    out = []
+    for r in rows(conn, f"""
+            SELECT i.batch_id, i.position, i.not_matched_at, p.id AS property_id, p.address, p.city, p.state, p.zip,
+                   p.county, p.apn, p.owner_name
+            FROM crexi_batch_items i JOIN properties p ON p.id = i.property_id
+            WHERE i.batch_id IN ({mark}) AND i.status = 'not_returned' ORDER BY i.batch_id, i.position""",
+            [int(b) for b in batch_ids]):
+        out.append({"Batch": r["batch_id"], "Address": r["address"], "City": r["city"], "State": r["state"],
+                    "ZIP": r["zip"], "County": r["county"], "APN": r["apn"], "Owner": r["owner_name"],
+                    "Why missing": ("Crexi answered 'Not Matched'" if r["not_matched_at"]
+                                    else "Not in Crexi's file"),
+                    "Property ID": r["property_id"]})
+    return out
+
+
+def write_missing(conn: sqlite3.Connection, batch_ids: list[int], rel: str,
+                  settings: Settings | None = None) -> str | None:
+    """Write the missing list (address, owner, why) to output/<rel>; None when nothing is missing."""
+    found = missing_rows(conn, batch_ids)
+    if not found:
+        return None
+    path = output_dir(settings) / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.part")
+    try:
+        with tmp.open("w", newline="", encoding=CSV_ENCODING) as f:
+            w = csv.writer(f)
+            w.writerow(MISSING_HEADERS)
+            for r in found:
+                w.writerow([safe_cell(r[h]) for h in MISSING_HEADERS])
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return rel
+
+
+def missing_file(conn: sqlite3.Connection, batch_id: int, settings: Settings | None = None) -> Path:
+    """One batch's missing list, written fresh (so a late return drops off it). KeyError when none are missing."""
     s = settings or get_settings()
     b = get_batch(conn, batch_id)
-    counts = batch_counts(conn, batch_id)
-    waiting = counts["waiting"]
-    if b["status"] == "closed":
-        return {"ok": True, "closed": False, "needs_confirm": False, "waiting": 0,
-                "message": f"Batch #{batch_id} is already closed."}
-    text = (f"{waiting:,} of the {counts['sent']:,} properties in batch #{batch_id} never came back. Closing it marks "
-            f"them 'not found' (the DRILL records Crexi: nothing) and gives their {waiting:,} credits back to the free "
-            f"pool. Crexi charges only for rows it matched. You can still import a late reply afterwards.")
-    if not confirm:
-        return {"ok": True, "closed": False, "needs_confirm": True, "waiting": waiting, "message": text}
-    cfg = E.drill_config(s)
-    ids = [int(r["property_id"]) for r in rows(
-        conn, "SELECT property_id FROM crexi_batch_items WHERE batch_id = ? AND status = 'sent'", (batch_id,))]
-    stamp = now_iso()
-    conn.execute("UPDATE crexi_batch_items SET status = 'not_returned' WHERE batch_id = ? AND status = 'sent'",
-                 (batch_id,))
-    conn.execute("UPDATE crexi_batches SET status = 'closed', closed_at = ?, closed_by = ? WHERE id = ?",
-                 (stamp, (actor or "cli")[:320], batch_id))
-    conn.commit()
-    _mark_nothing(conn, ids, f"Crexi batch #{batch_id}: Crexi did not return this property (batch closed).", cfg)
-    st = drill_credits.credit_status(conn, settings=s)
-    return {"ok": True, "closed": True, "needs_confirm": False, "waiting": waiting, "status": st,
-            "message": f"Batch #{batch_id} is closed. {waiting:,} properties are marked not found and their credits "
-                       f"are free again ({st['left']:,} free)."}
+    rel = write_missing(conn, [batch_id], f"crexi/{b['period']}/missing-batch-{batch_id}.csv", s)
+    if not rel:
+        raise KeyError(f"Nothing is missing from batch {batch_id}.")
+    return output_dir(s) / rel
 
 
 def withdraw_batch(conn: sqlite3.Connection, batch_id: int, *, confirm: bool = False, actor: str = "cli",
@@ -525,9 +607,9 @@ def withdraw_batch(conn: sqlite3.Connection, batch_id: int, *, confirm: bool = F
     counts = batch_counts(conn, batch_id)
     if counts["returned"]:
         raise CrexiError(f"Batch #{batch_id} already has {counts['returned']:,} rows back from Crexi, so it can't be "
-                         f"cancelled. Close it instead.")
+                         f"cancelled.")
     if b["status"] == "closed":
-        raise CrexiError(f"Batch #{batch_id} is already closed.")
+        raise CrexiError(f"Batch #{batch_id} is already finished.")
     text = (f"Cancel batch #{batch_id}? Use this only if you never uploaded the file to Crexi. Its {counts['waiting']:,} "
             f"properties go back to the pool and their credits are free again.")
     if not confirm:
@@ -590,6 +672,7 @@ def history(conn: sqlite3.Connection, *, settings: Settings | None = None) -> di
             "period": k, "label": P.label(k, s), "current": k == current, "per_period": per, "batches": batches,
             "sent": sent, "returned": returned, "by_hand": hand.get(k, 0), "waiting": sum(b["waiting"] for b in batches),
             "not_returned": sum(b["not_returned"] for b in batches),
+            "missing": sum(b["missing"] for b in batches),
             "found": sum(b["found"] for b in batches), "owner_only": sum(b["owner_only"] for b in batches),
             "no_data": sum(b["no_data"] for b in batches), "second_passes": sum(b["second_pass"] for b in batches),
             "credits_used": returned + hand.get(k, 0),
@@ -642,14 +725,54 @@ def _item_text(r: dict) -> str:
     if r.get("is_retry"):
         head += " (second pass)"
     if r["status"] == "sent":
-        if r.get("not_matched_at"):
-            return head + f"; Crexi's reply said it could not match it (still counted until the batch is closed)."
         return head + ", waiting for Crexi."
     if r["status"] == "not_returned":
-        return head + "; never came back, so it was marked not found and no credit was spent."
+        why = "it answered 'Not Matched'" if r.get("not_matched_at") else "it was not in Crexi's file"
+        return head + f"; missing: Crexi didn't have it ({why}). No credit was spent; the DRILL moved on to the " \
+                      "other sources."
     got = {"found": "found " + (" and ".join(
         x for x in (f"{r['phones']} phone{'s' if r['phones'] != 1 else ''}" if r["phones"] else "",
                     f"{r['emails']} email{'s' if r['emails'] != 1 else ''}" if r["emails"] else "") if x) or "contact info"),
            "owner_only": "returned an owner name but no phone or email",
            "nothing": "returned with no owner or contact info"}.get(r["result"], "returned")
     return head + f", returned {local_day(r['returned_at'])}, {got}."
+
+
+# --- the DRILL screen's Crexi box ---------------------------------------------------------------------------
+
+def drill_box(conn: sqlite3.Connection, market_slug: str | None = None) -> dict:
+    """For the DRILL screen: what Crexi did for this market's owners, every batch so far, one count per
+    property (its latest batch row): sent, returned, missing (Crexi didn't have it), waiting, penetration
+    (returned of returned + missing), and where the missing ones are now in the DRILL: still being worked by the
+    other sources (active), every source tried (exhausted), confirmed, or do not contact."""
+    where, args = "", []
+    if market_slug:
+        where, args = "AND p.market_id = (SELECT id FROM markets WHERE slug = ?)", [market_slug]
+    latest = rows(conn, f"""
+        SELECT i.property_id, i.status, COALESCE(d.status, 'active') AS drill_status
+        FROM crexi_batch_items i JOIN properties p ON p.id = i.property_id
+        LEFT JOIN drill_state d ON d.property_id = i.property_id
+        WHERE i.status != 'withdrawn' {where}
+          AND i.batch_id = (SELECT MAX(j.batch_id) FROM crexi_batch_items j
+                            WHERE j.property_id = i.property_id AND j.status != 'withdrawn')""", args)
+
+    def count(st: str) -> int:
+        return sum(1 for r in latest if r["status"] == st)
+
+    returned, missing, waiting = count("returned"), count("not_returned"), count("sent")
+    after = {k: sum(1 for r in latest if r["status"] == "not_returned" and r["drill_status"] == k)
+             for k in ("active", "exhausted", "confirmed", "dnc")}
+    done = returned + missing
+    pct = round(returned / done, 4) if done else None
+    if not latest:
+        text = "Nothing sent to Crexi yet."
+    else:
+        text = (f"{len(latest):,} sent, {returned:,} returned, {missing:,} missing"
+                + (f" ({round(pct * 100)}% returned)" if pct is not None else "")
+                + (f", {waiting:,} waiting at Crexi" if waiting else "") + ".")
+        if missing:
+            text += (f" {after['active']:,} of the {missing:,} missing are being worked by the DRILL's other "
+                     f"sources now (county records, AI research...).")
+    return {"sent": len(latest), "returned": returned, "missing": missing, "waiting": waiting,
+            "penetration": pct, "missing_working": after["active"], "missing_exhausted": after["exhausted"],
+            "missing_confirmed": after["confirmed"], "missing_dnc": after["dnc"], "text": text}

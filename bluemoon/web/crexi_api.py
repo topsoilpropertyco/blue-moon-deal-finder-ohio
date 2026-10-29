@@ -1,4 +1,5 @@
-"""The Crexi batch routes (/api/crexi/...): export the next N, import Crexi's reply, close a batch, history.
+"""The Crexi batch routes (/api/crexi/...): export the next N, import Crexi's reply (which finishes the batch),
+cancel a batch never uploaded, the missing list, history.
 
 Credits belong to the whole Crexi account, so these routes are not under a market. Like every /api/ route they
 need the sign-in cookie when a password is set (the login middleware in app.py covers them). Files are only
@@ -54,10 +55,6 @@ class ConfirmIn(BaseModel):
     confirm: bool = False
 
 
-class AlternateIn(BaseModel):
-    action: str = Field(max_length=20)       # use | ignore
-
-
 def _who(request) -> str:
     from .app import _actor
     return _actor(request)
@@ -95,9 +92,11 @@ def export_file(batch_id: int, conn: Conn) -> FileResponse:
                         headers={"Cache-Control": "no-store"})
 
 
-@router.post("/api/crexi/batches/{batch_id}/close")
-def close_batch(batch_id: int, body: ConfirmIn, request: Request, conn: Conn) -> dict: 
-    return B.close_batch(conn, batch_id, confirm=body.confirm, actor=_who(request))
+@router.get("/api/crexi/batches/{batch_id}/missing")
+def missing_file(batch_id: int, conn: Conn) -> FileResponse:
+    """The batch's missing list (address, owner, why): the rows Crexi didn't have."""
+    path = B.missing_file(conn, batch_id)
+    return FileResponse(path, media_type="text/csv", filename=path.name, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/crexi/batches/{batch_id}/withdraw")
@@ -163,13 +162,14 @@ def _rank_after(conn: sqlite3.Connection, result: dict) -> dict | None:
 
 @router.get("/api/crexi/imports/{import_id}/files/{kind}")
 def import_file_download(import_id: int, kind: str, conn: Conn) -> FileResponse:
-    """The files an import wrote: unmatched rows, unreadable contacts, or the saved copy of Crexi's file."""
+    """The files an import wrote: unmatched rows, unreadable contacts, the missing list, or the saved copy of
+    Crexi's file."""
     row = one(conn, "SELECT summary_json, saved_as FROM crexi_batch_imports WHERE id = ?", (import_id,))
     if not row:
         raise KeyError(f"Import {import_id} was not found.")
     summary = loads(row["summary_json"], {}) or {}
     rel = {"unmatched": summary.get("unmatched_file"), "unreadable": summary.get("unreadable_file"),
-           "reply": row["saved_as"]}.get(kind)
+           "missing": summary.get("missing_file"), "reply": row["saved_as"]}.get(kind)
     if not rel:
         raise KeyError("That file was not made for this import.")
     root = B.output_dir().resolve()
@@ -181,15 +181,7 @@ def import_file_download(import_id: int, kind: str, conn: Conn) -> FileResponse:
 
 @router.get("/api/m/{slug}/properties/{pid}/crexi")
 def property_crexi(slug: str, pid: int, conn: Conn) -> dict:
+    """That property's Crexi history and its extra values (Units 2, Owner 2...)."""
     from .app import require_property
     require_property(conn, slug, pid)
-    return {**B.property_history(conn, pid), "alternates": M.open_alternates(conn, pid)}
-
-
-@router.post("/api/m/{slug}/properties/{pid}/alternates/{alternate_id}")
-def decide_alternate(slug: str, pid: int, alternate_id: int, body: AlternateIn, request: Request,
-                     conn: Conn) -> dict:
-    """'Use this one' or 'Ignore' for a value Crexi sent that differs from what the property holds."""
-    from .app import require_property
-    require_property(conn, slug, pid)
-    return M.decide_alternate(conn, pid, alternate_id, body.action, _who(request))
+    return {**B.property_history(conn, pid), "extras": M.extra_values(conn, pid)}

@@ -9,10 +9,11 @@ deleted:
    ADDED as a new untested contact or person with source 'crexi';
 3. the same value changes nothing;
 4. a factual field that differs from the original (units, year built, sq ft, owner name, mailing address...)
-   keeps the original, and the new value is stored as an ALTERNATE (table property_alternates). The property
-   gets the flag `crexi_differs`; the drawer shows each alternate with "Use this one" (applied through
-   property_edits, so it can be undone) and "Ignore". A different owner name is also added as another person,
-   so the DRILL can use it.
+   keeps the original as the main value, and the new value is KEPT automatically as an extra value
+   "<Field> 2" (then 3...) in table property_alternates, with its source, batch and date. No click is needed
+   and nothing is flagged: a second value is normal. The drawer shows "Units: 24 · Units 2: 26 (Crexi, Oct 29)"
+   and the exports get numbered columns (Owner 2, Units 2...). A value already kept is never kept twice. A
+   different owner name is also added as another person, so the DRILL can use it.
 
 The same rule runs for the reply file of a batch, for duplicate rows inside any import file, and for a later
 re-import of a property already in the app (ingest/crexi.py `_update`). First-time imports are unchanged.
@@ -29,7 +30,7 @@ from typing import Any
 from ..db import dumps, loads, now_iso, rows
 from ..util import clean_str, normalize_address, normalize_owner
 
-FLAG = "crexi_differs"
+RETIRED_FLAG = "crexi_differs"     # the old "Crexi sent different data" warning; db.py removes it on start
 
 # Fields that say WHICH property a row is (or where it is). A blank one is filled, but a different value is
 # never an alternate: Crexi writing "ST" for "STREET" is not a disagreement about the property.
@@ -92,8 +93,8 @@ def report_text(c: Mapping[str, int]) -> str:
            f"{g('new_names'):,} new owner or contact name{'s' if g('new_names') != 1 else ''}, "
            f"{g('new_mailing'):,} new mailing address{'es' if g('new_mailing') != 1 else ''}, "
            f"{g('blanks_filled'):,} blank{'s' if g('blanks_filled') != 1 else ''} filled, "
-           f"{g('alternates'):,} differing value{'s' if g('alternates') != 1 else ''} kept as "
-           f"alternate{'s' if g('alternates') != 1 else ''}; "
+           f"{g('alternates'):,} second value{'s' if g('alternates') != 1 else ''} kept next to the first "
+           f"(Units 2, Owner 2...); "
            f"{g('gained_nothing'):,} propert{'ies' if g('gained_nothing') != 1 else 'y'} gained nothing.")
     return ", ".join(head) + ". " + new
 
@@ -203,44 +204,24 @@ def filled_count(plan: FactsPlan) -> int:
     return len(fills)
 
 
-# --- writing alternates -----------------------------------------------------------------------------------
+# --- keeping extra values ---------------------------------------------------------------------------------
 
 def apply_alternates(conn: sqlite3.Connection, property_id: int, plan: FactsPlan, *, import_id: int | None,
-                     source: str = "crexi", now: str | None = None) -> int:
-    """Store the plan's alternates (inside the caller's transaction) and raise the flag. A value already stored
-    for this field (open, used or dismissed) is not stored twice, so re-importing a file adds nothing. Returns
-    how many new alternates were stored."""
+                     source: str = "crexi", now: str | None = None, batch_id: int | None = None) -> int:
+    """Keep the plan's differing values as extra values (inside the caller's transaction): no click needed, no
+    flag. A value already kept for this field is not kept twice, so re-importing a file adds nothing. Returns
+    how many were kept."""
     stamp = now or now_iso()
     added = 0
     for f, (new, old) in plan.alternates.items():
         have = rows(conn, "SELECT value FROM property_alternates WHERE property_id=? AND field=?", (property_id, f))
         if any(_same(f, loads(r["value"]), new) for r in have):
             continue
-        conn.execute("INSERT INTO property_alternates(property_id, field, value, original, source, import_id, seen_at) "
-                     "VALUES(?,?,?,?,?,?,?)", (property_id, f, dumps(new), dumps(old), source, import_id, stamp))
+        conn.execute("INSERT INTO property_alternates(property_id, field, value, original, source, import_id, "
+                     "batch_id, seen_at, status) VALUES(?,?,?,?,?,?,?,?, 'kept')",
+                     (property_id, f, dumps(new), dumps(old), source, import_id, batch_id, stamp))
         added += 1
-    if plan.alternates:
-        sync_flag(conn, property_id)
     return added
-
-
-def sync_flag(conn: sqlite3.Connection, property_id: int) -> int:
-    """Raise `crexi_differs` in the property's flags while it has open alternates and drop it when none are
-    left. Returns the open count."""
-    n = int(conn.execute("SELECT COUNT(*) FROM property_alternates WHERE property_id=? AND status='open'",
-                         (property_id,)).fetchone()[0])
-    row = conn.execute("SELECT flags_json FROM properties WHERE id=?", (property_id,)).fetchone()
-    if row is None:
-        return n
-    flags = list(loads(row[0], []) or [])
-    if n and FLAG not in flags:
-        flags.append(FLAG)
-    elif not n and FLAG in flags:
-        flags.remove(FLAG)
-    else:
-        return n
-    conn.execute("UPDATE properties SET flags_json=? WHERE id=?", (dumps(sorted(flags)), property_id))
-    return n
 
 
 def add_new_knowledge(conn: sqlite3.Connection, property_id: int, plan: FactsPlan, *, notes: str,
@@ -259,57 +240,75 @@ def add_new_knowledge(conn: sqlite3.Connection, property_id: int, plan: FactsPla
     return out
 
 
-# --- deciding an alternate -------------------------------------------------------------------------------
+# --- reading extra values ---------------------------------------------------------------------------------
 
-USABLE_FIELDS_NOTE = ("A different mailing address can't be swapped in: it is kept as an extra address to try "
-                      "(see the contact list).")
-
-
-def open_alternates(conn: sqlite3.Connection, property_id: int) -> list[dict]:
-    """The property's alternates (newest first), each with a plain label and whether 'Use this one' works."""
-    out = []
-    for r in rows(conn, "SELECT * FROM property_alternates WHERE property_id=? ORDER BY id DESC", (property_id,)):
-        out.append({"id": r["id"], "field": r["field"], "label": label(r["field"]), "value": loads(r["value"]),
-                    "original": loads(r["original"]), "source": r["source"], "seen_at": r["seen_at"],
-                    "status": r["status"], "decided_by": r["decided_by"], "decided_at": r["decided_at"],
-                    "usable": r["field"] != "mailing_address"})
-    return out
+# The name each field has in the exports and the drawer ("Units 2", "Owner 2", "Mailing address 2").
+HEADERS = {
+    "units": "Units", "building_sqft": "Building sq ft", "year_built": "Year built", "lot_acres": "Lot acres",
+    "property_type": "Property type", "county": "County", "owner_name": "Owner", "mailing_address": "Mailing address",
+    "name": "Property name", "building_count": "Buildings", "stories": "Stories", "sale_date": "Last sale date",
+    "sale_price": "Last sale price", "lender": "Lender", "loan_amount": "Loan amount", "loan_type": "Loan type",
+    "interest_rate": "Interest rate", "loan_maturity": "Loan maturity", "improvement_value": "Building value",
+    "land_value": "Land value", "total_value": "Total value", "value_type": "Value type", "tax_year": "Tax year",
+    "annual_tax": "Annual tax",
+}
+SOURCE_NAMES = {"crexi": "Crexi"}
 
 
-def decide_alternate(conn: sqlite3.Connection, property_id: int, alternate_id: int, action: str, actor: str) -> dict:
-    """'use' (swap it in through property_edits, so it can be undone) or 'ignore'. ValueError says why not."""
-    from ..ingest.edits import EDITABLE_BY_FIELD, record_edit
-    alt = conn.execute("SELECT * FROM property_alternates WHERE id=? AND property_id=?",
-                       (alternate_id, property_id)).fetchone()
-    if alt is None:
-        raise KeyError(f"Alternate {alternate_id} was not found on this property.")
-    if alt["status"] != "open":
-        raise ValueError("That one was already decided.")
-    stamp = now_iso()
-    who = (actor or "unknown")[:320]
-    if action == "ignore":
-        conn.execute("UPDATE property_alternates SET status='dismissed', decided_by=?, decided_at=? WHERE id=?",
-                     (who, stamp, alternate_id))
-        message = "Ignored. The original value stays."
-    elif action == "use":
-        from ..ingest.crexi import RECORD_COLUMNS
-        f = alt["field"]
-        if f not in RECORD_COLUMNS or f == "mailing_address":
-            raise ValueError(USABLE_FIELDS_NOTE)
-        value = loads(alt["value"])
-        old = conn.execute(f"SELECT {f} FROM properties WHERE id=?", (property_id,)).fetchone()[0]
-        if f in EDITABLE_BY_FIELD:
-            record_edit(conn, property_id, f, old, value, via=f"alternate:{alternate_id}", actor=who, created_at=stamp)
-        else:     # not a column a spreadsheet can correct: the same history row, written here
-            conn.execute("INSERT INTO property_edits(property_id, field, old_value, new_value, via, actor, created_at) "
-                         "VALUES(?,?,?,?,?,?,?)", (property_id, f, dumps(old), dumps(value),
-                                                   f"alternate:{alternate_id}", who, stamp))
-        conn.execute(f"UPDATE properties SET {f}=?, updated_at=? WHERE id=?", (value, stamp, property_id))
-        conn.execute("UPDATE property_alternates SET status='used', decided_by=?, decided_at=? WHERE id=?",
-                     (who, stamp, alternate_id))
-        message = f"Now using this {label(f)}. The edit is recorded; the original value is kept in the history."
-    else:
-        raise ValueError("Choose use or ignore.")
-    left = sync_flag(conn, property_id)
-    conn.commit()
-    return {"ok": True, "message": message, "open_left": left}
+def header(field_name: str) -> str:
+    """'Units', 'Owner', 'Mailing address'... (the extra values are '<header> 2', '<header> 3'...)."""
+    return HEADERS.get(field_name) or label(field_name).capitalize()
+
+
+def main_value(prop: Mapping[str, Any], field_name: str) -> Any:
+    """The property's main (first) value of a field; the mailing address as one line."""
+    if field_name == "mailing_address":
+        return mailing_text(prop)
+    return prop.get(field_name)
+
+
+def number_extras(prop: Mapping[str, Any], stored: Iterable[Mapping[str, Any]]) -> dict[str, list[dict]]:
+    """Number one property's stored extra values: {field: [{n: 2, header: 'Units 2', value, source, day, seen_at,
+    batch_id, id}, ...]} in the order they arrived. A value equal to the main one or to an earlier extra value is
+    not repeated. Dismissed rows (an 'Ignore' from before Oct 2026) are left out; a value swapped in by hand back
+    then (status 'used') keeps the value it replaced as an extra."""
+    from .batches import local_day
+    out: dict[str, list[dict]] = {}
+    for r in sorted(stored, key=lambda x: int(x["id"])):
+        if r["status"] == "dismissed":
+            continue
+        f = r["field"]
+        values = [loads(r["value"])] if r["status"] != "used" else [loads(r["original"]), loads(r["value"])]
+        main = main_value(prop, f)
+        have = out.setdefault(f, [])
+        for v in values:
+            if v is None or v == "":
+                continue
+            if (main is not None and _same(f, main, v)) or any(_same(f, x["value"], v) for x in have):
+                continue
+            n = len(have) + 2
+            have.append({"n": n, "field": f, "header": f"{header(f)} {n}", "value": v,
+                         "source": SOURCE_NAMES.get(r["source"], r["source"] or ""), "seen_at": r["seen_at"],
+                         "day": local_day(r["seen_at"]), "batch_id": r.get("batch_id"), "id": r["id"]})
+    return {f: v for f, v in out.items() if v}
+
+
+def extra_values(conn: sqlite3.Connection, property_id: int,
+                 prop: Mapping[str, Any] | None = None) -> dict[str, list[dict]]:
+    """One property's extra values, numbered (see number_extras)."""
+    p = prop if prop is not None else (rows(conn, "SELECT * FROM properties WHERE id=?", (property_id,)) or [{}])[0]
+    return number_extras(p, rows(conn, "SELECT * FROM property_alternates WHERE property_id=? ORDER BY id",
+                                 (property_id,)))
+
+
+def extra_values_many(conn: sqlite3.Connection,
+                      props: Mapping[int, Mapping[str, Any]]) -> dict[int, dict[str, list[dict]]]:
+    """Extra values for many properties at once (the exports): {property id: {field: [...]}}."""
+    by_pid: dict[int, list[dict]] = {}
+    ids = list(props)
+    for i in range(0, len(ids), 900):
+        chunk = ids[i:i + 900]
+        for r in rows(conn, "SELECT * FROM property_alternates WHERE property_id IN "
+                            f"({','.join('?' for _ in chunk)}) ORDER BY id", chunk):
+            by_pid.setdefault(int(r["property_id"]), []).append(r)
+    return {pid: ex for pid, stored in by_pid.items() if (ex := number_extras(props[pid], stored))}

@@ -3,8 +3,9 @@
     uv run run.py crexi status
     uv run run.py crexi export --count 50 --dry-run     who would be in it (nothing is written)
     uv run run.py crexi export --count 50               write output/crexi/<period>/batch-<id>-<N>.csv
-    uv run run.py crexi import ~/Downloads/reply.xlsx   preview; add --yes to apply
-    uv run run.py crexi close 3 --yes                   give back the credits of rows Crexi never returned
+    uv run run.py crexi import ~/Downloads/reply.xlsx   preview; add --yes to import it (this finishes the batch:
+                                                        what Crexi didn't have is "missing", costs nothing, and
+                                                        goes to the DRILL's other sources)
     uv run run.py crexi cancel 3 --yes                  a batch you never uploaded
     uv run run.py crexi history
 
@@ -22,7 +23,7 @@ from . import batches as B
 from . import reply as R
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_WAITING = 0, 1, 2, 3
-ACTIONS = ("status", "export", "import", "close", "cancel", "history")
+ACTIONS = ("status", "export", "import", "cancel", "history")
 
 
 def say(text: str = "", indent: str = "") -> None:
@@ -35,7 +36,7 @@ def say(text: str = "", indent: str = "") -> None:
 
 def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("action", choices=ACTIONS, help="what to do")
-    p.add_argument("target", nargs="?", help="import: Crexi's file; close and cancel: the batch number")
+    p.add_argument("target", nargs="?", help="import: Crexi's file; cancel: the batch number")
     p.add_argument("--count", "-n", type=int, help="export: how many (default: every free credit)")
     p.add_argument("--retry", action="store_true",
                    help="export: put the properties Crexi did not return before back in (a second pass)")
@@ -113,13 +114,21 @@ def _import(args: argparse.Namespace, conn: sqlite3.Connection, interactive, ask
         say("Nothing was changed. To go ahead, add --yes to the same command.")
         return EXIT_WAITING
     res = R.apply_reply(conn, path, path.name, columns=columns, adopt_hand=args.hand, actor="cli")
-    say(res["message"])
-    if res.get("changed"):
-        say(res["enrichment_text"])
-        for w in res["warnings"]:
-            say(f"Note: {w}")
-        if res.get("unmatched_file"):
-            say(f"Rows that could not be matched: {B.output_dir() / res['unmatched_file']}")
+    if not res.get("changed"):
+        say(res["message"])
+        return EXIT_OK
+    if res.get("headline"):
+        say(res["headline"])
+    if res.get("missing_text"):
+        say(res["missing_text"])
+    if res.get("missing_file"):
+        say(f"The missing list (address, owner, why): {B.output_dir() / res['missing_file']}")
+    say(res["credits_text"])
+    say(res["enrichment_text"])
+    for w in res["warnings"]:
+        say(f"Note: {w}")
+    if res.get("unmatched_file"):
+        say(f"Rows that could not be matched: {B.output_dir() / res['unmatched_file']}")
     return EXIT_OK
 
 
@@ -127,16 +136,15 @@ def _batch_number(args: argparse.Namespace) -> int | None:
     try:
         return int(str(args.target).lstrip("#"))
     except (TypeError, ValueError):
-        say("Give the batch number, for example: uv run run.py crexi close 3")
+        say("Give the batch number, for example: uv run run.py crexi cancel 3")
         return None
 
 
-def _close(args: argparse.Namespace, conn: sqlite3.Connection, cancel: bool) -> int:
+def _cancel(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     n = _batch_number(args)
     if n is None:
         return EXIT_USAGE
-    fn = B.withdraw_batch if cancel else B.close_batch
-    res = fn(conn, n, confirm=bool(args.yes), actor="cli")
+    res = B.withdraw_batch(conn, n, confirm=bool(args.yes), actor="cli")
     say(res["message"])
     if res.get("needs_confirm"):
         say("Nothing was changed. To go ahead, add --yes to the same command.")
@@ -147,12 +155,12 @@ def _close(args: argparse.Namespace, conn: sqlite3.Connection, cancel: bool) -> 
 def _history(conn: sqlite3.Connection) -> int:
     for p in B.history(conn)["periods"]:
         pct = f"{p['matched_pct']:.0%}" if p["matched_pct"] is not None else "-"
-        say(f"{p['label']}: {p['sent']:,} sent, {p['returned']:,} returned ({pct}), {p['not_returned']:,} not returned, "
+        say(f"{p['label']}: {p['sent']:,} sent, {p['returned']:,} returned ({pct} matched), {p['missing']:,} missing, "
             f"{p['waiting']:,} waiting, {p['by_hand']:,} used by hand.")
         for b in p["batches"]:
             say(f"#{b['id']} {b['created_day']} {b['kind_label']} by {b['created_by']}: {b['sent']:,} sent, "
-                f"{b['returned']:,} returned, {b['not_returned']:,} not returned, {b['waiting']:,} waiting "
-                f"({b['status']})", "  ")
+                f"{b['returned']:,} returned, {b['missing']:,} missing, {b['waiting']:,} waiting "
+                f"({'finished' if b['status'] == 'closed' else 'waiting for Crexi'})", "  ")
     return EXIT_OK
 
 
@@ -165,10 +173,8 @@ def run(args: argparse.Namespace, conn: sqlite3.Connection, interactive=lambda: 
             return _export(args, conn)
         if args.action == "import":
             return _import(args, conn, interactive, ask_ok)
-        if args.action == "close":
-            return _close(args, conn, cancel=False)
         if args.action == "cancel":
-            return _close(args, conn, cancel=True)
+            return _cancel(args, conn)
         return _history(conn)
     except (B.CrexiError, R.ReplyError, KeyError) as exc:
         say(str(exc.args[0] if isinstance(exc, KeyError) and exc.args else exc))

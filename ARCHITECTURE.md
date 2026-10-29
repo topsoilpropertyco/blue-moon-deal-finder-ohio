@@ -328,24 +328,42 @@ created_at, created_by, file_name, status open|imported|closed, note, column_ove
 import_id, result found|owner_only|nothing, phones, emails, is_retry, not_matched_at, UNIQUE(batch_id, property_id))`;
 `crexi_batch_imports(id, batch_ids, file_name, saved_as, file_hash, rows_total, returned, found, owner_only, no_data,
 not_matched, duplicates, unmatched, contacts_added, dnc_marked, unreadable, columns_json, summary_json, created_at,
-created_by)` (summary_json holds the enrichment report); `property_alternates(id, property_id, field, value,
-original, source, import_id, seen_at, status open|used|dismissed, decided_by, decided_at)`; `credit_ledger` gained
-`period` and `batch_id`. Credit rule: Crexi charges one credit per row it matches (even with no phone or email),
-nothing for 'Not Matched'. A batch's rows are 'sent' (in flight) until Crexi returns them; closing marks the rest
-`not_returned` (no credit, DRILL crexi_credit = nothing); `withdrawn` = cancelled before upload.
+created_by)` (summary_json holds the enrichment report, `headline`, `totals`, `finished` per batch and
+`missing_file`); `property_alternates(id, property_id, field, value, original, source, import_id, batch_id, seen_at,
+status kept|used|dismissed, decided_by, decided_at)` = the extra values ("Units 2", "Owner 2"...; db.py
+`_migrate_extra_values` rebuilt older tables so 'open' rows became 'kept', and removed the retired `crexi_differs`
+flag); `credit_ledger` gained `period` and `batch_id`. Credit rule: Crexi charges one credit per row it matches
+(even with no phone or email), nothing for 'Not Matched'. A batch's rows are 'sent' (in flight) until its reply is
+imported. Importing a reply FINISHES every batch that has a row in the file (`finish_batches`): matched rows are
+`returned`; the rest are `not_returned`, shown as **missing** ("Crexi didn't have it": Not Matched or left out),
+no credit, and the DRILL's crexi_credit stage records nothing at once so the owner moves on to the other sources.
+A batch with no row in the file is not touched. A later file that brings a missing row back records it as
+returned then (ledger row, DRILL upgraded). There is no close step; `withdrawn` = cancelled before upload. Old
+batches left 'imported' (partly back) are finished the first time `status` runs.
 - `period.py`: `period_start/next_period_start/period_end(date, reset_day)`, `period_key`, `days_left`, `describe`,
   `label`. A month without the reset day starts its period on its last day.
 - `batches.py`: `status`, `pick(conn, n, retry)` (the credit plan order, dedupe by Crexi link, APN, address; never a
   property already sent this period), `preview_export`, `export_batch` (writes output/crexi/<period>/batch-<id>-<N>.csv;
-  cells starting = + - @ are quoted), `close_batch(confirm)`, `withdraw_batch(confirm)`, `history`, `batch_items`,
-  `property_history`, `export_file` (by batch id, inside output/).
+  cells starting = + - @ are quoted), `finish_batches(ids)`, `missing_rows` / `write_missing` / `missing_file`
+  (CSV: Batch, Address, City, State, ZIP, County, APN, Owner, Why missing, Property ID), `withdraw_batch(confirm)`,
+  `topup_suggestion` ("Batch #3: Crexi returned 450 of 500. 50 missing. You have 50 credits left until Nov 28.
+  Export the next 50."), `returned_text`, `credits_left_text`, `history` (per batch and period: sent, returned,
+  missing, matched %), `batch_items`, `property_history`, `export_file` (by batch id, inside output/),
+  `drill_box(conn, slug)` (the DRILL screen's Crexi box: sent, returned, missing, penetration, missing_working =
+  missing owners still active in the DRILL).
 - `reply.py`: `preview(conn, path, columns, adopt_hand)` and `apply_reply(...)`. Reads Crexi's layout (header row found
   by scanning), detects phone/email/contact-name columns by header words (override per import, stored on the batch),
   matches rows to items across batches (newest first), unmatched/duplicate rows go to unmatched-<import>.csv,
-  property facts go through `ingest.import_file` per market, contacts through the DRILL's `_add_contact`.
-- `merge.py`: the keep-the-original rule (`plan_facts`, `apply_alternates`, `decide_alternate`, `Report`), used by the
-  reply import and by `ingest/crexi.py` (`plan_update`, `_update`, duplicate rows in a file).
-- `cli.py`: `uv run run.py crexi ...`.
+  property facts go through `ingest.import_file` per market (the phone, email and contact-name columns are left
+  out of raw_json: they are contacts; extra values kept get the batch id), contacts through the DRILL's
+  `_add_contact`, then `finish_batches` and missing-<import>.csv. The result has `headline`, `missing_text`,
+  `credits_text`, `missing_file`.
+- `merge.py`: the keep-the-original rule (`plan_facts`, `apply_alternates` keeps a differing value as an extra
+  value automatically, `Report`), used by the reply import and by `ingest/crexi.py` (`plan_update`, `_update`,
+  duplicate rows in a file). `extra_values(conn, pid)` / `extra_values_many` / `number_extras` number them:
+  {field: [{n: 2, header: 'Units 2', value, source 'Crexi', day 'Oct 29', batch_id}]}; a value equal to the main
+  one or an earlier extra is not repeated.
+- `cli.py`: `uv run run.py crexi status|export|import|cancel|history` (no close).
 
 ### pipeline + jobs + exports
 - `bluemoon/pipeline.py`: `STEPS = ["import","owners","drive","rent","parcels","photos","classify","score","drill","research","all"]`
@@ -366,6 +384,14 @@ nothing for 'Not Matched'. A batch's rows are 'sent' (in flight) until Crexi ret
   this score", "Photo reasons" (followed by "Building style (AI)", "Stories (AI estimate)", "Buildings seen (AI)", "Condition (AI)" and "Photo answer from") and, after "Why set aside": "Buy box decision", "Rules said", "Decided by",
   "Decided on", "Set-aside groups", and end with "Property ID" and "Row as of" (max of `properties.updated_at` and the
   last buy-box decision; the round trip's staleness guard). Workbooks carry metadata creator "Blue Moon Deal Finder".
+  Numbered columns (`with_numbered`, `numbered_fields`, `callable_contacts`, `crm_numbered`): "<Field> 2..." right
+  after Units / Building sq ft / Year built / Lot acres / Property type / County / Owner when a property has extra
+  values (crexi/merge.py), "Mailing address" (+ " 2"...) after the owner(s), "Phone 1..N" and "Email 1..N" after
+  "Contact info" (worklist: after "Voicemail"; working first, then untested; never wrong, dnc, or for a dnc owner);
+  crm_handoff.csv gets phone_1.., email_1.. after `vm` and owner_name_2, mailing_address_2, units_2... N = the most
+  any row has, capped at `exports.max_numbered` (config.yaml, default 5). Original columns whose names look like
+  ours ("Phone 3", "Owner 2") get " (Crexi)". The round trip reads editable columns by exact name, so numbered
+  columns are ignored on re-import.
   `export_review(conn, market_slug, bucket) -> Path`: one set-aside group as `output/<market>/review/review_<group>.xlsx`
   (sheet "Review": Address, City, then "Buy box decision" (a dropdown) and the editable columns, then the rest of
   ours, no Crexi columns; sheet "How to edit"). CSV cells that could run as a formula start with `'`; xlsx links
@@ -425,7 +451,7 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | POST | `/api/m/{slug}/properties/{id}/credit` | body `{result?}` |
 | POST | `/api/m/{slug}/properties/{id}/review` | body `{label?, note?, agreed?}`: `{agreed: true}` = "Yes, the AI is right" (no label needed), `{agreed: false, label}` = "No, it's wrong"; plain `{label}` as before. Answer has `agreed`, `message` |
 | POST | `/api/m/{slug}/properties/{id}/outcome` | body `{outcome, note?}` |
-| GET | `/api/m/{slug}/drill?scope=buybox\|all` | drill overview (default `buybox`: owners of buy-box properties; `all`: everyone) |
+| GET | `/api/m/{slug}/drill?scope=buybox\|all` | drill overview (default `buybox`: owners of buy-box properties; `all`: everyone), plus `crexi`: the Crexi box (`crexi/batches.drill_box`) |
 | GET | `/api/m/{slug}/drill/queue/{stage_key}?limit=&offset=&scope=` | stage queue (`stage_key=validate` for reach-out queue; `scope` as above) |
 | GET | `/api/m/{slug}/credits` | `{status, plan:[...], extras:[...], planned, planned_all, extra_count, extras_all, other_markets, others:[{slug,name,planned,extras}], shortfall, level1_open, message, log:[...]}` (credits are shared: *_all, shortfall and level1_open count every market) |
 | GET | `/api/m/{slug}/review/queue?limit=&offset=&include_excluded=&scope=` | `{total, scope, counts:{total, scope, scopes:{everything, unsure}, needs_review, unsure, not_checked, no_photos, confirm, spot_check, reviewed}, items}`; `scope` = everything (default) or unsure |
@@ -437,9 +463,10 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | POST | `/api/crexi/export/preview` , `/api/crexi/export` | body `{count?, retry?, note?}`: who would be in the batch / write it |
 | GET | `/api/crexi/batches/{id}/file` | the export CSV (looked up by id) |
 | POST | `/api/crexi/import/preview` , `/api/crexi/import` | multipart `file`, `columns` (JSON), `adopt_hand` |
-| POST | `/api/crexi/batches/{id}/close` , `/withdraw` | body `{confirm}`; without confirm only says what it would do |
-| GET | `/api/crexi/imports/{id}/files/{unmatched\|unreadable\|reply}` | files an import wrote |
-| GET | `/api/m/{slug}/properties/{id}/crexi` | that property's Crexi history and open alternates (also `crexi` in the property detail) |
+| POST | `/api/crexi/batches/{id}/withdraw` | cancel a batch never uploaded; body `{confirm}`; without confirm only says what it would do |
+| GET | `/api/crexi/batches/{id}/missing` | that batch's missing list (CSV, written fresh) |
+| GET | `/api/crexi/imports/{id}/files/{unmatched\|unreadable\|missing\|reply}` | files an import wrote |
+| GET | `/api/m/{slug}/properties/{id}/crexi` | that property's Crexi history and `extras` (also `crexi` in the property detail) |
 | POST | `/api/m/{slug}/properties/{id}/alternates/{aid}` | body `{action: use\|ignore}` |
 | GET | `/api/m/{slug}/funnel` | `{find:[{label,count}], reach:[{label,count}]}` |
 | GET | `/api/m/{slug}/analytics` | `{imports:[...], filter_funnel:[...], coverage:[{field,pct}], counties:[...], size_dist:[...], score_dist:[...], owner_types:[...], levels:[{key,level,label,count,in_buybox}], api_usage:[...]}` |

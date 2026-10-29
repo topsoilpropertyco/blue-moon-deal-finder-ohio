@@ -337,7 +337,7 @@
       return boardHead(ov) + W.emptyMarket('Every owner then gets a contact level and a next step here.');
     }
     return boardHead(ov) + nextBar(ov) + scopeSwitch(ov) + statsStrip(ov) + reachCard(ov) +
-      `<div class="grid2 dr-grid">${penetrationPanel(ov)}${creditsPanel(ov.credits || {})}</div>` +
+      `<div class="grid2 dr-grid">${penetrationPanel(ov)}${creditsPanel(ov.credits || {}, ov.crexi)}</div>` +
       pipelinePanel(ov) + learnPanel();
   }
 
@@ -422,7 +422,25 @@
       </section>`;
   }
 
-  function creditsPanel(c) {
+  /** The small Crexi box: what Crexi did for this market's owners and where the missing ones are now. */
+  function crexiBox(x) {
+    if (!x || !Number(x.sent)) return '';
+    const pctText = x.penetration == null ? '' : ` (${Math.round(Number(x.penetration) * 100)}% returned)`;
+    const missing = Number(x.missing) || 0;
+    return `
+      <div class="dr-crexi" aria-label="Crexi">
+        <h3>Crexi</h3>
+        <ul class="cx-nums">
+          <li><b class="num">${num(x.sent)}</b> sent</li>
+          <li><b class="num">${num(x.returned)}</b> returned</li>
+          <li><b class="num">${num(missing)}</b> missing${esc(pctText)}</li>
+          ${Number(x.waiting) ? `<li><b class="num">${num(x.waiting)}</b> waiting at Crexi</li>` : ''}
+        </ul>
+        ${missing ? `<p class="note dr-tight"><b>${num(x.missing_working)}</b> of the ${num(missing)} missing ${Number(x.missing_working) === 1 ? 'is' : 'are'} being worked by the DRILL's other sources now (county records, AI research...)${Number(x.missing_exhausted) ? `; ${num(x.missing_exhausted)} have every source tried` : ''}${Number(x.missing_confirmed) ? `; ${num(x.missing_confirmed)} confirmed` : ''}.</p>` : ''}
+      </div>`;
+  }
+
+  function creditsPanel(c, crexi) {
     const per = Number(c.per_month) || 0;
     const left = Number(c.left) || 0;
     const line = per
@@ -435,6 +453,7 @@
         <div class="dr-hero-num"><span class="big num">${num(left)}</span><span class="note">of ${num(per)} free${Number(c.in_flight) ? ` · ${num(c.in_flight)} waiting at Crexi` : ''}</span></div>
         <p class="note dr-tight">${line}</p>
         <p class="note dr-tight">The credit plan picks the best possible owners the free stages could not reach.</p>
+        ${crexiBox(crexi)}
         <div><button class="btn" data-go="credits">Open Crexi credits</button></div>
       </section>`;
   }
