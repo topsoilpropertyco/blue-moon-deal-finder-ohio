@@ -150,6 +150,9 @@ def use_credit(conn: sqlite3.Connection, property_id: int, result: str | None = 
     for c in items:  # check every value before anything is written
         E.normalize_contact(c.channel, c.value)
     E._require_property(conn, property_id)
+    waiting = E.waiting_at_crexi(conn, property_id)
+    if waiting is not None:
+        raise ValueError(E.waiting_message(waiting))
     before = credit_status(conn, today=today, settings=settings)
     period = P.period_key(_today(today), settings)
     month = period[:7]
@@ -336,7 +339,7 @@ def _reason(c: dict, min_tries: int) -> str:
         parts.append(f"Not tried yet for free: {', '.join(c['not_tried'])}. Try those first if you have time.")
     rate = c.get("rate_info")
     if rate and rate["tried"] >= min_tries:
-        parts.append(f"Crexi has turned up contacts for {rate['found'] / rate['tried']:.0%} of {rate['label']} "
+        parts.append(f"Crexi has turned up an owner name or contact for {rate['found'] / rate['tried']:.0%} of {rate['label']} "
                      f"so far ({rate['found']:,} of {rate['tried']:,}).")
     return " ".join(parts)
 

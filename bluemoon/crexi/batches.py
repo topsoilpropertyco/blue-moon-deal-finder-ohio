@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -169,7 +170,10 @@ def topup_suggestion(conn: sqlite3.Connection, st: dict) -> dict:
     """What to do next, in plain English: {suggested, message, close_first, batch_id}. 'suggested' is the number
     to export next (None while a batch still has rows waiting: close it first to give those credits back)."""
     latest = one(conn, "SELECT id FROM crexi_batches WHERE period = ? ORDER BY id DESC LIMIT 1", (st["period"],))
-    waiting = open_batches(conn)
+    all_waiting = open_batches(conn)
+    # Only a batch from this credit period holds this period's credits: closing an older one frees nothing now.
+    waiting = [b for b in all_waiting if b.get("period") == st["period"]]
+    older = [b for b in all_waiting if b.get("period") != st["period"]]
     if waiting:
         b = max(waiting, key=lambda x: x["id"])
         sent = b["sent"]
@@ -188,8 +192,13 @@ def topup_suggestion(conn: sqlite3.Connection, st: dict) -> dict:
                     "message": f"{c['returned']:,} of {c['sent']:,} came back from Crexi. Export the next {n:,} to "
                                f"keep going ({st['left']:,} credits are free)."}
     if st["left"]:
+        note = ""
+        if older:
+            o = max(older, key=lambda x: x["id"])
+            note = (f" Batch #{o['id']} from an earlier credit period still has {o['waiting']:,} waiting; close it "
+                    f"when Crexi is done with it. It does not use this period's credits.")
         return {"suggested": st["left"], "close_first": False, "batch_id": None,
-                "message": f"{st['left']:,} credits are free. Export them, or type a smaller number."}
+                "message": f"{st['left']:,} credits are free. Export them, or type a smaller number." + note}
     return {"suggested": 0, "close_first": False, "batch_id": None,
             "message": "No credits are free this period. New ones arrive on " + st["next_reset"] + "."}
 
@@ -216,13 +225,19 @@ class Pick:
 
 
 def _period_sent_keys(conn: sqlite3.Connection, period: str) -> tuple[set[int], set[str]]:
-    """(property ids, duplicate keys) of every property sent in this period and not withdrawn."""
+    """(property ids sent in this period and not withdrawn, duplicate keys of every property already paid for or
+    waiting at Crexi in any period). A second record of a building whose credit was spent in an earlier period
+    (returned, used by hand, or still waiting) is never sent again."""
     ids: set[int] = set()
     keys: set[str] = set()
     for r in rows(conn, "SELECT p.* FROM crexi_batch_items i JOIN crexi_batches b ON b.id = i.batch_id "
                         "JOIN properties p ON p.id = i.property_id "
                         "WHERE b.period = ? AND i.status IN ('sent', 'returned')", (period,)):
         ids.add(int(r["id"]))
+        keys.update(duplicate_keys(r))
+    for r in rows(conn, "SELECT p.* FROM properties p WHERE p.id IN "
+                        "(SELECT property_id FROM crexi_batch_items WHERE status IN ('sent', 'returned')) "
+                        "OR p.id IN (SELECT property_id FROM credit_ledger WHERE property_id IS NOT NULL)"):
         keys.update(duplicate_keys(r))
     return ids, keys
 
@@ -360,7 +375,7 @@ def preview_export(conn: sqlite3.Connection, n: int | None = None, *, today: dat
     parts = []
     if pk.duplicates_left_out:
         parts.append(f"{pk.duplicates_left_out:,} duplicate{'s' if pk.duplicates_left_out != 1 else ''} left out "
-                     f"(same Crexi link, parcel number or address as one already in the list)")
+                     f"(same Crexi link, parcel number or address as one already in the list or already sent to Crexi)")
     if left_out.get("already_sent_this_period"):
         parts.append(f"{left_out['already_sent_this_period']:,} already sent this period")
     if left_out.get("do_not_contact"):
@@ -407,11 +422,44 @@ def write_export(path: Path, items: list[dict], batch_id: int) -> Path:
     return path
 
 
+_export_lock = threading.Lock()   # one export at a time in this program (the web app runs requests in threads)
+
+
 def export_batch(conn: sqlite3.Connection, n: int | None = None, *, created_by: str = "cli",
                  today: date | None = None, settings: Settings | None = None, retry: bool = False,
                  note: str | None = None) -> dict:
     """Pick the next `n` (default: every free credit), save the batch, write the file, and count the rows as
-    waiting at Crexi. Returns {batch, file, count, preview...}."""
+    waiting at Crexi. Returns {batch, file, count, preview...}.
+
+    Two exports at once (two people, or the command line and the web app) never share the free credits: one
+    waits for the other, and the free count and the picked properties are checked again inside the database's
+    write lock before anything is saved."""
+    with _export_lock:
+        return _export_batch(conn, n, created_by=created_by, today=today, settings=settings, retry=retry,
+                             note=note)
+
+
+def _recheck_before_insert(conn: sqlite3.Connection, items: list[dict], *, today: date | None,
+                           settings: Settings) -> None:
+    """Inside the write lock: still enough free credits, and none of the picked properties already sent."""
+    st = drill_credits.credit_status(conn, today=today, settings=settings)
+    if len(items) > st["left"]:
+        raise CrexiError(f"Another export just used some of the free credits: only {st['left']:,} are free now, so "
+                         f"I can't send {len(items):,}. Nothing was saved. Look at the Credits screen and try again.")
+    ids = [int(it["id"]) for it in items]
+    taken = 0
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        taken += int(scalar(conn, "SELECT COUNT(DISTINCT property_id) FROM crexi_batch_items WHERE status IN "
+                                  f"('sent', 'returned') AND property_id IN ({','.join('?' * len(chunk))})",
+                            tuple(chunk)) or 0)
+    if taken:
+        raise CrexiError(f"Another export just sent {taken:,} of these properties to Crexi. Nothing was saved, so "
+                         f"no credit is spent twice. Look at the Credits screen and try again.")
+
+
+def _export_batch(conn: sqlite3.Connection, n: int | None, *, created_by: str, today: date | None,
+                  settings: Settings | None, retry: bool, note: str | None) -> dict:
     s = settings or get_settings()
     st = drill_credits.credit_status(conn, today=today, settings=s)
     n = _check_count(conn, n, st)
@@ -420,12 +468,16 @@ def export_batch(conn: sqlite3.Connection, n: int | None = None, *, created_by: 
         raise CrexiError("Nobody qualifies for a Crexi credit right now, so there is nothing to export. Import a "
                          "newer Crexi list or work the DRILL to add owners.")
     period = st["period"]
-    first = int(scalar(conn, "SELECT COUNT(*) FROM crexi_batch_items i JOIN crexi_batches b ON b.id = i.batch_id "
-                             "WHERE b.period = ? AND i.status != 'withdrawn'", (period,)) or 0) == 0
     slugs = sorted({it["market_slug"] for it in pk.items})
     market_id = one(conn, "SELECT id FROM markets WHERE slug = ?", (slugs[0],))["id"] if len(slugs) == 1 else None
     stamp = now_iso()
+    if conn.in_transaction:
+        conn.commit()
     try:
+        conn.execute("BEGIN IMMEDIATE")      # the database's write lock: covers a second program exporting too
+        _recheck_before_insert(conn, pk.items, today=today, settings=s)
+        first = int(scalar(conn, "SELECT COUNT(*) FROM crexi_batch_items i JOIN crexi_batches b ON b.id = "
+                                 "i.batch_id WHERE b.period = ? AND i.status != 'withdrawn'", (period,)) or 0) == 0
         cur = conn.execute(
             "INSERT INTO crexi_batches(market_id, markets, period, kind, requested, created_at, created_by, status, note) "
             "VALUES(?,?,?,?,?,?,?, 'open', ?)",

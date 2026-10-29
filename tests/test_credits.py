@@ -351,7 +351,7 @@ def test_credit_hit_rates_by_owner_type_order_the_plan(conn, settings):
         try_free_reach(conn, pid)
     plan = [x for x in C.credit_plan(conn, MARKET, today=TODAY, settings=settings) if x["property_id"] in (trust, llc)]
     assert [x["property_id"] for x in plan] == [llc, trust]
-    assert "Crexi has turned up contacts for" in plan[0]["reason"]
+    assert "Crexi has turned up an owner name or contact for" in plan[0]["reason"]
     settings.drill["learn_order"] = False                        # off: the score alone decides
     plan = [x for x in C.credit_plan(conn, MARKET, today=TODAY, settings=settings) if x["property_id"] in (trust, llc)]
     assert [x["property_id"] for x in plan] == [trust, llc]

@@ -25,6 +25,7 @@ import hashlib
 import re
 import shutil
 import sqlite3
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
@@ -303,11 +304,18 @@ def _load_items(conn: sqlite3.Connection) -> tuple[dict, dict]:
     return items, by_prop
 
 
+def first_imported(conn: sqlite3.Connection, path: Path) -> str | None:
+    """When this exact file was first imported (None if never)."""
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return scalar(conn, "SELECT MIN(created_at) FROM crexi_batch_imports WHERE file_hash = ?", (digest,))
+
+
 def analyze(conn: sqlite3.Connection, table: ing.Table, column_map: dict[str, str], cols: dict, *,
-            adopt_hand: bool = False) -> Analysis:
+            adopt_hand: bool = False, first_seen: str | None = None) -> Analysis:
     """Match every row. Matched rows first (so a 'Not Matched' row never undoes a match), then the rest.
     With adopt_hand, a row for one of our properties that is in no batch is counted as a hand batch (the
-    apply step creates it)."""
+    apply step creates it). `first_seen`: when this same file was first imported; its 'Not Matched' rows never
+    flag a property sent after that (a second pass Crexi has not answered yet)."""
     parsed = _parse_rows(table, column_map, cols)
     items, by_prop = _load_items(conn)
     an = Analysis(parsed, items, by_prop, _build_index(conn))
@@ -325,6 +333,8 @@ def analyze(conn: sqlite3.Connection, table: ing.Table, column_map: dict[str, st
                 for it in by_prop.get(pid, []):
                     key = (it["batch_id"], pid)
                     if it["status"] in ("sent", "not_returned") and key not in an.claimed and key not in an.flagged:
+                        if row.not_matched and first_seen and (it["sent_at"] or "") >= first_seen:
+                            continue
                         if not row.not_matched or not it["not_matched_at"]:
                             claim = (pid, it)
                             break
@@ -558,7 +568,7 @@ def preview(conn: sqlite3.Connection, path: Path, filename: str | None = None, *
     table = read_reply(path)
     column_map, _unmapped = map_columns(table.headers, ing._merged_overrides(s, None))
     cols = detect_columns(table.headers, table.rows, _clean_columns(columns), skip=set(column_map.values()))
-    an = analyze(conn, table, column_map, cols, adopt_hand=adopt_hand)
+    an = analyze(conn, table, column_map, cols, adopt_hand=adopt_hand, first_seen=first_imported(conn, path))
     summ = _summary(an, conn)
     rep = plan_enrichment(conn, an, table, column_map, s)
     warnings = list(cols["notes"])
@@ -658,6 +668,13 @@ def _apply_item(conn: sqlite3.Connection, an: Analysis, key: tuple[int, int], ro
                 dnc: set, cfg: E.DrillConfig, totals: dict) -> None:
     """One returned property: contacts, the ledger row, the item, the DRILL check-off. One transaction."""
     bid, pid = key
+    stamp = now_iso()
+    # Claim the item first: if another import already recorded it, stop here so no credit is counted twice.
+    cur = conn.execute("UPDATE crexi_batch_items SET status='returned', returned_at=?, import_id=? "
+                       "WHERE batch_id=? AND property_id=? AND status IN ('sent', 'not_returned')",
+                       (stamp, import_id, bid, pid))
+    if cur.rowcount != 1:
+        return
     note = f"Crexi credit, batch {bid}"
     group = [row, *an.extras.get(key, [])]
     phones: dict[str, str] = {}
@@ -682,15 +699,22 @@ def _apply_item(conn: sqlite3.Connection, an: Analysis, key: tuple[int, int], ro
             totals["dnc"] += int(new and c.get("status") == "dnc")
     result = "found" if (phones or emails) else ("owner_only" if any(r.contact_name or r.owner_name for r in group)
                                                  else "nothing")
-    stamp = now_iso()
-    pend = one(conn, "SELECT id FROM credit_ledger WHERE property_id=? AND batch_id=? AND result IS NULL",
-               (pid, bid))
-    if pend is None:
-        conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at, period, batch_id) "
-                     "VALUES(?,?,?,?,?,?)", (pid, batch["period"][:7], None, stamp, batch["period"], bid))
-    conn.execute("UPDATE crexi_batch_items SET status='returned', returned_at=?, import_id=?, result=?, phones=?, "
-                 "emails=?, not_matched_at=NULL WHERE batch_id=? AND property_id=?",
-                 (stamp, import_id, result, len(phones), len(emails), bid, pid))
+    led = one(conn, "SELECT id, result FROM credit_ledger WHERE property_id=? AND batch_id=? ORDER BY id DESC LIMIT 1",
+              (pid, bid))
+    if led is None:
+        # a credit marked used by hand while the property waited at Crexi is this same credit: adopt it
+        hand = one(conn, "SELECT id FROM credit_ledger WHERE property_id=? AND batch_id IS NULL AND result IS NULL "
+                         "ORDER BY id DESC LIMIT 1", (pid,))
+        if hand:
+            conn.execute("UPDATE credit_ledger SET batch_id=?, period=?, month=? WHERE id=?",
+                         (bid, batch["period"], batch["period"][:7], hand["id"]))
+        else:
+            conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at, period, batch_id) "
+                         "VALUES(?,?,?,?,?,?)", (pid, batch["period"][:7], None, stamp, batch["period"], bid))
+    elif led["result"] is not None:
+        conn.execute("UPDATE credit_ledger SET result=NULL WHERE id=?", (led["id"],))   # refilled just below
+    conn.execute("UPDATE crexi_batch_items SET result=?, phones=?, emails=?, not_matched_at=NULL "
+                 "WHERE batch_id=? AND property_id=?", (result, len(phones), len(emails), bid, pid))
     outcome = "found" if result in ("found", "owner_only") else "nothing"
     if result == "found":
         detail = (f"Crexi batch #{bid}: found {len(phones)} phone{'s' if len(phones) != 1 else ''} and "
@@ -730,21 +754,33 @@ def _make_hand_batch(conn: sqlite3.Connection, an: Analysis, actor: str, setting
     return bid
 
 
+_import_lock = threading.Lock()   # one reply import at a time in this program (web requests run in threads)
+
+
 def apply_reply(conn: sqlite3.Connection, path: Path, filename: str | None = None, *, columns: dict | None = None,
                 adopt_hand: bool = False, actor: str = "cli", settings: Settings | None = None) -> dict:
     """Import Crexi's reply: mark matched rows returned (a credit spent each), flag 'Not Matched' rows, add
     the contacts, merge the property facts, write the unmatched file and the history row. Safe to run twice: rows
-    already recorded are skipped, so nothing is added the second time."""
+    already recorded are skipped, so nothing is added the second time. Two imports at once run one after the
+    other, and each item is claimed only if it is still waiting, so no row is ever charged twice."""
+    with _import_lock:
+        return _apply_reply(conn, path, filename, columns=columns, adopt_hand=adopt_hand, actor=actor,
+                            settings=settings)
+
+
+def _apply_reply(conn: sqlite3.Connection, path: Path, filename: str | None, *, columns: dict | None,
+                 adopt_hand: bool, actor: str, settings: Settings | None) -> dict:
     s = settings or get_settings()
     table = read_reply(path)
     column_map, _ = map_columns(table.headers, ing._merged_overrides(s, None))
     overrides = _clean_columns(columns)
     cols = detect_columns(table.headers, table.rows, overrides, skip=set(column_map.values()))
-    an = analyze(conn, table, column_map, cols, adopt_hand=adopt_hand)
+    seen_at = first_imported(conn, path)
+    an = analyze(conn, table, column_map, cols, adopt_hand=adopt_hand, first_seen=seen_at)
     warnings = list(cols["notes"])
     if adopt_hand and any(r.kind == "hand" for r in an.rows):
         _make_hand_batch(conn, an, actor, s)
-        an = analyze(conn, table, column_map, cols)
+        an = analyze(conn, table, column_map, cols, first_seen=seen_at)
     plan = plan_enrichment(conn, an, table, column_map, s)
     summ = _summary(an, conn)
     changes = bool(an.claimed or an.flagged)

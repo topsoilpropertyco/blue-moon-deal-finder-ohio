@@ -881,3 +881,129 @@ def test_cli_status_export_dry_run_and_export(conn, small, capsys, tmp_path):
     assert run.main(["crexi", "history"]) == 0
     assert run.main(["crexi", "close", "1"]) == 3                         # asks for --yes
     assert run.main(["crexi", "close", "1", "--yes"]) == 0
+
+
+# --- review fixes (credits) ---------------------------------------------------------------------------------
+
+def test_two_exports_at_once_never_share_the_free_credits(conn, small):
+    import threading
+    from bluemoon.db import connect
+    seed(conn, 40)
+    barrier = threading.Barrier(2)
+    out: list = []
+
+    def run():
+        c = connect(settings=small)
+        try:
+            barrier.wait()
+            out.append(B.export_batch(c, 15, today=TODAY, settings=small))
+        except B.CrexiError as exc:
+            out.append(exc)
+        finally:
+            c.close()
+
+    ts = [threading.Thread(target=run) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    st = C.credit_status(conn, today=TODAY, settings=small)
+    assert st["in_flight"] <= 20 and st["used"] <= 20
+    assert sum(isinstance(o, dict) for o in out) == 1 and sum(isinstance(o, B.CrexiError) for o in out) == 1
+    assert scalar(conn, "SELECT COUNT(*) - COUNT(DISTINCT property_id) FROM crexi_batch_items") == 0
+
+
+def test_export_rechecks_inside_the_write_lock(conn, small, monkeypatch):
+    """A second program exports between this one's pick and its save: nothing is saved twice."""
+    from bluemoon.db import connect
+    seed(conn, 10)
+    real_pick = B.pick
+    other = connect(settings=small)
+
+    done: list = []
+
+    def pick_then_other_exports(*a, **k):
+        pk = real_pick(*a, **k)
+        if not done:
+            done.append(1)
+            B._export_batch(other, 10, created_by="other", today=TODAY, settings=small, retry=False, note=None)
+        return pk
+
+    monkeypatch.setattr(B, "pick", pick_then_other_exports)
+    with pytest.raises(B.CrexiError, match="Nothing was saved"):
+        B.export_batch(conn, 10, today=TODAY, settings=small)
+    other.close()
+    assert scalar(conn, "SELECT COUNT(*) FROM crexi_batches") == 1
+    assert C.credit_status(conn, today=TODAY, settings=small)["in_flight"] == 10
+
+
+def test_two_imports_of_the_same_reply_charge_each_row_once(conn, small, tmp_path, monkeypatch):
+    ids, res, data = _batch(conn, small, 5)
+    path = reply_file(tmp_path / "r.xlsx", data)
+    table = R.read_reply(path)
+    column_map, _ = R.map_columns(table.headers, R.ing._merged_overrides(small, None))
+    cols = R.detect_columns(table.headers, table.rows, {}, skip=set(column_map.values()))
+    stale = R.analyze(conn, table, column_map, cols)          # what a second, parallel import saw before writing
+    assert R.apply_reply(conn, path, "r.xlsx", settings=small)["returned"] == 5
+    monkeypatch.setattr(R, "analyze", lambda *a, **k: stale)
+    R.apply_reply(conn, path, "r.xlsx", settings=small)
+    assert scalar(conn, "SELECT COUNT(*) FROM credit_ledger") == 5
+    st = C.credit_status(conn, today=TODAY, settings=small)
+    assert (st["returned"], st["left"]) == (5, 15)
+
+
+def test_hand_credit_on_a_property_waiting_at_crexi_is_refused(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 3)
+    pid = int(data[0]["Property ID"])
+    with pytest.raises(ValueError, match="waiting at Crexi in batch #%d" % res["batch_id"]):
+        C.use_credit(conn, pid, None, today=TODAY, settings=small)
+    with pytest.raises(ValueError, match="waiting at Crexi"):
+        E.record_attempt(conn, pid, E.CREDIT_STAGE, "found", settings=small)
+    assert scalar(conn, "SELECT COUNT(*) FROM credit_ledger") == 0
+    # a pending hand credit made before this rule is adopted by the batch instead of counted twice
+    conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at, period) VALUES(?,?,?,?,?)",
+                 (pid, "2026-10", None, now_iso(), "2026-10-29"))
+    conn.commit()
+    R.apply_reply(conn, reply_file(tmp_path / "r.xlsx", data), "r.xlsx", settings=small)
+    led = rows(conn, "SELECT batch_id, result FROM credit_ledger WHERE property_id=?", (pid,))
+    assert led == [{"batch_id": res["batch_id"], "result": "found"}]
+    st = C.credit_status(conn, today=TODAY, settings=small)
+    assert (st["returned"], st["pending"]) == (3, 0)
+
+
+def test_a_copy_of_a_property_sent_in_an_earlier_period_is_not_sent_again(conn, small):
+    a = add_prop(conn, apn="OLD-1", address="1 Old St")
+    score(conn, a, 0.9)
+    B.export_batch(conn, 1, today=date(2026, 11, 27), settings=small)       # the Oct 29 period
+    b = add_prop(conn, apn="OLD-1", address="2 Other St")                    # same parcel, a second record
+    c = add_prop(conn)
+    score(conn, b, 0.95)
+    score(conn, c, 0.5)
+    pk = B.pick(conn, 5, today=date(2026, 11, 30), settings=small)          # the Nov 29 period
+    got = [it["id"] for it in pk.items]
+    assert b not in got and c in got and pk.duplicates_left_out == 1
+
+
+def test_topup_does_not_ask_to_close_a_batch_from_an_earlier_period(conn, small):
+    seed(conn, 8)
+    old = B.export_batch(conn, 5, today=date(2026, 11, 27), settings=small)
+    tip = B.status(conn, today=date(2026, 11, 30), settings=small)["topup"]
+    assert tip["close_first"] is False and tip["suggested"] == 20
+    assert "Batch #%d from an earlier credit period" % old["batch_id"] in tip["message"]
+    assert "does not use this period's credits" in tip["message"]
+    # in the same period, the waiting batch still comes first
+    same = B.status(conn, today=date(2026, 11, 27), settings=small)["topup"]
+    assert same["close_first"] is True
+
+
+def test_reimporting_an_old_reply_does_not_flag_a_second_pass(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 4)
+    path = reply_file(tmp_path / "r.xlsx", data, not_matched={3, 4})
+    R.apply_reply(conn, path, "r.xlsx", settings=small)
+    B.close_batch(conn, res["batch_id"], confirm=True, settings=small)
+    retry = B.export_batch(conn, 2, today=TODAY, settings=small, retry=True)
+    again = R.apply_reply(conn, path, "r.xlsx", settings=small)
+    assert again["changed"] is False
+    items = rows(conn, "SELECT status, not_matched_at FROM crexi_batch_items WHERE batch_id=?", (retry["batch_id"],))
+    assert [(i["status"], i["not_matched_at"]) for i in items] == [("sent", None), ("sent", None)]
+    assert scalar(conn, "SELECT COUNT(*) FROM crexi_batch_imports") == 1

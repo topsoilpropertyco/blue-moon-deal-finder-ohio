@@ -955,6 +955,18 @@ def _person_by_name(conn: sqlite3.Connection, property_id: int, name: str | None
     return pid
 
 
+def waiting_at_crexi(conn: sqlite3.Connection, property_id: int) -> int | None:
+    """The batch id this property is waiting at Crexi in (sent, no reply yet), or None."""
+    r = one(conn, "SELECT batch_id FROM crexi_batch_items WHERE property_id=? AND status='sent' ORDER BY batch_id DESC "
+                  "LIMIT 1", (property_id,))
+    return int(r["batch_id"]) if r else None
+
+
+def waiting_message(batch_id: int) -> str:
+    return (f"This property is waiting at Crexi in batch #{batch_id}; its credit is counted there. Import Crexi's "
+            f"reply on the Credits screen instead (or close that batch first).")
+
+
 def _sync_credit_ledger(conn: sqlite3.Connection, property_id: int, outcome: str) -> None:
     """A found/nothing check-off on the Crexi credit stage means a credit was spent: keep the ledger in step."""
     pending = one(conn, "SELECT id FROM credit_ledger WHERE property_id=? AND result IS NULL ORDER BY id DESC LIMIT 1",
@@ -962,6 +974,9 @@ def _sync_credit_ledger(conn: sqlite3.Connection, property_id: int, outcome: str
     if pending:
         conn.execute("UPDATE credit_ledger SET result=? WHERE id=?", (outcome, pending["id"]))
     else:
+        waiting = waiting_at_crexi(conn, property_id)
+        if waiting is not None:          # a second credit for one lookup: refuse (the whole check-off rolls back)
+            raise ValueError(waiting_message(waiting))
         from ..crexi.period import period_key      # the credit period it is counted in (config.yaml crexi.reset_day)
         key = period_key()
         conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at, period) VALUES(?,?,?,?,?)",
