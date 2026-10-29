@@ -509,7 +509,7 @@
       [fmt.num(s.in_buybox), 'Properties in the buy box', 'view:all'],
       [fmt.pct(s.penetration || 0), 'Owners confirmed', 'go:drill'],
       [fmt.num(s.blue_moon_10), 'Blue Moon ' + cut(moonCut) + ' or higher', 'view:moon'],
-      [credits.left === undefined ? '—' : fmt.num(credits.left), 'Crexi credits left this month', 'go:credits'],
+      [credits.left === undefined ? '—' : fmt.num(credits.left), 'Crexi credits free this period', 'go:credits'],
     ];
     if (ac.visual_enabled) tiles.push([fmt.num(s.needs_review || 0), 'Need your photo review', 'go:review']);
     return tiles.map(([v, l, act]) =>
@@ -536,6 +536,9 @@
       ['moon', 'Blue Moon ' + cut(th.moon_score === undefined ? 0.10 : th.moon_score) + '+'],
       ac.visual_enabled ? ['review', 'Needs photo review'] : null,
       ['confirmed', 'Confirmed owner'],
+      ['crexi_data', 'Has Crexi data'],
+      ['crexi_none', 'No Crexi data'],
+      ['crexi_waiting', 'Sent to Crexi, waiting'],
       ['excluded', 'Excluded'],
       ['everything', 'Everything'],
     ];

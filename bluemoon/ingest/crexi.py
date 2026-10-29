@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlsplit
 from pydantic import BaseModel, ConfigDict
 
 from ..config import Settings, get_settings
+from ..crexi import merge as cmerge
 from ..db import dumps, loads, market_by_slug, now_iso, one, rows
 from ..util import clean_str, normalize_address, normalize_county, normalize_zip, parse_date, to_float, yes_no
 from .columns import (
@@ -176,6 +177,8 @@ class ParsedRow:
     street: str | None = None
     addr_key: str | None = None
     key: str | None = None
+    dups: list["ParsedRow"] = field(default_factory=list)   # later rows of the same file that were this property
+    fills: int = 0                                          # blanks of this row filled from those rows
 
 
 @dataclass
@@ -759,7 +762,9 @@ def assign_keys(parsed: list[ParsedRow]) -> list[ParsedRow]:
 
 
 def collapse_duplicates(parsed: list[ParsedRow]) -> tuple[list[ParsedRow], int]:
-    """Merge rows with the same key (first row's values win; sizes take the largest). Returns (rows, merged)."""
+    """Merge rows with the same key. The first row is the original: blanks of it are filled from the later rows,
+    and any value a later row disagrees about is kept as an alternate once the property is saved
+    (crexi/merge.py). Returns (rows, merged)."""
     by_key: dict[str, ParsedRow] = {}
     merged = 0
     for p in parsed:
@@ -782,12 +787,12 @@ def _combine(a: ParsedRow, b: ParsedRow) -> None:
         if f == "units":
             continue  # handled by _combine_units
         va, vb = getattr(ra, f), getattr(rb, f)
-        if f in SIZE_FIELDS and va is not None and vb is not None:
-            updates[f] = max(va, vb)
-        elif va is None and vb is not None:
+        if va is None and vb is not None:
             updates[f] = vb
+            a.fills += 1
     if updates:
         a.record = ra.model_copy(update=updates)
+    a.dups.append(b)
     _combine_units(a, b)
     a.notes |= b.notes - {"units_from_addresses"}
     for k, v in b.raw.items():
@@ -796,11 +801,12 @@ def _combine(a: ParsedRow, b: ParsedRow) -> None:
 
 
 def _combine_units(a: ParsedRow, b: ParsedRow) -> None:
-    """Prefer a real unit count over one taken from the address count; then the larger."""
+    """Prefer a real unit count over one taken from the address count; otherwise the first row's count stays
+    (a different count in a later row becomes an alternate)."""
     rank = {"units": 2, "addresses": 1, None: 0}
     ua, ub = a.record.units, b.record.units
     if rank[b.units_source] > rank[a.units_source] or (
-            b.units_source == a.units_source and ub is not None and (ua is None or ub > ua)):
+            b.units_source == a.units_source and ub is not None and ua is None):
         a.record = a.record.model_copy(update={"units": ub})
         a.units_source = b.units_source
     a.notes.discard("units_from_addresses")
@@ -1086,6 +1092,11 @@ def import_file(conn: sqlite3.Connection, market_slug: str, path: str | Path, li
     _progress(progress, 0.97, "Setting up DRILL levels")
     _ensure_drill_states(conn, market_slug, warnings)
     _progress(progress, 1.0, "Import finished")
+    enrichment = merge["report"]
+    enrichment.add("rows_read", len(data_rows))
+    enrichment.add("matched", merge["updated"])
+    enrichment_dict = enrichment.to_dict()
+    enrichment_dict["duplicates"] = max(enrichment_dict["duplicates"], duplicates)
     log.info("Imported %s into %s: %d rows, %d new, %d updated (%d of them unchanged), %d skipped", table.filename,
              market_slug, len(data_rows), merge["new"], merge["updated"], merge["unchanged"], skipped)
     return {
@@ -1108,6 +1119,8 @@ def import_file(conn: sqlite3.Connection, market_slug: str, path: str | Path, li
         "total_columns": len(table.headers),
         "flag_counts": merge["flag_counts"],
         "edits_kept": merge["edits_kept"],
+        "enrichment": enrichment_dict,
+        "enrichment_text": cmerge.report_text(enrichment_dict),
         "warnings": warnings,
     }
 
@@ -1284,6 +1297,7 @@ def _merge_records(conn: sqlite3.Connection, market_id: int, records: list[Parse
     before: dict[int, tuple[dict, dict]] = {}     # property id -> (stored values before, the live row)
     new = updated = 0
     flag_counts: Counter[str] = Counter()
+    report = cmerge.Report()
     now = now_iso()
     step = max(1, len(records) // 20)
     for i, p in enumerate(records):
@@ -1302,16 +1316,18 @@ def _merge_records(conn: sqlite3.Connection, market_id: int, records: list[Parse
                 before[match["id"]] = (_stored(match), match)
             if match["property_key"] != p.key and p.key and p.key not in ex.by_key and _upgrade_key(match, p.key):
                 ex.rekey(match, p.key)
-            flags = _update(conn, match, p, import_id, now, opts, edits.get(match["id"]), kept)
+            flags = _update(conn, match, p, import_id, now, opts, edits.get(match["id"]), kept, report)
             row = match
             updated += match["id"] not in taken   # one property merged twice is still one update
+        _record_duplicates(conn, row, p, import_id, now, edits.get(row["id"]), report)
         taken.add(row["id"])
         flag_counts.update(flags)
         if progress and i % step == 0:
             _progress(progress, 0.3 + 0.65 * i / max(1, len(records)), f"Saved {i:,} of {len(records):,}")
     unchanged = sum(1 for old, row in before.values() if _stored(row) == old)
     fields = {f: n for f, n in kept.items() if f in EDITABLE_BY_FIELD}
-    return {"new": new, "updated": updated, "unchanged": unchanged, "flag_counts": dict(sorted(flag_counts.items())),
+    return {"new": new, "updated": updated, "unchanged": unchanged, "report": report,
+            "flag_counts": dict(sorted(flag_counts.items())),
             "edits_kept": sum(fields.values()), "edits_kept_fields": fields, "edits_crexi_new": kept["_crexi_new"]}
 
 
@@ -1337,21 +1353,39 @@ def _insert(conn: sqlite3.Connection, market_id: int, p: ParsedRow, flags: list[
     return data
 
 
-def _update(conn: sqlite3.Connection, existing: dict, p: ParsedRow, import_id: int, now: str,
-            opts: ImportOptions, edits: Mapping[str, dict] | None = None,
-            kept: Counter[str] | None = None) -> list[str]:
-    """New non-empty values win; empty cells never wipe what we already know. Corrections made by hand
-    (edits: {field: {value, old_value}}) win over the file; each one the file disagreed with is counted in
-    kept (by field, and '_crexi_new' when the file's value is not even the one that was corrected).
-    updated_at only moves when a stored value changes (the 'Row as of' guard of the round trip uses it)."""
-    before = _stored(existing)
+def plan_update(existing: Mapping[str, Any], p: ParsedRow,
+                edits: Mapping[str, dict] | None = None) -> tuple["cmerge.FactsPlan", dict[str, Any], set[str]]:
+    """What merging row `p` into the stored property `existing` would do (crexi/merge.py), without writing:
+    (the plan, the incoming values as the merge sees them, the row's flag notes). The import and the
+    Crexi-reply preview both use it, so a preview counts exactly what the import then does."""
     old_flags = set(loads(existing.get("flags_json"), []) or [])
     new_values = p.record.model_dump()
     notes = set(p.notes)
     if p.units_source == "addresses" and existing.get("units") is not None and "units_from_addresses" not in old_flags:
         new_values["units"] = None  # an address count never replaces a real unit count
         notes.discard("units_from_addresses")
-    merged = {c: (new_values[c] if new_values[c] is not None else existing.get(c)) for c in RECORD_COLUMNS}
+    skip = set(edits or {})
+    if p.units_source == "addresses":
+        skip.add("units")            # an estimate that differs from an estimate is not a disagreement
+    estimate = ("units",) if ("units_from_addresses" in old_flags and p.units_source == "units") else ()
+    return cmerge.plan_facts(existing, new_values, RECORD_COLUMNS, skip=skip, replace_blank_like=estimate), \
+        new_values, notes
+
+
+def _update(conn: sqlite3.Connection, existing: dict, p: ParsedRow, import_id: int, now: str,
+            opts: ImportOptions, edits: Mapping[str, dict] | None = None,
+            kept: Counter[str] | None = None, report: "cmerge.Report | None" = None) -> list[str]:
+    """The stored property is the original and keeps its values (crexi/merge.py): a blank is filled from the
+    file, a value the file disagrees about stays and the file's value is saved as an alternate (plus a new
+    person / mailing address to try for a different owner or mailing address); empty cells never wipe what
+    we already know. Corrections made by hand (edits: {field: {value, old_value}}) win over the file; each one
+    the file disagreed with is counted in kept (by field, and '_crexi_new' when the file's value is not even
+    the one that was corrected). updated_at only moves when a stored value changes (the 'Row as of' guard of
+    the round trip uses it)."""
+    before = _stored(existing)
+    old_flags = set(loads(existing.get("flags_json"), []) or [])
+    plan, new_values, notes = plan_update(existing, p, edits)
+    merged = plan.merged
     if new_values["units"] is None and "units_from_addresses" in old_flags and merged["units"] is not None:
         notes.add("units_from_addresses")
     for f, edit in (edits or {}).items():
@@ -1371,7 +1405,7 @@ def _update(conn: sqlite3.Connection, existing: dict, p: ParsedRow, import_id: i
 
     raw = dict(loads(existing.get("raw_json"), {}) or {})
     for k, v in p.raw.items():
-        if v is not None or k not in raw:
+        if k not in raw or (raw[k] is None and v is not None):   # the original columns are kept; blanks are filled
             raw[k] = v
 
     data = rec.model_dump()
@@ -1382,4 +1416,38 @@ def _update(conn: sqlite3.Connection, existing: dict, p: ParsedRow, import_id: i
     sets = ",".join(f"{c}=?" for c in data)
     conn.execute(f"UPDATE properties SET {sets} WHERE id=?", (*data.values(), existing["id"]))
     existing.update(data)
+    _save_enrichment(conn, existing["id"], plan, import_id, now, report, p.fills)
     return flags
+
+
+def _save_enrichment(conn: sqlite3.Connection, property_id: int, plan: "cmerge.FactsPlan", import_id: int, now: str,
+                     report: "cmerge.Report | None", fills: int = 0) -> None:
+    """Store what the merge rule found for one property (alternates, new person, new mailing address) and count
+    it in the report. A re-import finds nothing new, so it adds nothing."""
+    notes = f"Crexi import #{import_id}"
+    alternates = cmerge.apply_alternates(conn, property_id, plan, import_id=import_id, now=now)
+    gained = cmerge.add_new_knowledge(conn, property_id, plan, notes=notes)
+    if report is not None:
+        filled = cmerge.filled_count(plan) + fills
+        report.add("blanks_filled", filled)
+        report.add("alternates", alternates)
+        report.add("new_names", gained["new_names"])
+        report.add("new_mailing", gained["new_mailing"])
+        report.add("properties")
+        if not (filled or alternates or sum(gained.values())):
+            report.add("gained_nothing")
+
+
+def _record_duplicates(conn: sqlite3.Connection, row: dict, p: ParsedRow, import_id: int, now: str,
+                       edits: Mapping[str, dict] | None, report: "cmerge.Report") -> None:
+    """Later rows of the file about the same property: the saved property is the original, so what they
+    disagree about becomes alternates (and a different owner or mailing address something to try)."""
+    for dup in p.dups:
+        report.add("duplicates")
+        plan = cmerge.plan_facts(row, dup.record.model_dump(), RECORD_COLUMNS, skip=set(edits or {}) | {"units"}
+                                if dup.units_source == "addresses" else set(edits or {}))
+        alternates = cmerge.apply_alternates(conn, row["id"], plan, import_id=import_id, now=now)
+        gained = cmerge.add_new_knowledge(conn, row["id"], plan, notes=f"Crexi import #{import_id}")
+        report.add("alternates", alternates)
+        report.add("new_names", gained["new_names"])
+        report.add("new_mailing", gained["new_mailing"])

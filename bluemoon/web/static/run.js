@@ -54,8 +54,8 @@
       what: () => 'Claude searches the web for each buy-box owner\'s business: LLC filing, officers and agent, website, ' +
         'business phone and email, and social pages, with the link where it found each. It never uses people-search ' +
         'sites or Crexi. Everything it finds stays "not tested yet" until you reach out. One owner takes a few minutes.'},
-    {key: 'credits', title: 'Spend Crexi credits (you)', layers: [], go: 'credits', goLabel: 'Open Credits',
-      what: () => 'The Credits screen lists the best possible owners in order. Open each in Crexi, use a credit there, and record what it showed. Credits don\'t roll over.'},
+    {key: 'credits', title: 'Spend Crexi credits in batches (you)', layers: [], go: 'credits', goLabel: 'Open Credits',
+      what: () => 'On the Credits screen, export the next batch of owners, upload the file to Crexi yourself, then drop Crexi\'s file back here. Credits don\'t roll over.'},
     {key: 'all', title: 'Run everything', layers: [], limit: true, wide: true,
       what: () => 'Every machine step in order: owners, drive, rent, score, county records, photos, photo check, score, DRILL. ' +
         'Free steps run first. Big paid steps stop and wait for your OK.'},
@@ -239,8 +239,8 @@
         const cr = s.credits || {};
         const n = toNum(cr.left);
         if (n === null) return {state: 'optional', text: ''};
-        if (!n) return {state: 'done', text: 'All used this month'};
-        return {state: 'next', text: num(n) + ' left this month' + (toNum(cr.daily_pace) ? ' · about ' + num(cr.daily_pace) + ' a day' : '')};
+        if (!n) return {state: 'done', text: 'All used or waiting at Crexi this period'};
+        return {state: 'next', text: num(n) + ' free this period' + (toNum(cr.in_flight) ? ' · ' + num(cr.in_flight) + ' waiting at Crexi' : '')};
       }
       default:
         if (!L) return {state: 'optional', text: ''};

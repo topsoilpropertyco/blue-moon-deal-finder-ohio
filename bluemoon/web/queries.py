@@ -176,6 +176,15 @@ REVIEW_SQL = ("(:visual_on = 1 AND v.property_id IS NOT NULL AND v.reviewed_labe
               "(v.final_p IS NULL AND (v.checked_at IS NOT NULL OR v.status = 'no_imagery')) "
               "OR (v.final_p > :red_max AND v.final_p < :green_min)))")
 
+CREXI_DATA_SQL = ("(EXISTS (SELECT 1 FROM crexi_batch_items ci WHERE ci.property_id = p.id AND ci.status = 'returned' "
+                  "AND ci.result IN ('found', 'owner_only')) "
+                  "OR EXISTS (SELECT 1 FROM credit_ledger cl WHERE cl.property_id = p.id AND cl.result = 'found'))")
+CREXI_WAITING_SQL = ("EXISTS (SELECT 1 FROM crexi_batch_items ci WHERE ci.property_id = p.id AND ci.status = 'sent')")
+CREXI_NONE_SQL = (f"(NOT {CREXI_DATA_SQL} AND NOT {CREXI_WAITING_SQL} AND ("
+                  "EXISTS (SELECT 1 FROM crexi_batch_items ci WHERE ci.property_id = p.id AND "
+                  "(ci.status = 'not_returned' OR (ci.status = 'returned' AND ci.result = 'nothing'))) "
+                  "OR EXISTS (SELECT 1 FROM credit_ledger cl WHERE cl.property_id = p.id AND cl.result = 'nothing')))")
+
 VIEWS: dict[str, str] = {
     "all": "1 = 1",
     "below": f"{LEVEL} < 3 AND {STATUS} = 'active'",
@@ -191,8 +200,14 @@ VIEWS: dict[str, str] = {
     "long": "o.years_owned >= :long_years",
     "moon": "s.score >= :moon",
     "everything": "1 = 1",
+    # Crexi (bulk batches): Crexi returned an owner or contact for it / Crexi was tried and gave nothing / sent
+    # and waiting for the reply. Credits can go to owners just outside the buy box, so these look everywhere.
+    "crexi_data": CREXI_DATA_SQL,
+    "crexi_none": CREXI_NONE_SQL,
+    "crexi_waiting": CREXI_WAITING_SQL,
 }
-UNSCOPED_VIEWS = frozenset({"excluded", "everything"})   # every other view is limited to the buy box
+UNSCOPED_VIEWS = frozenset({"excluded", "everything", "crexi_data", "crexi_none", "crexi_waiting"})
+# every other view is limited to the buy box
 
 SORTS: dict[str, tuple[str, str]] = {
     "rank": ("s.rank", "asc"),
@@ -217,7 +232,8 @@ def view_labels(ac: AssetClass, web: Mapping[str, Any]) -> dict[str, str]:
         "sweet": "Sweet-spot size", "walk": target_word(ac), "mom": "Mom-and-pop owners",
         "long": f"Owned {web['long_owned_years']:g}+ years", "moon": f"Blue Moon {web['moon_score']:.0%}+",
         "level1": "No owner data", "level2": "Possible owner", "confirmed": "Confirmed owner",
-        "dnc": "Do not contact", "excluded": "Set aside", "everything": "Everything",
+        "dnc": "Do not contact", "crexi_data": "Has Crexi data", "crexi_none": "No Crexi data",
+        "crexi_waiting": "Sent to Crexi, waiting", "excluded": "Set aside", "everything": "Everything",
     }
 
 
@@ -425,7 +441,16 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
                                        settings=mc.settings, parse_owner=False),
         "outcome": _outcome(layers["outcomes"]),
         "asset_class": asset_class_info(mc.ac),
+        "crexi": _crexi_block(conn, pid),
     }
+
+
+def _crexi_block(conn: sqlite3.Connection, pid: int) -> dict:
+    """What Crexi did for this property (batches, credits by hand) and any values Crexi sent that differ from
+    what we hold (alternates, with Use this one / Ignore)."""
+    from ..crexi import batches as crexi_batches
+    from ..crexi import merge as crexi_merge
+    return {**crexi_batches.property_history(conn, pid), "alternates": crexi_merge.open_alternates(conn, pid)}
 
 
 def _buybox_block(conn: sqlite3.Connection, mc: MarketCtx, prop: Mapping[str, Any], enrich: Mapping[str, Any],

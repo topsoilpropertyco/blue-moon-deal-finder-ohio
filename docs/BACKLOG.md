@@ -23,7 +23,7 @@ Mark an item done (with the date) when it ships; never delete it.
 ## Exports and the CRM (requested 2026-10-21)
 
 6. **Exports screen wording.** "Files for Brad" isn't quite right. Rework how the exports are named and grouped. **Done 2026-10-24:** Work lists, Hand off, Fix data in a spreadsheet, Summary.
-7. **An export for Crexi.** A clear export meant for Crexi (ask Seth exactly what it should contain and how he'll use it, for example a list of properties to spend credits on).
+7. **An export for Crexi.** A clear export meant for Crexi (ask Seth exactly what it should contain and how he'll use it, for example a list of properties to spend credits on). **Done 2026-10-29:** the Credits screen exports the next N for Crexi as a CSV, imports Crexi's reply in bulk, tracks every batch per credit period (`crexi: reset_day: 29`) and keeps a history; see README.
 8. **Built around the end goal.** The flow is: enrich and improve the data, then put it into the CRM. Make the app's structure follow that path. Seth is thinking more about what this means. (2026-10-22: buy-box decisions, AI research and the Excel round trip are steps toward this.)
 
 ## Carried over

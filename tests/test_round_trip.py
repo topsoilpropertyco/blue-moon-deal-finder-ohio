@@ -261,7 +261,10 @@ def test_rows_changed_in_the_app_after_the_download_are_left_alone(ranked, sampl
     # The same Crexi file again changes nothing, so nothing goes stale.
     import_file(ranked, APARTMENTS, sample_csv)
     assert {r["updated_at"] for r in rows(ranked, "SELECT updated_at FROM properties")} == {"2000-01-01T00:00:00+00:00"}
-    # A newer Crexi file changes one property after the download.
+    # A newer Crexi file changes one property after the download (it fills a blank: a different value would be
+    # kept as an alternate and change nothing, by the keep-the-original rule).
+    ranked.execute("UPDATE properties SET year_built = NULL WHERE address = '455 EXAMPLE AVE'")
+    ranked.commit()
     crexi_header, crexi = read_csv(sample_csv)
     by_address(crexi, "455 EXAMPLE AVE")["Year Built"] = "1986"
     newer = write_csv(tmp_path / "crexi_newer.csv", crexi_header, crexi)

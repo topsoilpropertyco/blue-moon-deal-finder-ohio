@@ -303,8 +303,10 @@ Every function that writes commits its own transaction.
   entity|person|website|phone|email|social, value, label, person_name, role, source_url, confidence,
   match_reason, status kept|lead|blocked|rejected|wrong, why, contact_point_id, person_id, marked_by, marked_at,
   created_at)`. `mark_finding(conn, finding_id, status wrong|kept, actor)` backs the PATCH route below.
-- `credits.py`: `credit_status(conn) -> {month, per_month, used, left, used_today, days_left, daily_pace,
-  today_left, ...}` (the pace comes from the credits left when the day began, so it holds all day; the plan gives
+- `credits.py`: `credit_status(conn) -> {month, period, period_label, period_end, next_reset, reset_day,
+  per_month, used, left, returned, in_flight, used_today, days_left, daily_pace, today_left, ...}` (credits are
+  counted per credit period that resets on `crexi.reset_day`; **used = returned + in_flight**: `returned` = ledger rows
+  of the period, `in_flight` = batch items still 'sent'; `left = per_month - used`) (the pace comes from the credits left when the day began, so it holds all day; the plan gives
   today `today_left` credits and every later day `daily_pace`), `use_credit(conn, property_id,
   result=None) -> dict`. One plan for the whole account (credits are shared by every market):
   `account_plan(conn)`, `market_plan(conn, market_slug, limit) -> {plan, extras, planned, planned_all,
@@ -318,6 +320,32 @@ Every function that writes commits its own transaction.
   `crexi.plan_fallbacks` tiers that use credits that would otherwise expire).
 - `stats.py`: `stage_hit_rates(conn, market_slug) -> list[dict]` (by stage and owner type),
   `crm_handoff_rows(conn, market_slug) -> list[dict]`.
+
+### crexi (`bluemoon/crexi/`, Crexi bulk batches)
+Tables (db.py): `crexi_batches(id, market_id, markets JSON, period 'YYYY-MM-DD', kind first|topup|manual, requested,
+created_at, created_by, file_name, status open|imported|closed, note, column_overrides JSON, closed_at, closed_by)`;
+`crexi_batch_items(batch_id, property_id, position, sent_at, status sent|returned|not_returned|withdrawn, returned_at,
+import_id, result found|owner_only|nothing, phones, emails, is_retry, not_matched_at, UNIQUE(batch_id, property_id))`;
+`crexi_batch_imports(id, batch_ids, file_name, saved_as, file_hash, rows_total, returned, found, owner_only, no_data,
+not_matched, duplicates, unmatched, contacts_added, dnc_marked, unreadable, columns_json, summary_json, created_at,
+created_by)` (summary_json holds the enrichment report); `property_alternates(id, property_id, field, value,
+original, source, import_id, seen_at, status open|used|dismissed, decided_by, decided_at)`; `credit_ledger` gained
+`period` and `batch_id`. Credit rule: Crexi charges one credit per row it matches (even with no phone or email),
+nothing for 'Not Matched'. A batch's rows are 'sent' (in flight) until Crexi returns them; closing marks the rest
+`not_returned` (no credit, DRILL crexi_credit = nothing); `withdrawn` = cancelled before upload.
+- `period.py`: `period_start/next_period_start/period_end(date, reset_day)`, `period_key`, `days_left`, `describe`,
+  `label`. A month without the reset day starts its period on its last day.
+- `batches.py`: `status`, `pick(conn, n, retry)` (the credit plan order, dedupe by Crexi link, APN, address; never a
+  property already sent this period), `preview_export`, `export_batch` (writes output/crexi/<period>/batch-<id>-<N>.csv;
+  cells starting = + - @ are quoted), `close_batch(confirm)`, `withdraw_batch(confirm)`, `history`, `batch_items`,
+  `property_history`, `export_file` (by batch id, inside output/).
+- `reply.py`: `preview(conn, path, columns, adopt_hand)` and `apply_reply(...)`. Reads Crexi's layout (header row found
+  by scanning), detects phone/email/contact-name columns by header words (override per import, stored on the batch),
+  matches rows to items across batches (newest first), unmatched/duplicate rows go to unmatched-<import>.csv,
+  property facts go through `ingest.import_file` per market, contacts through the DRILL's `_add_contact`.
+- `merge.py`: the keep-the-original rule (`plan_facts`, `apply_alternates`, `decide_alternate`, `Report`), used by the
+  reply import and by `ingest/crexi.py` (`plan_update`, `_update`, duplicate rows in a file).
+- `cli.py`: `uv run run.py crexi ...`.
 
 ### pipeline + jobs + exports
 - `bluemoon/pipeline.py`: `STEPS = ["import","owners","drive","rent","parcels","photos","classify","score","drill","research","all"]`
@@ -403,6 +431,16 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | GET | `/api/m/{slug}/review/queue?limit=&offset=&include_excluded=&scope=` | `{total, scope, counts:{total, scope, scopes:{everything, unsure}, needs_review, unsure, not_checked, no_photos, confirm, spot_check, reviewed}, items}`; `scope` = everything (default) or unsure |
 | GET | `/api/m/{slug}/photos/month?estimate=` | the monthly photo goal: `{enabled, month, target, batch, done, remaining, reached, pct, pool:{buybox, rest, total}, ai_waiting, keep_going_to, message}`; with `estimate=1` also `estimate:{test, batch, keep_going}` each `{properties, photos, ai_checks, calls, usd, needs_confirm, ...}` (dry runs) |
 | GET | `/api/m/{slug}/review/scorecard` | scorecard: confusion matrix, by-color accuracy, acceptance, plus `ai_right`, `by_label`, `learning` |
+| GET | `/api/crexi/status` | `{status (credit_status), open_batches, topup:{suggested,message,close_first,batch_id}, default_count}` |
+| GET | `/api/crexi/history` | `{periods:[{period,label,current,batches:[...],sent,returned,by_hand,not_returned,matched_pct,enrichment}], current}` |
+| GET | `/api/crexi/batches/{id}` | batch counts and its items (`limit`, `offset`) |
+| POST | `/api/crexi/export/preview` , `/api/crexi/export` | body `{count?, retry?, note?}`: who would be in the batch / write it |
+| GET | `/api/crexi/batches/{id}/file` | the export CSV (looked up by id) |
+| POST | `/api/crexi/import/preview` , `/api/crexi/import` | multipart `file`, `columns` (JSON), `adopt_hand` |
+| POST | `/api/crexi/batches/{id}/close` , `/withdraw` | body `{confirm}`; without confirm only says what it would do |
+| GET | `/api/crexi/imports/{id}/files/{unmatched\|unreadable\|reply}` | files an import wrote |
+| GET | `/api/m/{slug}/properties/{id}/crexi` | that property's Crexi history and open alternates (also `crexi` in the property detail) |
+| POST | `/api/m/{slug}/properties/{id}/alternates/{aid}` | body `{action: use\|ignore}` |
 | GET | `/api/m/{slug}/funnel` | `{find:[{label,count}], reach:[{label,count}]}` |
 | GET | `/api/m/{slug}/analytics` | `{imports:[...], filter_funnel:[...], coverage:[{field,pct}], counties:[...], size_dist:[...], score_dist:[...], owner_types:[...], levels:[{key,level,label,count,in_buybox}], api_usage:[...]}` |
 | GET | `/api/m/{slug}/model` | score model summary (weights, learned, outcomes count) |

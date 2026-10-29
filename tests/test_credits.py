@@ -15,6 +15,13 @@ TODAY = date(2026, 10, 21)          # 11 days left in October, counting today
 _ids = itertools.count(1)
 
 
+@pytest.fixture(autouse=True)
+def calendar_months(settings):
+    """These tests pin the credit counting itself with calendar-month periods (reset_day 1). Periods that reset on
+    another day (the real config uses 29) are tested in tests/test_crexi_batches.py."""
+    settings.raw["crexi"]["reset_day"] = 1
+
+
 def add_prop(conn, market=MARKET, **kw) -> int:
     n = next(_ids)
     m = market_by_slug(conn, market)
@@ -62,8 +69,8 @@ def test_days_left_in_month():
 def test_credit_status_counts_this_month_only(conn):
     pid = add_prop(conn)
     for month, result in [("2026-10", "found"), ("2026-10", "nothing"), ("2026-10", None), ("2026-09", "found")]:
-        conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at) VALUES(?,?,?,?)",
-                     (pid, month, result, now_iso()))
+        conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at, period) VALUES(?,?,?,?,?)",
+                     (pid, month, result, now_iso(), month + "-01"))     # (calendar-month periods: reset_day 1)
     conn.commit()
     s = C.credit_status(conn, today=TODAY)
     assert s["month"] == "2026-10" and s["per_month"] == 500
@@ -416,8 +423,8 @@ def test_used_today_follows_the_local_day(conn, monkeypatch):
 
 def _ledger_today(conn, pid, n, month="2026-10", when="2026-10-21T12:00:00+00:00"):
     for _ in range(n):
-        conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at) VALUES(?,?,?,?)",
-                     (pid, month, "nothing", when))
+        conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at, period) VALUES(?,?,?,?,?)",
+                     (pid, month, "nothing", when, month + "-01"))        # every new row carries its credit period
     conn.commit()
 
 

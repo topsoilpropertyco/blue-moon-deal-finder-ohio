@@ -962,8 +962,10 @@ def _sync_credit_ledger(conn: sqlite3.Connection, property_id: int, outcome: str
     if pending:
         conn.execute("UPDATE credit_ledger SET result=? WHERE id=?", (outcome, pending["id"]))
     else:
-        conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at) VALUES(?,?,?,?)",
-                     (property_id, this_month(), outcome, now_iso()))
+        from ..crexi.period import period_key      # the credit period it is counted in (config.yaml crexi.reset_day)
+        key = period_key()
+        conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at, period) VALUES(?,?,?,?,?)",
+                     (property_id, key[:7], outcome, now_iso(), key))
 
 
 # --- public write API ---------------------------------------------------------------------------

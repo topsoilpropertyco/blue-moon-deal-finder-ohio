@@ -1,0 +1,825 @@
+"""Crexi's reply file: read it, match every row to the properties we sent, show a preview, apply it.
+
+What Crexi sends back (an .xlsx or .xlsm; the sheet is 'Ownership Information'): a note row such as
+'395 properties found, 93 not matched, 5 duplicates', then the header row (Property Link, Property Type,
+Address, City, State, Zip Code, County, APN, Owner Name, Mailing Address..., Contact Name, Phone 1-5,
+Email 1-5), then one row per property. A row Crexi MATCHED has a Property Link and (usually) an owner; a row it
+could not match has Property Type 'Not Matched', the address we sent, and nothing else. Our own ids do not come
+back, so every row is matched to our batches by Property Link, then parcel number (APN), then street + city +
+5-digit ZIP, across every market and every batch that still has rows waiting (the newest batch first), so
+one file may hold several batches' rows.
+
+Credit rule: a matched row = one credit spent (even with no phone or email); a 'Not Matched' row costs
+nothing. 'Not Matched' rows are only flagged; the properties are marked not found when the batch is closed.
+
+Each matched row ends in one of three results: found (a phone or email), owner_only (an owner or contact name
+but no phone or email) or nothing. Contacts (up to 5 phones, 5 emails and the Contact Name, the phones and
+emails belong to that person) are added as untested, source 'crexi', respecting do-not-contact. Property facts
+(owner, mailing address, sizes...) go through the normal Crexi import and the keep-the-original rule in
+crexi/merge.py. Importing the same rows again changes nothing.
+"""
+from __future__ import annotations
+
+import csv
+import hashlib
+import re
+import shutil
+import sqlite3
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+from ..config import Settings, get_settings
+from ..db import dumps, loads, now_iso, one, rows, scalar
+from ..drill import credits as drill_credits
+from ..drill import engine as E
+from ..ingest import crexi as ing
+from ..ingest.columns import map_columns, norm_header
+from ..ingest.edits import latest_edits
+from ..util import clean_str, normalize_address, normalize_county
+from . import batches as B
+from . import merge as M
+from . import period as P
+
+ALLOWED_SUFFIXES = (".csv", ".tsv", ".txt", ".xlsx", ".xlsm")
+SPLIT = re.compile(r"[;,|\n\r]+")
+PHONE_HEADER = re.compile(r"\b(phone|phones|telephone|mobile|cell|cellphone|tel)\b")
+EMAIL_HEADER = re.compile(r"\b(e mail|email|emails)\b")
+NAME_HEADER = re.compile(r"^(owner )?contact( person)?( name)?$|^contact name$")
+CONTACT_WORD = re.compile(r"contact")
+NOT_MATCHED = "not matched"
+PHONE_CAP, EMAIL_CAP = 10, 10     # more values than this in one row are ignored (a spreadsheet gone wrong)
+
+WHY = {
+    "none": "Does not match any property in your lists (Crexi link, parcel number or address).",
+    "no_batch": "One of your properties, but it was not in any batch.",
+    "duplicate": "A second row for a property already in this file. Its data was added to that property, not saved as "
+                 "a new one.",
+    "not_matched": "Crexi could not match this one (no credit is spent on it).",
+}
+
+
+class ReplyError(ValueError):
+    """A problem with the file; the message is plain English."""
+
+
+# --- reading ----------------------------------------------------------------------------------------------
+
+def read_reply(path: Path) -> ing.Table:
+    if path.suffix.lower() not in ALLOWED_SUFFIXES:
+        raise ReplyError("Upload Crexi's file as .xlsx, .xlsm or .csv.")
+    try:
+        return ing._read(path)
+    except ing.IngestError as exc:
+        raise ReplyError(str(exc)) from None
+
+
+# --- which columns hold contact data ---------------------------------------------------------------------
+
+def _segments(cell: Any) -> list[str]:
+    s = clean_str(cell)
+    if not s:
+        return []
+    return [x.strip() for x in SPLIT.split(str(s)) if x.strip()]
+
+
+def _phone(value: str) -> tuple[str, str] | None:
+    try:
+        return E.normalize_contact("phone", value)
+    except ValueError:
+        return None
+
+
+def _email(value: str) -> tuple[str, str] | None:
+    try:
+        return E.normalize_contact("email", value)
+    except ValueError:
+        return None
+
+
+def detect_columns(headers: list[str], data: list[dict], overrides: dict | None = None,
+                   skip: set[str] | None = None) -> dict:
+    """Which columns hold phones, emails and the contact name. Found by the words in the header (phone, mobile,
+    cell, email, e-mail, contact); a 'contact' column is read by what is in it. `overrides`
+    ({'phone': [headers], 'email': [headers], 'name': header or None}) replaces the guess for that kind. Returns
+    {phone: [..], email: [..], name: header|None, columns: [{header, kind, values, unreadable}], notes: [..]}."""
+    skip = skip or set()
+    found: dict[str, list[str]] = {"phone": [], "email": []}
+    name: str | None = None
+    for h in headers:
+        if h in skip:
+            continue
+        n = norm_header(h)
+        if NAME_HEADER.match(n):
+            name = name or h
+        elif EMAIL_HEADER.search(n):
+            found["email"].append(h)
+        elif PHONE_HEADER.search(n):
+            found["phone"].append(h)
+        elif CONTACT_WORD.search(n):
+            sample = [s for r in data[:200] for s in _segments(r.get(h))]
+            if any("@" in s for s in sample):
+                found["email"].append(h)
+            elif sum(1 for s in sample if _phone(s)) > len(sample) / 2 and sample:
+                found["phone"].append(h)
+    notes = []
+    for kind in ("phone", "email"):
+        if overrides and kind in overrides and overrides[kind] is not None:
+            wanted = overrides[kind] if isinstance(overrides[kind], list) else [overrides[kind]]
+            real = [h for h in wanted if h in headers]
+            for h in wanted:
+                if h not in headers:
+                    notes.append(f"There is no column called '{h}' in this file, so it was ignored.")
+            found[kind] = real
+    if overrides and "name" in overrides:
+        v = overrides["name"]
+        name = v if (v in headers) else (None if not v else name)
+        if v and v not in headers:
+            notes.append(f"There is no column called '{v}' in this file, so it was ignored.")
+    cols = []
+    for kind, hs in (("phone", found["phone"]), ("email", found["email"])):
+        for h in hs:
+            ok = bad = 0
+            for r in data:
+                for s in _segments(r.get(h)):
+                    good = (_phone(s) if kind == "phone" else _email(s)) is not None
+                    ok += good
+                    bad += not good
+            cols.append({"header": h, "kind": kind, "values": ok, "unreadable": bad})
+    if name:
+        cols.append({"header": name, "kind": "name", "values": sum(1 for r in data if clean_str(r.get(name))),
+                     "unreadable": 0})
+    return {"phone": found["phone"], "email": found["email"], "name": name, "columns": cols, "notes": notes}
+
+
+# --- rows -------------------------------------------------------------------------------------------------
+
+@dataclass
+class Row:
+    i: int
+    raw: dict
+    link_key: str | None = None
+    apn: str | None = None
+    state: str | None = None
+    county: str | None = None
+    street: str | None = None
+    city: str = ""
+    zip5: str = ""
+    owner_name: str | None = None
+    contact_name: str | None = None
+    phones: list[tuple[str, str]] = field(default_factory=list)
+    emails: list[tuple[str, str]] = field(default_factory=list)
+    unreadable: list[tuple[str, str]] = field(default_factory=list)
+    not_matched: bool = False
+    kind: str = "none"
+    pid: int | None = None
+    batch_id: int | None = None
+
+    @property
+    def result(self) -> str:
+        if self.phones or self.emails:
+            return "found"
+        if self.contact_name or self.owner_name:
+            return "owner_only"
+        return "nothing"
+
+
+def _parse_rows(table: ing.Table, column_map: dict[str, str], cols: dict) -> list[Row]:
+    out = []
+    g = lambda r, f: r.get(column_map[f]) if f in column_map else None  # noqa: E731
+    for i, raw in enumerate(table.rows, start=1):
+        row = Row(i=i, raw=raw)
+        row.link_key = B.link_key(ing._text(g(raw, "crexi_url")))
+        apn = re.sub(r"[^a-z0-9]", "", (ing._text(g(raw, "apn")) or "").lower())
+        row.apn = apn or None
+        row.state = ing._state(g(raw, "state"))
+        row.county = normalize_county(ing._text(g(raw, "county")))
+        addr = ing._text(g(raw, "address"))
+        row.street = normalize_address(addr)
+        row.city = (clean_str(g(raw, "city")) or "").upper()
+        row.zip5 = B._zip5(g(raw, "zip"))
+        ptype = (ing._text(g(raw, "property_type")) or "").lower()
+        row.owner_name = ing._text(g(raw, "owner_name"))
+        row.contact_name = ing._text(raw.get(cols["name"])) if cols.get("name") else None
+        row.not_matched = ptype == NOT_MATCHED or (not row.link_key and not row.owner_name and not row.contact_name
+                                                   and ptype in ("", NOT_MATCHED))
+        seen_p, seen_e = set(), set()
+        for h in cols["phone"]:
+            for s in _segments(raw.get(h)):
+                v = _phone(s)
+                if v is None:
+                    row.unreadable.append((h, s))
+                elif v[1] not in seen_p and len(seen_p) < PHONE_CAP:
+                    seen_p.add(v[1])
+                    row.phones.append(v)
+        for h in cols["email"]:
+            for s in _segments(raw.get(h)):
+                v = _email(s)
+                if v is None:
+                    row.unreadable.append((h, s))
+                elif v[1] not in seen_e and len(seen_e) < EMAIL_CAP:
+                    seen_e.add(v[1])
+                    row.emails.append(v)
+        out.append(row)
+    return out
+
+
+# --- matching ---------------------------------------------------------------------------------------------
+
+@dataclass
+class Index:
+    props: dict[int, dict]
+    link: dict[str, list[int]] = field(default_factory=lambda: defaultdict(list))
+    apn: dict[str, list[int]] = field(default_factory=lambda: defaultdict(list))
+    addr: dict[tuple, list[int]] = field(default_factory=lambda: defaultdict(list))
+    addr_no_city: dict[tuple, list[int]] = field(default_factory=lambda: defaultdict(list))
+
+
+def _build_index(conn: sqlite3.Connection) -> Index:
+    props = {r["id"]: r for r in rows(conn, "SELECT id, market_id, crexi_url, source_id, apn, state, county, address, "
+                                            "unit, city, zip FROM properties ORDER BY id")}
+    ix = Index(props)
+    for pid, p in props.items():
+        for k in {B.link_key(p["crexi_url"]), (clean_str(p["source_id"]) or "").lower() or None} - {None}:
+            ix.link[k].append(pid)
+        apn = re.sub(r"[^a-z0-9]", "", (clean_str(p["apn"]) or "").lower())
+        if apn:
+            ix.apn[apn].append(pid)
+        street = normalize_address(p["address"])
+        if street:
+            ix.addr[(street, (clean_str(p["city"]) or "").upper(), B._zip5(p["zip"]))].append(pid)
+            ix.addr_no_city[(street, B._zip5(p["zip"]))].append(pid)
+    return ix
+
+
+def _candidates(row: Row, ix: Index) -> tuple[str, list[int]]:
+    """The properties this row could be: by Crexi link, else parcel number, else street + city + ZIP."""
+    if row.link_key and ix.link.get(row.link_key):
+        return "link", list(ix.link[row.link_key])
+    if row.apn and ix.apn.get(row.apn):
+        keep = []
+        for pid in ix.apn[row.apn]:
+            p = ix.props[pid]
+            if row.state and p["state"] and row.state != p["state"]:
+                continue
+            if row.county and p["county"] and row.county != normalize_county(p["county"]):
+                continue
+            keep.append(pid)
+        if keep:
+            return "apn", keep
+    if row.street:
+        found = ix.addr.get((row.street, row.city, row.zip5))
+        if not found and not row.city:
+            found = ix.addr_no_city.get((row.street, row.zip5))
+        if not found and not row.zip5 and row.city:
+            found = [pid for (st, city, _z), pids in ix.addr.items() if st == row.street and city == row.city
+                     for pid in pids]
+        if found:
+            return "address", list(found)
+    return "", []
+
+
+@dataclass
+class Analysis:
+    rows: list[Row]
+    items: dict[tuple[int, int], dict]               # (batch id, property id) -> item + batch info
+    by_prop: dict[int, list[dict]]
+    ix: Index
+    claimed: dict[tuple[int, int], Row] = field(default_factory=dict)         # matched rows that return an item
+    flagged: dict[tuple[int, int], Row] = field(default_factory=dict)         # 'Not Matched' rows for an item
+    extras: dict[tuple[int, int], list[Row]] = field(default_factory=lambda: defaultdict(list))
+    methods: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+
+
+def _load_items(conn: sqlite3.Connection) -> tuple[dict, dict]:
+    items, by_prop = {}, defaultdict(list)
+    for r in rows(conn, """
+            SELECT i.*, b.status AS batch_status, b.period, b.kind AS batch_kind FROM crexi_batch_items i
+            JOIN crexi_batches b ON b.id = i.batch_id WHERE i.status != 'withdrawn' ORDER BY i.batch_id DESC"""):
+        items[(r["batch_id"], r["property_id"])] = r
+        by_prop[r["property_id"]].append(r)
+    return items, by_prop
+
+
+def analyze(conn: sqlite3.Connection, table: ing.Table, column_map: dict[str, str], cols: dict, *,
+            adopt_hand: bool = False) -> Analysis:
+    """Match every row. Matched rows first (so a 'Not Matched' row never undoes a match), then the rest.
+    With adopt_hand, a row for one of our properties that is in no batch is counted as a hand batch (the
+    apply step creates it)."""
+    parsed = _parse_rows(table, column_map, cols)
+    items, by_prop = _load_items(conn)
+    an = Analysis(parsed, items, by_prop, _build_index(conn))
+    ix = an.ix
+    adopted: set[int] = set()
+    for matched_pass in (True, False):
+        for row in parsed:
+            if row.not_matched == matched_pass:
+                continue
+            how, cands = _candidates(row, ix)
+            if how:
+                an.methods[how] += 1
+            claim = None
+            for pid in cands:
+                for it in by_prop.get(pid, []):
+                    key = (it["batch_id"], pid)
+                    if it["status"] in ("sent", "not_returned") and key not in an.claimed and key not in an.flagged:
+                        if not row.not_matched or not it["not_matched_at"]:
+                            claim = (pid, it)
+                            break
+                if claim:
+                    break
+            if claim:
+                pid, it = claim
+                key = (it["batch_id"], pid)
+                row.pid, row.batch_id = pid, it["batch_id"]
+                if row.not_matched:
+                    row.kind = "not_matched"
+                    an.flagged[key] = row
+                else:
+                    row.kind = "new"
+                    an.claimed[key] = row
+                continue
+            row.pid = cands[0] if cands else None
+            if not cands:
+                row.kind = "none"
+                continue
+            # a candidate already handled in this file, or returned earlier, or never sent
+            if any((it["batch_id"], pid) in an.claimed or (it["batch_id"], pid) in an.flagged
+                   for pid in cands for it in by_prop.get(pid, [])):
+                hit = next((pid, it) for pid in cands for it in by_prop.get(pid, [])
+                           if (it["batch_id"], pid) in an.claimed or (it["batch_id"], pid) in an.flagged)
+                row.pid, row.batch_id = hit[0], hit[1]["batch_id"]
+                row.kind = "duplicate"
+                an.extras[(row.batch_id, row.pid)].append(row)
+            elif any(it["status"] == "returned" or it["not_matched_at"] for pid in cands for it in by_prop.get(pid, [])):
+                hit = next((pid, it) for pid in cands for it in by_prop.get(pid, [])
+                           if it["status"] == "returned" or it["not_matched_at"])
+                row.pid, row.batch_id = hit[0], hit[1]["batch_id"]
+                row.kind = "already"
+            elif adopt_hand and not row.not_matched:
+                row.kind = "hand"
+                adopted.add(row.pid)
+            else:
+                row.kind = "no_batch"
+    # a second row for a property adopted by hand is a duplicate of the first
+    first_hand: dict[int, Row] = {}
+    for row in parsed:
+        if row.kind == "hand":
+            if row.pid in first_hand:
+                row.kind = "duplicate"
+                an.extras[(0, row.pid)].append(row)
+            else:
+                first_hand[row.pid] = row
+    return an
+
+
+# --- planning what a file would add (the enrichment report) -------------------------------------------------
+
+def _known(conn: sqlite3.Connection, pids: list[int]) -> tuple[dict, dict]:
+    """({(pid, family): {keys}} of contacts we hold, {pid: {name keys}} of people)."""
+    contacts: dict[tuple[int, str], set[str]] = defaultdict(set)
+    people: dict[int, set[str]] = defaultdict(set)
+    for i in range(0, len(pids), 500):
+        chunk = pids[i:i + 500]
+        mark = ",".join("?" for _ in chunk)
+        for r in rows(conn, f"SELECT property_id, channel, value FROM contact_points WHERE property_id IN ({mark})", chunk):
+            contacts[(r["property_id"], E._contact_family(r["channel"]))].add(E._contact_key(r["channel"], r["value"]))
+        for r in rows(conn, f"SELECT property_id, name FROM people WHERE property_id IN ({mark})", chunk):
+            people[r["property_id"]].add(E._name_key(r["name"]))
+    return contacts, people
+
+
+def plan_enrichment(conn: sqlite3.Connection, an: Analysis, table: ing.Table, column_map: dict[str, str],
+                    settings: Settings) -> M.Report:
+    """What this file adds that we do not already have (the report shown before applying): new phones, emails,
+    names, mailing addresses, blanks filled, differing values kept as alternates, properties gaining nothing."""
+    rep = M.Report()
+    rep.add("rows_read", len(an.rows))
+    rep.add("matched", sum(1 for r in an.rows if not r.not_matched and r.kind in ("new", "already", "duplicate", "hand")))
+    rep.add("duplicates", sum(1 for r in an.rows if r.kind == "duplicate"))
+    groups: dict[int, list[Row]] = defaultdict(list)
+    for r in an.rows:
+        if r.kind in ("new", "hand") or (r.kind == "duplicate" and not r.not_matched):
+            if r.pid is not None:
+                groups[r.pid].append(r)
+    pids = sorted(groups)
+    if not pids:
+        return rep
+    contacts, people = _known(conn, pids)
+    props = {}
+    for i in range(0, len(pids), 500):
+        chunk = pids[i:i + 500]
+        for p in rows(conn, f"SELECT * FROM properties WHERE id IN ({','.join('?' for _ in chunk)})", chunk):
+            props[p["id"]] = p
+    edits_by_market: dict[int, dict] = {}
+    opts_by_market: dict[int, ing.ImportOptions] = {}
+    mnames = {m["id"]: m["asset_class"] for m in rows(conn, "SELECT id, asset_class FROM markets")}
+    for pid in pids:
+        prop = props[pid]
+        mid = prop["market_id"]
+        if mid not in edits_by_market:
+            edits_by_market[mid] = latest_edits(conn, mid, [q for q in pids if props[q]["market_id"] == mid])
+            opts_by_market[mid] = ing._options(settings, mnames.get(mid), "crexi")
+        gained = 0
+        known_alt = rows(conn, "SELECT field, value FROM property_alternates WHERE property_id = ?", (pid,))
+        seen_alt = {(a["field"], str(loads(a["value"]))) for a in known_alt}
+        seen_phone = set(contacts[(pid, "phone")])
+        seen_email = set(contacts[(pid, "email")])
+        seen_name = set(people[pid])
+        seen_mail = set(contacts[(pid, "mail")])
+        first = True
+        for r in groups[pid]:
+            try:
+                p = ing.parse_row(r.raw, column_map, opts_by_market[mid])
+                plan, _, _ = ing.plan_update(prop, p, edits_by_market[mid].get(pid))
+            except Exception:
+                plan = M.FactsPlan()
+            if first:
+                n = M.filled_count(plan)
+                rep.add("blanks_filled", n)
+                gained += n
+                first = False
+            for f, (new, _old) in plan.alternates.items():
+                k = (f, str(new))
+                if k not in seen_alt and not any(
+                        f == a["field"] and M._same(f, loads(a["value"]), new) for a in known_alt):
+                    seen_alt.add(k)
+                    rep.add("alternates")
+                    gained += 1
+            if plan.new_owner and E._name_key(plan.new_owner) not in seen_name:
+                seen_name.add(E._name_key(plan.new_owner))
+                rep.add("new_names")
+                gained += 1
+            if plan.new_mailing and E._contact_key("mail", plan.new_mailing) not in seen_mail:
+                seen_mail.add(E._contact_key("mail", plan.new_mailing))
+                rep.add("new_mailing")
+                gained += 1
+            if r.contact_name and E._name_key(r.contact_name) not in seen_name:
+                seen_name.add(E._name_key(r.contact_name))
+                rep.add("new_names")
+                gained += 1
+            for _disp, key in r.phones:
+                if key not in seen_phone:
+                    seen_phone.add(key)
+                    rep.add("new_phones")
+                    gained += 1
+            for _disp, key in r.emails:
+                if key not in seen_email:
+                    seen_email.add(key)
+                    rep.add("new_emails")
+                    gained += 1
+        rep.add("properties")
+        if not gained:
+            rep.add("gained_nothing")
+    return rep
+
+
+# --- the preview -------------------------------------------------------------------------------------------
+
+def _clean_columns(columns: dict | None) -> dict | None:
+    if not columns:
+        return None
+    out: dict[str, Any] = {}
+    for k in ("phone", "email"):
+        if k in columns and columns[k] is not None:
+            v = columns[k]
+            out[k] = [str(x) for x in (v if isinstance(v, list) else [v]) if str(x).strip()]
+    if "name" in columns:
+        out["name"] = clean_str(columns["name"])
+    return out or None
+
+
+def _summary(an: Analysis, conn: sqlite3.Connection) -> dict:
+    counts: dict[str, int] = defaultdict(int)
+    for r in an.rows:
+        counts[r.kind] += 1
+    per: dict[int, dict] = {}
+    for key, row in list(an.claimed.items()) + list(an.flagged.items()):
+        b = per.setdefault(key[0], {"batch_id": key[0], "new": 0, "found": 0, "owner_only": 0, "no_data": 0,
+                                    "not_matched": 0, "already": 0})
+        if row.kind == "new":
+            b["new"] += 1
+            b[{"found": "found", "owner_only": "owner_only", "nothing": "no_data"}[row.result]] += 1
+        else:
+            b["not_matched"] += 1
+    for r in an.rows:
+        if r.kind == "already" and r.batch_id is not None:
+            per.setdefault(r.batch_id, {"batch_id": r.batch_id, "new": 0, "found": 0, "owner_only": 0, "no_data": 0,
+                                        "not_matched": 0, "already": 0})["already"] += 1
+    out = []
+    for bid in sorted(per, reverse=True):
+        b = B.get_batch(conn, bid)
+        c = B.batch_counts(conn, bid)
+        still = c["waiting"] - per[bid]["new"] - per[bid]["not_matched"]
+        out.append({**per[bid], "sent": c["sent"], "status": b["status"], "closed": b["status"] == "closed",
+                    "kind": b["kind"], "still_waiting": max(0, still)})
+    return {"counts": dict(counts), "batches": out}
+
+
+def _message(an: Analysis, summ: dict) -> str:
+    c = summ["counts"]
+    new, nm = c.get("new", 0), c.get("not_matched", 0)
+    cant = c.get("none", 0) + c.get("no_batch", 0)
+    bs = summ["batches"]
+    if len(bs) == 1:
+        b = bs[0]
+        head = (f"This looks like Crexi's reply to batch #{b['batch_id']} ({b['sent']:,} sent): {new:,} match, "
+                f"{b['still_waiting']:,} look like they weren't returned yet, {cant:,} can't be matched.")
+    elif bs:
+        names = ", ".join(f"#{b['batch_id']}" for b in bs)
+        waiting = sum(b["still_waiting"] for b in bs)
+        head = (f"This file holds rows for batches {names}: {new:,} match, {waiting:,} look like they weren't "
+                f"returned yet, {cant:,} can't be matched.")
+    else:
+        head = (f"None of the {len(an.rows):,} rows match a property waiting at Crexi: {cant:,} can't be matched"
+                + (f", {c.get('already', 0):,} were already recorded" if c.get("already") else "") + ".")
+    extra = []
+    if nm:
+        extra.append(f"{nm:,} rows are 'Not Matched' by Crexi (no credit is spent on them)")
+    if c.get("already"):
+        extra.append(f"{c['already']:,} rows were already imported (nothing changes for them)")
+    if c.get("duplicate"):
+        extra.append(f"{c['duplicate']:,} duplicate row{'s' if c['duplicate'] != 1 else ''} (their data is added to the "
+                     f"property, not saved as a new one)")
+    if c.get("no_batch"):
+        extra.append(f"{c['no_batch']:,} rows are your properties that were not in any batch (tick 'record these as a "
+                     f"hand batch' to count them)")
+    if c.get("hand"):
+        extra.append(f"{c['hand']:,} rows will be recorded as a hand batch")
+    return head + (" " + "; ".join(extra) + "." if extra else "")
+
+
+def preview(conn: sqlite3.Connection, path: Path, filename: str | None = None, *, columns: dict | None = None,
+            adopt_hand: bool = False, settings: Settings | None = None) -> dict:
+    """What importing the file would do, written nowhere."""
+    s = settings or get_settings()
+    table = read_reply(path)
+    column_map, _unmapped = map_columns(table.headers, ing._merged_overrides(s, None))
+    cols = detect_columns(table.headers, table.rows, _clean_columns(columns), skip=set(column_map.values()))
+    an = analyze(conn, table, column_map, cols, adopt_hand=adopt_hand)
+    summ = _summary(an, conn)
+    rep = plan_enrichment(conn, an, table, column_map, s)
+    warnings = list(cols["notes"])
+    closed = [b["batch_id"] for b in summ["batches"] if b["closed"] and (b["new"] or b["not_matched"])]
+    for bid in closed:
+        warnings.append(f"Batch #{bid} is already closed. Rows for it are still recorded (a late reply), and the "
+                        f"credits they use are counted.")
+    bad = sum(len(r.unreadable) for r in an.rows)
+    if bad:
+        warnings.append(f"{bad:,} phone or email value{'s' if bad != 1 else ''} could not be read and will be listed "
+                        f"in a file instead of saved.")
+    if cols["name"] is None:
+        warnings.append("I could not find a Contact Name column, so phones and emails are saved without a person.")
+    if not cols["phone"] and not cols["email"]:
+        warnings.append("I could not find any phone or email columns. If this file has them, pick the columns below.")
+    over = int(drill_credits.credit_status(conn, settings=s)["per_month"])
+    rep_d = rep.to_dict()
+    return {"filename": filename or path.name, "sheet": table.sheet, "rows": len(an.rows),
+            "header_row": table.header_row, "columns": cols, "headers": table.headers,
+            "summary": summ, "message": _message(an, summ), "enrichment": rep_d,
+            "enrichment_text": M.report_text(rep_d), "warnings": warnings, "matched_by": dict(an.methods),
+            "unreadable": bad, "credits_per_period": over,
+            "can_apply": bool(summ["counts"].get("new") or summ["counts"].get("not_matched")
+                              or summ["counts"].get("hand") or summ["counts"].get("duplicate")),
+            "changes": bool(summ["counts"].get("new") or summ["counts"].get("not_matched")
+                            or summ["counts"].get("hand"))}
+
+
+# --- applying ---------------------------------------------------------------------------------------------
+
+def _write_unmatched(conn: sqlite3.Connection, an: Analysis, headers: list[str], import_id: int,
+                     settings: Settings) -> str | None:
+    """output/crexi/<period>/unmatched-<import>.csv: every row that was not applied as a new return (never dropped)."""
+    left = [r for r in an.rows if r.kind in ("none", "no_batch", "duplicate", "not_matched")]
+    if not left:
+        return None
+    rel = f"crexi/{P.period_key(None, settings)}/unmatched-{import_id}.csv"
+    path = B.output_dir(settings) / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding=B.CSV_ENCODING) as f:
+        w = csv.writer(f)
+        w.writerow(["Why", "File row", *headers])
+        for r in left:
+            w.writerow([B.safe_cell(WHY[r.kind]), r.i + 0, *[B.safe_cell(r.raw.get(h)) for h in headers]])
+    return rel
+
+
+def _write_unreadable(an: Analysis, import_id: int, settings: Settings) -> str | None:
+    bad = [(r, h, v) for r in an.rows for h, v in r.unreadable if r.kind in ("new", "duplicate", "hand")]
+    if not bad:
+        return None
+    rel = f"crexi/{P.period_key(None, settings)}/unreadable-contacts-{import_id}.csv"
+    path = B.output_dir(settings) / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding=B.CSV_ENCODING) as f:
+        w = csv.writer(f)
+        w.writerow(["File row", "Property ID", "Column", "Value that could not be read"])
+        for r, h, v in bad:
+            w.writerow([r.i, r.pid or "", B.safe_cell(h), B.safe_cell(v)])
+    return rel
+
+
+def _merge_facts(conn: sqlite3.Connection, an: Analysis, table: ing.Table, actor: str, warnings: list[str]) -> dict:
+    """Property facts (owner, mailing address, sizes...) through the normal Crexi import, one market at a time,
+    for the rows that matched. Never adds a property: a row that would create one is only reported."""
+    by_market: dict[int, list[Row]] = defaultdict(list)
+    for r in an.rows:
+        if r.kind in ("new", "duplicate", "hand") and not r.not_matched and r.pid is not None and r.link_key:
+            by_market[an.ix.props[r.pid]["market_id"]].append(r)
+    slugs = {m["id"]: m["slug"] for m in rows(conn, "SELECT id, slug FROM markets")}
+    out = {"markets": {}, "new_rows": 0}
+    tmp_dir = get_settings().path("db").parent / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    for mid, rs in by_market.items():
+        tmp = tmp_dir / f"crexi_reply_{mid}_{now_iso().replace(':', '')}.csv"
+        try:
+            with tmp.open("w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(table.headers)
+                for r in sorted(rs, key=lambda x: (x.kind == "duplicate", x.i)):
+                    w.writerow([("" if r.raw.get(h) is None else r.raw.get(h)) for h in table.headers])
+            res = ing.import_file(conn, slugs[mid], tmp, actor=actor)
+            out["markets"][slugs[mid]] = {"import_id": res["import_id"], "rows_new": res["rows_new"],
+                                          "rows_updated": res["rows_updated"], "enrichment": res.get("enrichment")}
+            out["new_rows"] += int(res["rows_new"])
+            if res["rows_new"]:
+                warnings.append(f"{res['rows_new']:,} row(s) did not match a stored property when their facts were "
+                                f"merged and were added as new properties in {slugs[mid]}. Check them in Deals.")
+        except ing.IngestError as exc:
+            warnings.append(f"Property facts were not merged for {slugs[mid]}: {exc}")
+        finally:
+            tmp.unlink(missing_ok=True)
+    return out
+
+
+def _apply_item(conn: sqlite3.Connection, an: Analysis, key: tuple[int, int], row: Row, batch: dict, import_id: int,
+                dnc: set, cfg: E.DrillConfig, totals: dict) -> None:
+    """One returned property: contacts, the ledger row, the item, the DRILL check-off. One transaction."""
+    bid, pid = key
+    note = f"Crexi credit, batch {bid}"
+    group = [row, *an.extras.get(key, [])]
+    phones: dict[str, str] = {}
+    emails: dict[str, str] = {}
+    created = {"phone": 0, "email": 0, "name": 0}
+    for r in group:
+        person_id = None
+        if r.contact_name:
+            person_id, was_new = E._add_person(conn, pid, r.contact_name, role="other", source="crexi", notes=note)
+            created["name"] += int(was_new)
+        for disp, k in r.phones:
+            phones.setdefault(k, disp)
+            c, new = E._add_contact(conn, pid, "phone", disp, source="crexi", person_id=person_id, notes=note,
+                                    dnc_keys=dnc)
+            created["phone"] += int(new)
+            totals["dnc"] += int(new and c.get("status") == "dnc")
+        for disp, k in r.emails:
+            emails.setdefault(k, disp)
+            c, new = E._add_contact(conn, pid, "email", disp, source="crexi", person_id=person_id, notes=note,
+                                    dnc_keys=dnc)
+            created["email"] += int(new)
+            totals["dnc"] += int(new and c.get("status") == "dnc")
+    result = "found" if (phones or emails) else ("owner_only" if any(r.contact_name or r.owner_name for r in group)
+                                                 else "nothing")
+    stamp = now_iso()
+    pend = one(conn, "SELECT id FROM credit_ledger WHERE property_id=? AND batch_id=? AND result IS NULL",
+               (pid, bid))
+    if pend is None:
+        conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at, period, batch_id) "
+                     "VALUES(?,?,?,?,?,?)", (pid, batch["period"][:7], None, stamp, batch["period"], bid))
+    conn.execute("UPDATE crexi_batch_items SET status='returned', returned_at=?, import_id=?, result=?, phones=?, "
+                 "emails=?, not_matched_at=NULL WHERE batch_id=? AND property_id=?",
+                 (stamp, import_id, result, len(phones), len(emails), bid, pid))
+    outcome = "found" if result in ("found", "owner_only") else "nothing"
+    if result == "found":
+        detail = (f"Crexi batch #{bid}: found {len(phones)} phone{'s' if len(phones) != 1 else ''} and "
+                  f"{len(emails)} email{'s' if len(emails) != 1 else ''} (untested).")
+    elif result == "owner_only":
+        detail = f"Crexi batch #{bid}: matched, owner or contact name only; no phone or email (no_contact)."
+    else:
+        detail = f"Crexi batch #{bid}: matched, but Crexi had no owner or contact information."
+    if E.CREDIT_STAGE in cfg.by_key:
+        E.record_attempt(conn, pid, E.CREDIT_STAGE, outcome, detail=detail, actor="you")   # fills the ledger row
+    else:
+        conn.execute("UPDATE credit_ledger SET result=? WHERE property_id=? AND batch_id=? AND result IS NULL",
+                     (outcome, pid, bid))
+        conn.commit()
+    totals[result] += 1
+    totals["phones"] += created["phone"]
+    totals["emails"] += created["email"]
+    totals["names"] += created["name"]
+
+
+def _make_hand_batch(conn: sqlite3.Connection, an: Analysis, actor: str, settings: Settings) -> int | None:
+    pids = [r.pid for r in an.rows if r.kind == "hand" and r.pid is not None]
+    pids = list(dict.fromkeys(pids))
+    if not pids:
+        return None
+    stamp = now_iso()
+    slugs = sorted({m["slug"] for m in rows(conn, "SELECT slug FROM markets WHERE id IN (%s)" % ",".join(
+        str(an.ix.props[p]["market_id"]) for p in pids))})
+    cur = conn.execute(
+        "INSERT INTO crexi_batches(market_id, markets, period, kind, requested, created_at, created_by, status, note) "
+        "VALUES(NULL, ?, ?, 'manual', ?, ?, ?, 'open', 'Recorded from a Crexi reply: not exported by this app.')",
+        (dumps(slugs), P.period_key(None, settings), len(pids), stamp, (actor or "cli")[:320]))
+    bid = int(cur.lastrowid)
+    conn.executemany("INSERT INTO crexi_batch_items(batch_id, property_id, position, sent_at, status) "
+                     "VALUES(?,?,?,?, 'sent')", [(bid, p, i, stamp) for i, p in enumerate(pids, start=1)])
+    conn.commit()
+    return bid
+
+
+def apply_reply(conn: sqlite3.Connection, path: Path, filename: str | None = None, *, columns: dict | None = None,
+                adopt_hand: bool = False, actor: str = "cli", settings: Settings | None = None) -> dict:
+    """Import Crexi's reply: mark matched rows returned (a credit spent each), flag 'Not Matched' rows, add
+    the contacts, merge the property facts, write the unmatched file and the history row. Safe to run twice: rows
+    already recorded are skipped, so nothing is added the second time."""
+    s = settings or get_settings()
+    table = read_reply(path)
+    column_map, _ = map_columns(table.headers, ing._merged_overrides(s, None))
+    overrides = _clean_columns(columns)
+    cols = detect_columns(table.headers, table.rows, overrides, skip=set(column_map.values()))
+    an = analyze(conn, table, column_map, cols, adopt_hand=adopt_hand)
+    warnings = list(cols["notes"])
+    if adopt_hand and any(r.kind == "hand" for r in an.rows):
+        _make_hand_batch(conn, an, actor, s)
+        an = analyze(conn, table, column_map, cols)
+    plan = plan_enrichment(conn, an, table, column_map, s)
+    summ = _summary(an, conn)
+    changes = bool(an.claimed or an.flagged)
+    c = summ["counts"]
+    if not changes and not c.get("duplicate"):
+        return {"ok": True, "changed": False, "import_id": None, "summary": summ, "enrichment": plan.to_dict(),
+                "enrichment_text": plan.text(), "warnings": warnings,
+                "message": "Nothing new: every row in this file was already recorded (or matches none of your "
+                           "properties). Nothing was added."}
+    for b in summ["batches"]:
+        if b["closed"] and (b["new"] or b["not_matched"]):
+            warnings.append(f"Batch #{b['batch_id']} was already closed; its late rows were recorded anyway.")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    batch_ids = sorted({k[0] for k in an.claimed} | {k[0] for k in an.flagged})
+    stamp = now_iso()
+    cur = conn.execute("INSERT INTO crexi_batch_imports(batch_ids, file_name, file_hash, rows_total, columns_json, "
+                       "created_at, created_by) VALUES(?,?,?,?,?,?,?)",
+                       (dumps(batch_ids), filename or path.name, digest, len(an.rows),
+                        dumps({k: cols[k] for k in ("phone", "email", "name")}), stamp, (actor or "cli")[:320]))
+    import_id = int(cur.lastrowid)
+    conn.commit()
+    saved = f"crexi/{P.period_key(None, s)}/reply-{import_id}-{re.sub(r'[^A-Za-z0-9._-]+', '_', Path(filename or path.name).stem)[:60]}{path.suffix.lower()}"
+    dest = B.output_dir(s) / saved
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(path, dest)
+
+    merged = _merge_facts(conn, an, table, actor, warnings)
+    cfg = E.drill_config(s)
+    dnc = E._dnc_keys(conn)
+    totals: dict[str, int] = defaultdict(int)
+    batches_cache = {bid: B.get_batch(conn, bid) for bid in batch_ids}
+    for key, row in sorted(an.claimed.items(), key=lambda kv: kv[1].i):
+        _apply_item(conn, an, key, row, batches_cache[key[0]], import_id, dnc, cfg, totals)
+    for key, row in an.flagged.items():
+        conn.execute("UPDATE crexi_batch_items SET not_matched_at=? WHERE batch_id=? AND property_id=? "
+                     "AND status IN ('sent', 'not_returned')", (stamp, key[0], key[1]))
+    for bid in batch_ids:
+        counts = B.batch_counts(conn, bid)
+        b = batches_cache[bid]
+        if b["status"] != "closed":
+            if counts["waiting"] == 0:
+                conn.execute("UPDATE crexi_batches SET status='closed', closed_at=?, closed_by='auto' WHERE id=?",
+                             (stamp, bid))
+            elif b["status"] == "open":
+                conn.execute("UPDATE crexi_batches SET status='imported' WHERE id=?", (bid,))
+        if overrides:
+            conn.execute("UPDATE crexi_batches SET column_overrides=? WHERE id=?", (dumps(overrides), bid))
+    conn.commit()
+
+    unmatched = _write_unmatched(conn, an, table.headers, import_id, s)
+    unreadable = _write_unreadable(an, import_id, s)
+    bad = sum(len(r.unreadable) for r in an.rows)
+    rep = plan.to_dict()
+    rep["rows_read"] = len(an.rows)
+    summary = {"enrichment": rep, "enrichment_text": M.report_text(rep), "batches": summ["batches"],
+               "counts": summ["counts"], "unmatched_file": unmatched, "unreadable_file": unreadable,
+               "saved_as": saved, "merge": merged, "dnc_marked": totals["dnc"]}
+    conn.execute("UPDATE crexi_batch_imports SET saved_as=?, returned=?, found=?, owner_only=?, no_data=?, "
+                 "not_matched=?, duplicates=?, unmatched=?, contacts_added=?, dnc_marked=?, unreadable=?, "
+                 "summary_json=? WHERE id=?",
+                 (saved, len(an.claimed), totals["found"], totals["owner_only"], totals["nothing"], len(an.flagged),
+                  c.get("duplicate", 0), c.get("none", 0) + c.get("no_batch", 0),
+                  totals["phones"] + totals["emails"], totals["dnc"], bad, dumps(summary), import_id))
+    conn.commit()
+    status = drill_credits.credit_status(conn, settings=s)
+    after = B.topup_suggestion(conn, status)
+    text = (f"Recorded {len(an.claimed):,} returned ({totals['found']:,} with a phone or email, "
+            f"{totals['owner_only']:,} with a name only, {totals['nothing']:,} with nothing). "
+            f"{len(an.flagged):,} 'Not Matched' rows flagged. "
+            f"{status['left']:,} credits free, {status['in_flight']:,} still waiting. " + after["message"])
+    return {"ok": True, "changed": True, "import_id": import_id, "batch_ids": batch_ids, "summary": summ,
+            "returned": len(an.claimed), "found": totals["found"], "owner_only": totals["owner_only"],
+            "no_data": totals["nothing"], "not_matched": len(an.flagged), "duplicates": c.get("duplicate", 0),
+            "unmatched": c.get("none", 0) + c.get("no_batch", 0), "contacts_added": totals["phones"] + totals["emails"],
+            "new_phones": totals["phones"], "new_emails": totals["emails"], "dnc_marked": totals["dnc"],
+            "enrichment": rep, "enrichment_text": M.report_text(rep), "unmatched_file": unmatched,
+            "unreadable_file": unreadable, "saved_as": saved, "merge": merged, "warnings": warnings,
+            "status": status, "topup": after, "message": text}

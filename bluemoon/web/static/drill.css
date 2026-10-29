@@ -316,3 +316,44 @@ body:has(.dr-outcomes.dr-stick) .toast{bottom:calc(env(safe-area-inset-bottom,0p
   .dr-yn:not(:has(~ .dr-choices)){position:sticky;bottom:0;z-index:4;margin:0 calc(var(--pad) * -1);padding:10px var(--pad) calc(10px + env(safe-area-inset-bottom,0px));background:var(--surface);border-top:1px solid var(--line)}
   body:has(.dr-yn) .toast{bottom:calc(env(safe-area-inset-bottom,0px) + 110px)}
 }
+/* --- Crexi batches (credits.js) ---------------------------------------------------------------- */
+.dr-meter3{display:flex}
+.dr-meter3 i{border-radius:0;flex:none}
+.dr-meter3 .m-returned{background:var(--accent)}
+.dr-meter3 .m-flight{background:var(--warn)}
+.cx-nums{list-style:none;display:flex;flex-wrap:wrap;gap:6px 20px;margin:0;padding:0;font-size:13.5px;color:var(--muted)}
+.cx-nums b{color:var(--ink);font-size:15px}
+.cx-row{display:flex;flex-wrap:wrap;gap:12px 24px;align-items:flex-end;margin:var(--s3) 0}
+.cx-count input{width:130px}
+.cx-check{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--muted);max-width:480px;min-height:40px}
+.cx-check input{margin-top:3px;flex:none;width:18px;height:18px}
+.cx-box{border:1px solid var(--line);border-radius:12px;padding:var(--s4) var(--s5);background:var(--surface);display:flex;flex-direction:column;gap:var(--s3);margin-top:var(--s3);min-width:0}
+.cx-box p{margin:0}
+.cx-box.good{border-color:var(--good)}
+.cx-box .bar{margin:0;display:flex;flex-wrap:wrap;gap:8px}
+.cx-box details summary,.cx-hand summary,.cx-period details summary{cursor:pointer;font-weight:600;font-size:13.5px;min-height:36px;display:flex;align-items:center}
+.cx-reasons li{color:var(--ink)}
+.cx-sample{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:13px}
+.cx-cols{margin:0;padding-left:18px;font-size:13.5px;display:flex;flex-direction:column;gap:2px}
+.cx-warn{color:var(--warn-ink);font-size:13px}
+.cx-table{width:100%;font-size:13px;border-collapse:collapse;min-width:640px}
+.cx-table th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);text-align:left;padding:6px 10px;white-space:nowrap}
+.cx-table td{padding:8px 10px;border-top:1px solid var(--line);vertical-align:top}
+.cx-table td.num,.cx-table th.num{text-align:right}
+.cx-table .cx-who{max-width:180px;overflow-wrap:anywhere}
+.cx-table .cx-files{min-width:150px;font-size:12.5px}
+.cx-pick{width:100%;font-size:13px;border-collapse:collapse}
+.cx-pick td,.cx-pick th{padding:6px 10px;border-top:1px solid var(--line);text-align:left}
+.cx-pick td:nth-child(n+2),.cx-pick th:nth-child(n+2){text-align:center}
+.cx-pick input{width:20px;height:20px}
+.cx-batches{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s4)}
+.cx-batch{display:flex;flex-direction:column;gap:var(--s2);border-top:1px solid var(--line);padding-top:var(--s3)}
+.cx-batch:first-child{border-top:0;padding-top:0}
+.cx-batch .bar{display:flex;flex-wrap:wrap;gap:8px;margin:0}
+.cx-period{display:flex;flex-direction:column;gap:var(--s2);margin-top:var(--s5);padding-top:var(--s4);border-top:1px solid var(--line)}
+.cx-period:first-of-type{border-top:0;margin-top:var(--s3);padding-top:0}
+.cx-imports{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:10px;font-size:13px}
+.cx-hand{padding:var(--s4) var(--s5)}
+.cx-hand > *:not(summary){margin-top:var(--s3)}
+.dr-credits .im-drop{min-height:140px}
+@media (max-width:760px){.cx-count input{width:100%}.cx-row{align-items:stretch}.cx-box .bar .btn,.cx-batch .bar .btn{flex:1 1 150px}}
