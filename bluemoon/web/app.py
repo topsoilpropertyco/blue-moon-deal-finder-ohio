@@ -553,7 +553,21 @@ def list_markets(conn: Conn) -> list[dict]:
 def settings_view() -> dict:
     out = queries.readable_settings()
     out["share"] = share_status()
+    out["updates"] = update_status()
     return out
+
+
+def update_status() -> dict | None:
+    """The version and the nightly update's last result (read-only). None when it can't be read."""
+    try:
+        from .. import autoupdate
+        st = autoupdate.status()
+        st["line"] = autoupdate.status_line(st)
+        st.pop("log", None)   # the folder path is not needed on screen
+        return st
+    except Exception:  # noqa: BLE001 - update status must never break the Settings screen
+        log.debug("Could not read the update status", exc_info=True)
+        return None
 
 
 @router.get("/api/sources")

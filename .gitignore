@@ -16,6 +16,8 @@ labels/*
 !labels/.gitkeep
 output/*
 !output/.gitkeep
+# The nightly update's log and last result (logs/auto_update.log, auto_update_state.json).
+logs/
 *.sqlite
 *.sqlite3
 *.sqlite-journal

@@ -392,6 +392,29 @@ localhost Host and no `CF-Connecting-IP`/`CF-Ray`) no sign-in is needed (`share.
 uses `CF-Connecting-IP` only when the direct peer is this computer. `scripts/install_service.sh --share` runs it as
 a second LaunchAgent (`com.bluemoon.share`).
 
+## Nightly update (`scripts/auto_update.sh`, `bluemoon/autoupdate.py`)
+
+`run.py autoupdate install` writes `~/Library/LaunchAgents/com.bluemoon.autoupdate.plist` (`autoupdate.make_plist`,
+plistlib) and loads it with `launchctl bootout` + `bootstrap gui/<uid>`. It runs `/bin/bash scripts/auto_update.sh`
+at `updates.hour:minute` from config.yaml (3:17 AM local), with PATH = the folders where `uv` and `git` were found
+at install time + `~/.local/bin` + the usual ones (`autoupdate.tool_path`). `uninstall` boots it out and deletes
+the plist; `now` runs the script in the foreground; `status` (default) prints `autoupdate.status_line`.
+
+The script (its body is one `main` function, so a pull that replaces the file mid-run is safe): takes a lock
+(`logs/auto_update.lock`, stale after 60 min); skips (result `skipped`) when HEAD is not `main` or `git status
+--porcelain --untracked-files=no` shows tracked changes (it never discards them; `.env` and `config.local.yaml`
+are gitignored); `git fetch origin main`; nothing new: `up_to_date`; otherwise remembers HEAD, `git pull --ff-only`,
+`uv sync`, then the quick check: `import bluemoon.web.app`, `run.py --help`, and `pytest -x` on
+`tests/test_foundation.py tests/test_cli.py tests/test_frontend_shell.py` (~15 s). A failed check: `git reset
+--hard <previous>` (only when the tree was clean, which it always is by then), `uv sync`, result `failed`, no
+restart, so the running dashboard is untouched. Success: `launchctl kickstart -k gui/<uid>/com.bluemoon.dealfinder`
+and `com.bluemoon.share` (a job that isn't set up is logged, not an error), result `updated`. Every run writes
+`logs/auto_update_state.json` (`{when, result, message, commit, commit_date}`) and appends to
+`logs/auto_update.log`, trimmed to `updates.keep_log_lines` (logs/ is gitignored). `/api/settings` returns
+`updates` (`autoupdate.status()` + `line`: version, schedule, last result); the Settings screen shows it in the
+Updates panel. Test hooks: `BLUEMOON_APP_DIR`, `BLUEMOON_SMOKE_TESTS`, `BLUEMOON_RESTART_LABELS`,
+`BLUEMOON_UPDATE_KEEP_LINES`.
+
 ## Web API (`bluemoon/web/app.py`, JSON)
 
 All market routes are under `/api/m/{slug}`. Errors: `{"detail": "..."}` with 4xx.
@@ -454,7 +477,7 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | GET | `/api/m/{slug}/export/{name}` | file download (`ranked_list.xlsx`, `ranked_list.csv`, `crm_handoff.csv`, `mailing_list.csv`, `drill_worklist.csv`, `excluded.zip`, `run_summary.md`); a GET never changes data |
 | POST | `/api/m/{slug}/export/crm_handoff.csv` | JSON body `{mark: true}`: the CRM list, marking the newly confirmed owners in it as handed off |
 | GET | `/images/{property_id}/{file}` | cached image (local only) |
-| GET | `/api/settings` | readable settings (no secrets) |
+| GET | `/api/settings` | readable settings (no secrets), `share`, and `updates` (version + last nightly update) |
 
 PropertyRow: `{id, address, city, state, zip, county, lat, lng, units, building_sqft, lot_acres, size_value,
 size_basis, size_color, drive_minutes, drive_method, visual:{label, p, color, needs_review}, rent_fit,

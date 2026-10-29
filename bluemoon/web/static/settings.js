@@ -265,6 +265,34 @@
       H.command('cd ' + APP_FOLDER + ' && uv run run.py share password') + '</details>', 'vw-full');
   }
 
+  function whenText(iso) {
+    const d = iso ? new Date(iso) : null;
+    if (!d || Number.isNaN(d.getTime())) return 'unknown time';
+    return d.toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) + ', ' +
+      d.toLocaleTimeString(undefined, {hour: 'numeric', minute: '2-digit'});
+  }
+
+  /** One read-only line: the version, the nightly update, and how the last one went. */
+  function updatesPanel(up) {
+    if (!up) return '';
+    const v = up.version || {};
+    const version = [v.commit, v.date].filter(Boolean).join(', ') || 'unknown';
+    const last = up.last;
+    const lastText = last ? whenText(last.when) + ', ' + (last.result_text || last.result) : 'never';
+    const dot = !last ? 'n' : (last.ok ? 'g' : (last.result === 'failed' ? 'r' : 'n'));
+    const line = '<p class="vw-tight se-version">Version: <b>' + esc(version) + '</b> · ' +
+      (up.installed ? 'Updates itself nightly at ' + esc(up.time) : 'Nightly updates are off') +
+      ' · Last update: <span class="se-yn"><span class="dot ' + dot + '" aria-hidden="true"></span>' + esc(lastText) + '</span></p>';
+    const why = last && last.message && !last.ok ? '<p class="note vw-tight">' + esc(last.message) + '</p>' : '';
+    return panel('Updates', line + why +
+      '<details class="im-more"><summary>' + (up.installed ? 'Update by hand, or turn nightly updates off' : 'Turn on nightly updates') + '</summary>' +
+      (up.installed ? '' : '<p class="note">On the Mac Mini, run this once:</p>' + H.command('cd ' + APP_FOLDER + ' && uv run run.py autoupdate install')) +
+      '<p class="note">Update right now (safe any time; if the new version fails its check, it goes back by itself):</p>' +
+      H.command('cd ' + APP_FOLDER + ' && uv run run.py autoupdate now') +
+      (up.installed ? '<p class="note">Turn nightly updates off:</p>' + H.command('cd ' + APP_FOLDER + ' && uv run run.py autoupdate uninstall') : '') +
+      '</details>', 'vw-full');
+  }
+
   /* ---------- page ---------- */
 
   const HEAD = H.head('Setup · Settings', 'Settings', [
@@ -277,7 +305,7 @@
     const acs = st.asset_classes || {};
     const s = BM.state.summary;
     const acKey = (s && s.asset_class && s.asset_class.key) || ((H.currentMarket() || {}).asset_class);
-    return HEAD + '<div class="grid2">' + sharePanel(st.share) + marketsPanel(cfg, acs) + buyBoxPanel(acs[acKey]) + keysPanel(st.keys) +
+    return HEAD + '<div class="grid2">' + updatesPanel(st.updates) + sharePanel(st.share) + marketsPanel(cfg, acs) + buyBoxPanel(acs[acKey]) + keysPanel(st.keys) +
       photoPanel(cfg, health) + monthlyPanel(cfg) + usagePanel(cfg, usage) + pathsPanel(cfg) + safetyPanel(cfg) + howPanel() + '</div>';
   }
 

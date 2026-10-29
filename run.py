@@ -128,6 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
     from bluemoon.crexi import cli as crexi_cli
     crexi_cli.add_arguments(add("crexi", "Crexi bulk batches: export the next N, import Crexi's reply, close, history "
                                          "(see 'uv run run.py crexi status')."))
+    au = add("autoupdate", "Update the app by itself every night at 3:17 AM (install), or see how it went (status).")
+    au.add_argument("action", nargs="?", default="status", choices=["install", "uninstall", "status", "now"],
+                    help="install: turn on nightly updates; uninstall: turn them off; status (default): the "
+                         "version and the last update; now: update right away")
     ky = add("key", "Save a key into .env without opening the file (you paste it hidden; it is never shown).")
     ky.add_argument("which", choices=sorted(KEY_ENV), help="which key: google (Maps), anthropic or census")
     return parser
@@ -555,6 +559,42 @@ def cmd_share(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK if code in (0, None) else EXIT_ERROR
 
 
+def cmd_autoupdate(args: argparse.Namespace, settings: Settings) -> int:
+    """Turn the nightly update on or off, show how the last one went, or update right away."""
+    from bluemoon import autoupdate
+    try:
+        if args.action == "install":
+            path = autoupdate.install(settings)
+            st = autoupdate.status(settings)
+            say(f"Nightly updates are on: every night at {st['time']} the app checks GitHub, updates, runs a "
+                "quick check and restarts the dashboard and the team link. If the check fails it goes back to "
+                "the version before, so the dashboard keeps working.")
+            say(f"(The job is {path}. Turn it off with: uv run run.py autoupdate uninstall)")
+            return EXIT_OK
+        if args.action == "uninstall":
+            had = autoupdate.uninstall()
+            say("Nightly updates are off." if had else "Nightly updates were not on.")
+            return EXIT_OK
+        if args.action == "now":
+            say("Updating now (this takes a minute or two)...")
+            code = autoupdate.run_now()
+            for part in autoupdate.status_line(autoupdate.status(settings)).split(" · "):
+                say(part)
+            return EXIT_OK if code == 0 else EXIT_ERROR
+    except autoupdate.UpdateError as exc:
+        say(str(exc))
+        return EXIT_ERROR
+    st = autoupdate.status(settings)
+    for part in autoupdate.status_line(st).split(" · "):
+        say(part)
+    if st["last"] and st["last"]["message"]:
+        say(f"Last result: {st['last']['message']}")
+    if not st["installed"]:
+        say("Turn on nightly updates with: uv run run.py autoupdate install")
+    say(f"The full log is in {st['log']}")
+    return EXIT_OK
+
+
 # --- main --------------------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
@@ -568,6 +608,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_share(args, settings)
         if args.command == "key":
             return cmd_key(args, settings)
+        if args.command == "autoupdate":
+            return cmd_autoupdate(args, settings)
         markets = ([resolve_market(args.market, settings)] if args.market or args.command != "status"
                    else [m.slug for m in settings.markets])
         conn = connect(settings=settings)

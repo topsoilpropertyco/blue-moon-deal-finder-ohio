@@ -70,3 +70,6 @@ echo
 echo "So it also comes back after a power cut or an update restart, turn on automatic login:"
 echo "System Settings > Users & Groups > Automatically log in as > your name (hidden when FileVault is on;"
 echo "then log in once at the Mac after a restart)."
+echo
+echo "To have the app update itself every night at 3:17 AM (it goes back by itself if an update fails its check):"
+echo "  uv run run.py autoupdate install"
