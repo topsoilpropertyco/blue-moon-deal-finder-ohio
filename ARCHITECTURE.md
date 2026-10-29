@@ -432,19 +432,29 @@ at install time + `~/.local/bin` + the usual ones (`autoupdate.tool_path`). `uni
 the plist; `now` runs the script in the foreground; `status` (default) prints `autoupdate.status_line`.
 
 The script (its body is one `main` function, so a pull that replaces the file mid-run is safe): takes a lock
-(`logs/auto_update.lock`, stale after 60 min); skips (result `skipped`) when HEAD is not `main` or `git status
---porcelain --untracked-files=no` shows tracked changes (it never discards them; `.env` and `config.local.yaml`
-are gitignored); `git fetch origin main`; nothing new: `up_to_date`; otherwise remembers HEAD, `git pull --ff-only`,
-`uv sync`, then the quick check: `import bluemoon.web.app`, `run.py --help`, and `pytest -x` on
-`tests/test_foundation.py tests/test_cli.py tests/test_frontend_shell.py` (~15 s). A failed check: `git reset
---hard <previous>` (only when the tree was clean, which it always is by then), `uv sync`, result `failed`, no
-restart, so the running dashboard is untouched. Success: `launchctl kickstart -k gui/<uid>/com.bluemoon.dealfinder`
-and `com.bluemoon.share` (a job that isn't set up is logged, not an error), result `updated`. Every run writes
+(`logs/auto_update.lock`, stale after 60 min); if `logs/auto_update_pending` exists (an earlier run died between
+its pull and the end of its check), `git reset --hard` to the commit in it, `uv sync --frozen`, result `failed`,
+stop. Then `git checkout -- uv.lock` (uv writes it, never Seth); skips (result `skipped`) when HEAD is not `main`
+or `git status --porcelain --untracked-files=no` shows tracked changes (it never discards them; `.env` and
+`config.local.yaml` are gitignored); `git fetch origin main`; nothing new: `up_to_date` (plus a restart left over
+from a busy night, see below); a queued/running job (`run.py autoupdate jobs` = `autoupdate.active_jobs`, live
+owners only): `skipped`, so the job is not killed. Otherwise writes HEAD to `logs/auto_update_pending`, `git pull
+--ff-only`, `uv sync --locked` (a stale uv.lock fails the check instead of being rewritten), then the quick check
+with `uv run --frozen`: `import bluemoon.web.app`, `run.py --help`, and `pytest -x` on `tests/test_foundation.py
+tests/test_cli.py tests/test_frontend_shell.py` (~15 s). Every git/uv step runs under a perl watchdog that kills
+its process group after `updates.check_timeout_minutes` (exit 142 = failed check); git runs with
+`GIT_TERMINAL_PROMPT=0` and a low-speed limit. A failed check: `git reset --hard <previous>`, `uv sync --frozen`,
+result `failed`, no restart, so the running dashboard is untouched. Success: removes the pending file, then
+`launchctl kickstart -k gui/<uid>/com.bluemoon.dealfinder`; `com.bluemoon.share` only when the update changed
+`bluemoon/share.py` (a restart gives the Quick Tunnel a new address, and the message says so). If a job started
+during the check, the restart is postponed (`logs/auto_update_restart_pending`) to the next run. A job that isn't
+set up is logged, not an error; result `updated`. Every run writes
 `logs/auto_update_state.json` (`{when, result, message, commit, commit_date}`) and appends to
 `logs/auto_update.log`, trimmed to `updates.keep_log_lines` (logs/ is gitignored). `/api/settings` returns
 `updates` (`autoupdate.status()` + `line`: version, schedule, last result); the Settings screen shows it in the
-Updates panel. Test hooks: `BLUEMOON_APP_DIR`, `BLUEMOON_SMOKE_TESTS`, `BLUEMOON_RESTART_LABELS`,
-`BLUEMOON_UPDATE_KEEP_LINES`.
+Updates panel. The dashboard LaunchAgent runs `uv run --frozen run.py serve`. Test hooks: `BLUEMOON_APP_DIR`,
+`BLUEMOON_SMOKE_TESTS`, `BLUEMOON_RESTART_LABELS`, `BLUEMOON_SHARE_LABEL`, `BLUEMOON_UPDATE_KEEP_LINES`,
+`BLUEMOON_UPDATE_TIMEOUT_MINUTES`, `BLUEMOON_UPDATE_TIMEOUT_SECONDS`.
 
 ## Web API (`bluemoon/web/app.py`, JSON)
 

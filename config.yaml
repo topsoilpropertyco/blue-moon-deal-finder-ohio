@@ -219,3 +219,4 @@ updates:                         # nightly automatic update (turn on with: uv ru
   hour: 3                        # local time, 24-hour clock; run 'autoupdate install' again after changing it
   minute: 17
   keep_log_lines: 500            # logs/auto_update.log keeps this many lines
+  check_timeout_minutes: 20      # a step (GitHub, packages, quick tests) that takes longer counts as failed

@@ -134,9 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
     crexi_cli.add_arguments(add("crexi", "Crexi bulk batches: export the next N, import Crexi's reply, cancel, history "
                                          "(see 'uv run run.py crexi status')."))
     au = add("autoupdate", "Update the app by itself every night at 3:17 AM (install), or see how it went (status).")
-    au.add_argument("action", nargs="?", default="status", choices=["install", "uninstall", "status", "now"],
+    au.add_argument("action", nargs="?", default="status", choices=["install", "uninstall", "status", "now", "jobs"],
                     help="install: turn on nightly updates; uninstall: turn them off; status (default): the "
-                         "version and the last update; now: update right away")
+                         "version and the last update; now: update right away; jobs: how many app jobs are running")
     ky = add("key", "Save a key into .env without opening the file (you paste it hidden; it is never shown).")
     ky.add_argument("which", choices=sorted(KEY_ENV), help="which key: google (Maps), anthropic or census")
     return parser
@@ -581,13 +581,17 @@ def cmd_autoupdate(args: argparse.Namespace, settings: Settings) -> int:
             path = autoupdate.install(settings)
             st = autoupdate.status(settings)
             say(f"Nightly updates are on: every night at {st['time']} the app checks GitHub, updates, runs a "
-                "quick check and restarts the dashboard and the team link. If the check fails it goes back to "
-                "the version before, so the dashboard keeps working.")
+                "quick check and restarts the dashboard. If the check fails (or is stopped halfway) it goes back "
+                "to the version before, so the dashboard keeps working. While a job is running (like getting "
+                "photos) it waits for the next night instead of stopping the job.")
             say(f"(The job is {path}. Turn it off with: uv run run.py autoupdate uninstall)")
             return EXIT_OK
         if args.action == "uninstall":
             had = autoupdate.uninstall()
             say("Nightly updates are off." if had else "Nightly updates were not on.")
+            return EXIT_OK
+        if args.action == "jobs":     # used by scripts/auto_update.sh: just the number of running jobs
+            print(autoupdate.active_jobs(settings))
             return EXIT_OK
         if args.action == "now":
             say("Updating now (this takes a minute or two)...")

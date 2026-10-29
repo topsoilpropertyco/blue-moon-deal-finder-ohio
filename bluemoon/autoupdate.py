@@ -11,6 +11,7 @@ import json
 import os
 import plistlib
 import shutil
+import sqlite3
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ class UpdateSettings(BaseModel):
     hour: int = 3
     minute: int = 17
     keep_log_lines: int = 500
+    check_timeout_minutes: int = 20      # a pull, package install or quick test that takes longer counts as failed
 
 
 class LastRun(BaseModel):
@@ -73,14 +75,16 @@ def tool_path(found: dict[str, str | None] | None = None) -> str:
     return ":".join(out)
 
 
-def make_plist(app_dir: Path, path_env: str, hour: int, minute: int, keep_lines: int = 500) -> bytes:
+def make_plist(app_dir: Path, path_env: str, hour: int, minute: int, keep_lines: int = 500,
+               timeout_minutes: int = 20) -> bytes:
     """The LaunchAgent: run scripts/auto_update.sh every night at hour:minute (local time)."""
     logs = app_dir / "logs"
     doc: dict[str, Any] = {
         "Label": LABEL,
         "WorkingDirectory": str(app_dir),
         "ProgramArguments": ["/bin/bash", str(app_dir / "scripts" / "auto_update.sh")],
-        "EnvironmentVariables": {"PATH": path_env, "BLUEMOON_UPDATE_KEEP_LINES": str(keep_lines)},
+        "EnvironmentVariables": {"PATH": path_env, "BLUEMOON_UPDATE_KEEP_LINES": str(keep_lines),
+                                 "BLUEMOON_UPDATE_TIMEOUT_MINUTES": str(int(timeout_minutes))},
         "StartCalendarInterval": {"Hour": int(hour), "Minute": int(minute)},
         "RunAtLoad": False,
         "Umask": 63,
@@ -111,7 +115,8 @@ def install(settings: Settings | None = None, app_dir: Path = REPO_ROOT) -> Path
     (app_dir / "logs").mkdir(parents=True, exist_ok=True)
     domain = f"gui/{os.getuid()}"
     launchctl("bootout", f"{domain}/{LABEL}")   # an older copy; fine if there is none
-    path.write_bytes(make_plist(app_dir, tool_path(), cfg.hour, cfg.minute, cfg.keep_log_lines))
+    path.write_bytes(make_plist(app_dir, tool_path(), cfg.hour, cfg.minute, cfg.keep_log_lines,
+                                cfg.check_timeout_minutes))
     done = launchctl("bootstrap", domain, str(path))
     if done.returncode != 0:
         raise UpdateError(f"macOS didn't accept the nightly update job ({(done.stderr or done.stdout).strip()[:200]}).")
@@ -131,6 +136,24 @@ def uninstall() -> bool:
 def run_now(app_dir: Path = REPO_ROOT) -> int:
     """Run the update right away, in this window."""
     return subprocess.run(["/bin/bash", str(app_dir / "scripts" / "auto_update.sh")], check=False).returncode
+
+
+def active_jobs(settings: Settings | None = None) -> int:
+    """How many app jobs (photos, research, imports...) are queued or running right now. The update waits for
+    them instead of restarting the dashboard under them. Read-only; 0 when there is no database yet."""
+    from .jobs import _owner_alive
+    path = (settings or get_settings()).path("db")
+    if not path.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+        try:
+            rows = conn.execute("SELECT params_json FROM jobs WHERE status IN ('queued', 'running')").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+    return sum(1 for (params_json,) in rows if _owner_alive(params_json))
 
 
 # --- reading the result ------------------------------------------------------------------------

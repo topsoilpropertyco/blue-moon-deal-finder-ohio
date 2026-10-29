@@ -36,6 +36,7 @@ def test_plist_runs_the_script_nightly_at_3_17_with_uv_and_git_on_path():
     assert dirs[:2] == ["/Users/seth/.local/bin", "/usr/bin"]
     assert "/opt/homebrew/bin" in dirs and len(dirs) == len(set(dirs))     # no folder twice
     assert doc["EnvironmentVariables"]["BLUEMOON_UPDATE_KEEP_LINES"] == "400"
+    assert doc["EnvironmentVariables"]["BLUEMOON_UPDATE_TIMEOUT_MINUTES"] == "20"
     assert doc["StandardErrorPath"] == "/Users/seth/blue-moon/logs/auto_update.launchd.log"
     assert "KEY" not in json.dumps(doc)    # no keys in the job
 
@@ -53,7 +54,7 @@ def test_clock():
 
 def test_schedule_comes_from_config_yaml(settings):
     cfg = autoupdate.update_settings(settings)
-    assert (cfg.hour, cfg.minute, cfg.keep_log_lines) == (3, 17, 500)
+    assert (cfg.hour, cfg.minute, cfg.keep_log_lines, cfg.check_timeout_minutes) == (3, 17, 500, 20)
 
 
 @pytest.fixture
@@ -164,6 +165,9 @@ GIT_ENV = {"GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com", "G
            "GIT_COMMITTER_EMAIL": "test@example.com", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 
 
+JOBS_CALL = "uv run --frozen --quiet run.py autoupdate jobs"
+
+
 class Box:
     """A fake GitHub (bare repo), the app folder cloned from it, a second clone to push updates from, and stubs."""
 
@@ -178,8 +182,11 @@ class Box:
         self.env = {**GIT_ENV, "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(tmp),
                     "BLUEMOON_APP_DIR": str(self.app), "BLUEMOON_HOME": str(self.app),
                     "BLUEMOON_SMOKE_TESTS": "tests/test_quick.py"}
-        # uv: notes its arguments; any "uv run" fails while the repo has a BREAK file (a bad update).
-        self._stub("uv", '[ "$1" = run ] && [ -f BREAK ] && { echo "Traceback: the new version is broken"; exit 1; }')
+        # uv: notes its arguments; "autoupdate jobs" answers $FAKE_JOBS (0); any other "uv run" fails while the
+        # repo has a BREAK file (a bad update) and hangs while it has a HANG file (a step that never ends).
+        self._stub("uv", '[ "$*" = "run --frozen --quiet run.py autoupdate jobs" ] && { echo "${FAKE_JOBS:-0}"; exit 0; }\n'
+                         '[ "$1" = run ] && [ -f HANG ] && sleep 30\n'
+                         '[ "$1" = run ] && [ -f BREAK ] && { echo "Traceback: the new version is broken"; exit 1; }')
         self._stub("launchctl", "")
         self.git("init", "--bare", "-b", "main", str(self.remote), cwd=tmp)
         self.git("clone", str(self.remote), str(self.dev), cwd=tmp)
@@ -217,7 +224,11 @@ class Box:
         return json.loads((self.app / "logs" / "auto_update_state.json").read_text())
 
     def called(self) -> list[str]:
-        return self.calls.read_text().splitlines() if self.calls.exists() else []
+        return [c for c in (self.calls.read_text().splitlines() if self.calls.exists() else [])
+                if c != JOBS_CALL]
+
+    def asked_for_jobs(self) -> int:
+        return self.calls.read_text().splitlines().count(JOBS_CALL) if self.calls.exists() else 0
 
     def log(self) -> str:
         return (self.app / "logs" / "auto_update.log").read_text()
@@ -249,14 +260,16 @@ def test_new_commit_is_pulled_checked_and_the_services_restarted(box):
     assert (box.app / "config.local.yaml").read_text() == "photos:\n  batch: 7\n"
     uid = os.getuid()
     calls = box.called()
-    assert calls[0] == "uv sync --quiet"
-    assert "uv run python -c import bluemoon.web.app" in calls and "uv run run.py --help" in calls
-    assert any(c.startswith("uv run pytest") and c.endswith("tests/test_quick.py") for c in calls)
-    assert calls[-2:] == [f"launchctl kickstart -k gui/{uid}/com.bluemoon.dealfinder",
-                          f"launchctl kickstart -k gui/{uid}/com.bluemoon.share"]
+    assert calls[0] == "uv sync --locked --quiet"      # exactly what uv.lock says; never rewrites it
+    assert "uv run --frozen python -c import bluemoon.web.app" in calls and "uv run --frozen run.py --help" in calls
+    assert any(c.startswith("uv run --frozen pytest") and c.endswith("tests/test_quick.py") for c in calls)
+    # Only the dashboard restarts: the team link keeps its address because its code didn't change.
+    assert calls[-1] == f"launchctl kickstart -k gui/{uid}/com.bluemoon.dealfinder"
+    assert not any("com.bluemoon.share" in c for c in calls)
     st = box.state()
-    assert st["result"] == "updated" and new.startswith(st["commit"]) and st["message"].startswith("Updated to ")
+    assert st["result"] == "updated" and new.startswith(st["commit"]) and st["message"] == f"Updated to {st['commit']}, {st['commit_date']}."
     assert "Restarted com.bluemoon.dealfinder." in box.log()
+    assert not (box.app / "logs" / "auto_update_pending").exists()
 
 
 def test_failing_check_rolls_back_and_leaves_the_dashboard_alone(box):
@@ -266,12 +279,12 @@ def test_failing_check_rolls_back_and_leaves_the_dashboard_alone(box):
     assert res.returncode == 1
     assert box.head() == before and not (box.app / "BREAK").exists()
     calls = box.called()
-    assert calls.count("uv sync --quiet") == 2        # once for the new version, once to go back
+    assert calls.count("uv sync --locked --quiet") == 1 and calls.count("uv sync --frozen --quiet") == 1
     assert not any(c.startswith("launchctl") for c in calls)
     st = box.state()
     assert st["result"] == "failed" and before.startswith(st["commit"])
     assert "went back to" in st["message"] and "doesn't load" in st["message"] and "Traceback" in st["message"]
-    assert "Update to" in box.log()
+    assert "Update to" in box.log() and not (box.app / "logs" / "auto_update_pending").exists()
     # Next night, with the broken update still on GitHub, it tries again and goes back again.
     assert box.run().returncode == 1 and box.head() == before
 
@@ -311,7 +324,7 @@ def test_a_restart_that_fails_is_logged_but_the_update_counts(box):
     box.push("app.txt", "version 2\n")
     assert box.run().returncode == 0
     assert box.state()["result"] == "updated"
-    assert "Didn't restart com.bluemoon.share" in box.log()
+    assert "Didn't restart com.bluemoon.dealfinder" in box.log()
 
 
 def test_log_is_trimmed_and_only_one_run_at_a_time(box):
@@ -322,3 +335,108 @@ def test_log_is_trimmed_and_only_one_run_at_a_time(box):
     res = box.run()
     assert res.returncode == 0 and "Another update is running" in res.stdout
     assert (box.app / "logs" / "auto_update.lock").is_dir()      # someone else's lock is left alone
+
+
+def test_an_update_stopped_halfway_goes_back_next_time(box):
+    """Killed during its check (power cut, hang): the next run goes back instead of calling it 'up to date'."""
+    before = box.head()
+    box.push("BREAK", "this update never passed its check\n")
+    (box.dev / "HANG").write_text("")
+    box.git("add", ".", cwd=box.dev)
+    box.git("commit", "-m", "hang", cwd=box.dev)
+    box.git("push", "origin", "main", cwd=box.dev)
+    proc = subprocess.Popen(["/bin/bash", str(SCRIPT)], env=box.env, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True)
+    with pytest.raises(subprocess.TimeoutExpired):     # the run is killed while its check hangs
+        proc.wait(timeout=5)
+    os.killpg(proc.pid, 9)
+    proc.wait()
+    pending = box.app / "logs" / "auto_update_pending"
+    assert pending.read_text().strip() == before and (box.app / "BREAK").exists()
+    shutil.rmtree(box.app / "logs" / "auto_update.lock", ignore_errors=True)     # as if the lock went stale
+    res = box.run()
+    assert res.returncode == 1
+    assert box.head() == before and not (box.app / "BREAK").exists() and not pending.exists()
+    st = box.state()
+    assert st["result"] == "failed" and "stopped before its check finished" in st["message"]
+    assert "went back to" in st["message"] and before.startswith(st["commit"])
+
+
+def test_a_step_that_hangs_is_stopped_and_rolled_back(box):
+    before = box.head()
+    (box.dev / "HANG").write_text("")
+    box.push("app.txt", "version 2\n")
+    res = box.run(BLUEMOON_UPDATE_TIMEOUT_SECONDS="2")
+    assert res.returncode == 1 and box.head() == before
+    st = box.state()
+    assert st["result"] == "failed" and "went back to" in st["message"] and "took longer than" in st["message"]
+
+
+def test_a_stale_uv_lock_never_blocks_later_updates(box):
+    (box.dev / "uv.lock").write_text("lock 1\n")
+    box.push("app.txt", "version 2\n")
+    assert box.run().returncode == 0
+    (box.app / "uv.lock").write_text("lock rewritten by uv run\n")      # uv re-locked on this Mac
+    new = box.push("app.txt", "version 3\n")
+    res = box.run()
+    assert res.returncode == 0 and box.state()["result"] == "updated" and box.head() == new
+    assert (box.app / "uv.lock").read_text() == "lock 1\n"
+
+
+def test_a_running_job_postpones_the_update(box):
+    before = box.head()
+    box.push("app.txt", "version 2\n")
+    res = box.run(FAKE_JOBS="2")
+    assert res.returncode == 0 and box.head() == before
+    st = box.state()
+    assert st["result"] == "skipped" and "2 job(s) are running" in st["message"]
+    assert box.called() == []        # nothing pulled, installed or restarted
+    res = box.run()
+    assert box.state()["result"] == "updated" and box.head() != before
+
+
+def test_a_job_that_starts_during_the_check_delays_only_the_restart(box):
+    box.push("app.txt", "version 2\n")
+    (box.bin / "uv").write_text((box.bin / "uv").read_text().replace(
+        '{ echo "${FAKE_JOBS:-0}"; exit 0; }',
+        '{ n=$(cat "$HOME/jobcalls" 2>/dev/null || echo 0); echo $((n+1)) > "$HOME/jobcalls"; '
+        '[ "$n" -ge 1 ] && echo "${LATE_JOBS:-0}" || echo 0; exit 0; }'))
+    assert box.run(LATE_JOBS="1").returncode == 0
+    st = box.state()
+    assert st["result"] == "updated" and "keeps running the version before" in st["message"]
+    assert not any(c.startswith("launchctl") for c in box.called())
+    assert (box.app / "logs" / "auto_update_restart_pending").exists()
+    assert box.run().returncode == 0       # next night: nothing new, the job is done, so it restarts now
+    assert box.state()["result"] == "up_to_date" and "restarted to use it" in box.state()["message"]
+    assert box.called()[-1].endswith("/com.bluemoon.dealfinder")
+    assert not (box.app / "logs" / "auto_update_restart_pending").exists()
+
+
+def test_team_link_restarts_only_when_its_code_changed_and_says_so(box):
+    (box.dev / "bluemoon").mkdir()
+    box.push("bluemoon/share.py", "new share code\n")
+    assert box.run().returncode == 0
+    uid = os.getuid()
+    assert box.called()[-2:] == [f"launchctl kickstart -k gui/{uid}/com.bluemoon.dealfinder",
+                                 f"launchctl kickstart -k gui/{uid}/com.bluemoon.share"]
+    assert "new address" in box.state()["message"]
+
+
+def test_active_jobs_counts_only_live_queued_or_running_jobs(settings):
+    from bluemoon import db, jobs
+    assert autoupdate.active_jobs(settings) >= 0
+    conn = db.connect(settings=settings)
+    alive = json.dumps({jobs.PID_KEY: os.getpid()})
+    dead = json.dumps({jobs.PID_KEY: 999999999})
+    for status, params in (("running", alive), ("queued", alive), ("running", dead), ("done", alive)):
+        conn.execute("INSERT INTO jobs(kind, status, progress, message, params_json, created_at) "
+                     "VALUES ('photos_all', ?, 0, '', ?, ?)", (status, params, db.now_iso()))
+    conn.commit()
+    conn.close()
+    assert autoupdate.active_jobs(settings) == 2
+
+
+def test_cli_jobs_prints_just_the_number(settings, capsys):
+    import run
+    assert run.main(["autoupdate", "jobs"]) == 0
+    assert capsys.readouterr().out.strip().isdigit()

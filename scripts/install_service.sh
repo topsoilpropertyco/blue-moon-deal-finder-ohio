@@ -33,7 +33,7 @@ write_agent() {  # label, command word, log file
   <key>WorkingDirectory</key><string>$APP_DIR</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$UV_BIN</string><string>run</string><string>run.py</string><string>$2</string>
+    <string>$UV_BIN</string><string>run</string><string>--frozen</string><string>run.py</string><string>$2</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

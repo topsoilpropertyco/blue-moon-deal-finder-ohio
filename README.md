@@ -230,7 +230,7 @@ Restart the dashboard after editing them.
 
 ## Updates
 
-**Turn on nightly updates (once):** the app then updates itself every night at 3:17 AM. It checks GitHub, takes the new version, runs a quick check, and restarts the dashboard and the team link. If the check fails, it goes back to the version before by itself, so the dashboard keeps working.
+**Turn on nightly updates (once):** the app then updates itself every night at 3:17 AM. It checks GitHub, takes the new version, runs a quick check, and restarts the dashboard. If the check fails, takes too long, or is stopped halfway (a power cut, a restart), it goes back to the version before by itself, so the dashboard keeps working. The team link keeps its address: it is only restarted when its own code changed, and then Settings says to send the new link.
 
 ```bash
 cd ~/blue-moon-deal-finder-ohio
@@ -264,6 +264,8 @@ Updating by hand never hurts anything: your data, `.env` and `config.local.yaml`
 
 Good to know:
 - The nightly update skips itself (and says why on Settings) if you edited a file that came with the app, such as `config.yaml`. It never overwrites your edits. Put your own settings in `config.local.yaml` instead (see Settings above).
+- If a job is running at 3:17 AM (like getting photos for every lead), the update waits for the next night, so the job is never stopped halfway.
+- Each step has a time limit (`check_timeout_minutes` under `updates:` in `config.yaml`, 20 minutes). A step that takes longer counts as a failed check, so it goes back.
 - The Mac must be on at 3:17 AM. If it was asleep, macOS runs the update when it wakes up.
 - Turn it off: `uv run run.py autoupdate uninstall`. Change the time: `updates:` in `config.yaml`, then run `autoupdate install` again.
 - The log is `logs/auto_update.log` (kept short).
