@@ -397,6 +397,19 @@ def test_jobs_queue_per_market_and_run_side_by_side(conn, market_slug):
     assert gate.ran[-1] == ("score", market_slug)
 
 
+def test_the_photo_button_never_queues_twice_in_one_market(conn, market_slug):
+    gate = Gate()
+    runner = jobs.JobRunner(gate)
+    first = runner.start("photos_all", market_slug, {"confirm": True, "approved": 40})
+    with pytest.raises(ValueError, match="already queued or running"):
+        runner.start("photos_all", market_slug, {"confirm": True, "approved": 40})
+    dry = runner.start("photos_all", market_slug, {"dry_run": True})       # a dry run spends nothing: allowed
+    gate.release.set()
+    assert runner.wait(first, 5)["status"] == "done" and runner.wait(dry, 5)["status"] == "done"
+    again = runner.start("photos_all", market_slug, {"confirm": True})     # after it finishes: fine
+    assert runner.wait(again, 5)["status"] == "done"
+
+
 def test_cancel_a_running_job(conn, market_slug):
     gate = Gate()
     runner = jobs.JobRunner(gate)

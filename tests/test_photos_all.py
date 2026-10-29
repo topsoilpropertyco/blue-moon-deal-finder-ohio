@@ -202,6 +202,49 @@ def test_a_big_run_waits_for_the_ok_and_calls_nothing(conn, settings, key):
     assert google.requests == [] and rows(conn, "SELECT * FROM photo_pulls") == []
 
 
+def test_the_ok_only_covers_the_numbers_shown(conn, settings, key):
+    """A 'Yes' given for a small estimate never pays for a bigger job found when it starts."""
+    for i in range(60):
+        add(conn, rank=i + 1)
+    google = FakeGoogle()
+    res = photos_all.run(conn, MARKET, confirm=True, approved=30, backend=MockBackend(), client=google.client())
+    assert res["needs_confirm"] is True and "The numbers changed since you said yes to 30 properties" in res["message"]
+    assert google.requests == [] and rows(conn, "SELECT * FROM photo_pulls") == []
+    ok = photos_all.run(conn, MARKET, confirm=True, approved=60, backend=MockBackend(), client=google.client())
+    assert ok["fetched"] == 60 and ok["checked"] == 60
+
+
+def test_a_small_run_with_an_old_ok_still_needs_no_new_ok(conn, settings, key):
+    for i in range(10):
+        add(conn, rank=i + 1)
+    res = photos_all.run(conn, MARKET, confirm=True, approved=3, backend=MockBackend(), client=FakeGoogle().client())
+    assert res["fetched"] == 10 and not res["needs_confirm"]                  # 10 is under the 50 OK line
+
+
+def test_the_job_passes_the_approved_count(tmp_root, conn, settings, key, monkeypatch):
+    for i in range(60):
+        add(conn, rank=i + 1)
+    set_config(tmp_root, "vision.backend", "mock")
+    seen = {}
+    real = photos_all.run
+    monkeypatch.setattr(photos_all, "run", lambda *a, **k: seen.update(k) or real(*a, **{**k, "dry_run": True}))
+    pipeline.run_step(conn, MARKET, "photos_all", confirm=True, approved=12)
+    assert seen["approved"] == 12 and seen["confirm"] is True
+
+
+def test_partly_photographed_leads_are_counted_once(conn, settings, key):
+    for i in range(3):                                   # satellite and two Street View photos saved, one missing
+        pid = add(conn, rank=i + 1, status="error", pano_id=f"p{i}", pano_lat=39.95, pano_lng=-83.77)
+        folder = settings.path("images") / str(pid)
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in ("sv_0.jpg", "sv_1.jpg", "sat.jpg"):
+            (folder / name).write_bytes(JPEG + bytes([pid % 256]) + name.encode())
+    est = photos_all.estimate(conn, MARKET, backend=MockBackend())
+    assert est["photos"] == 3 and est["ai_checks"] == 3 and est["calls"] == 3 and est["properties"] == 3
+    assert "walk-up call on 3 properties" in " ".join(est["lines"])
+    assert "within_caps_ids" not in est["details"]["photos"] and "property_ids" not in est["details"]["ai"]
+
+
 def test_dry_run_calls_nothing(conn, settings, key):
     add(conn, rank=1)
     google = FakeGoogle()

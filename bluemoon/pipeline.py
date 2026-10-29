@@ -125,6 +125,7 @@ class StepRun:
     confirm: bool = False
     progress: Progress = None
     path: PathArg = None
+    approved: int | None = None      # the property count the OK was given for (the one photo button)
 
 
 # --- public API --------------------------------------------------------------------------------
@@ -144,19 +145,22 @@ def step_label(step: str) -> str:
 
 def run_step(conn: sqlite3.Connection, market_slug: str, step: str, limit: int | None = None,
              dry_run: bool = False, confirm: bool = False, progress: Progress = None, *,
-             path: PathArg = None) -> dict:
+             path: PathArg = None, approved: int | None = None) -> dict:
     """Run one step for one market and return its result (see the module docstring).
 
     limit: at most this many properties (test with 5 first); owners, score and drill always do the
       whole market. dry_run: count and price only, call nothing. confirm: OK to spend on big paid runs.
     path: the file(s) for the import step.
+    approved: for the one photo button, the number of properties the OK was given for; if the job finds more
+      when it starts (and more than safety.confirm_over_properties), it asks again instead of spending.
     Problems Seth can fix (bad file, unknown market, config value) come back as ok=False with a
     plain-English message; anything unexpected raises.
     """
     key = normalize_step(step)
     try:
         _market(conn, market_slug)
-        run = StepRun(conn, market_slug, _clean_limit(limit), bool(dry_run), bool(confirm), progress, path)
+        run = StepRun(conn, market_slug, _clean_limit(limit), bool(dry_run), bool(confirm), progress, path,
+                      approved)
         res = RUNNERS[key](run)
     except ValueError as exc:  # IngestError is a ValueError; messages are written for Seth
         return _result(key, ok=False, message=str(exc))
@@ -537,7 +541,7 @@ def _run_photos_all(run: StepRun) -> dict:
     if not run.dry_run:
         _fresh_scores(run.conn, run.market)
     raw = imagery_photos_all.run(run.conn, run.market, limit=run.limit, dry_run=run.dry_run, confirm=run.confirm,
-                                 progress=run.progress)
+                                 progress=run.progress, approved=run.approved)
     return _from_module("photos_all", raw)
 
 

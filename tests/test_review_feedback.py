@@ -116,6 +116,29 @@ def test_scorecard_right_by_label_and_learning_over_time(tmp_root, conn, setting
     assert len(learn["trend"]) >= 2 and learn["trend"][-1]["pct"] == 100.0
 
 
+def test_calibrate_does_not_rewrite_the_scorecard_history(conn, settings):
+    """The scorecard judges the call you answered Yes/No to, not a later Calibrate pass."""
+    import json as _json
+
+    class Always(vision.MockBackend):
+        def classify(self, image_paths, prompt, *, schema=None):
+            return _json.dumps({"label": "INTERIOR_CORRIDOR", "p_target": 3, "image_quality": "good",
+                                "visible_cues": ["hall"], "reasons": "Inside halls.", "property_visible": True})
+    for _ in range(6):
+        pid = add(conn, settings, **ai("DIRECT_ENTRY", 90, 90))
+        save_review(conn, pid, agreed=True)
+    before = scorecard(conn, MARKET)
+    assert before["ai_right"] == 6 and before["label_accuracy"] == 100.0
+    res = review.calibrate(conn, MARKET, backend=Always())
+    assert res["classified"] == 6
+    after = scorecard(conn, MARKET)
+    assert after["ai_right"] == 6 and after["label_accuracy"] == 100.0          # history kept
+    assert {b["label"]: b["right"] for b in after["by_label"]}["DIRECT_ENTRY"] == 6
+    assert after["learning"]["recent"]["right"] == 6
+    assert after["current_right"] == 0 and after["current_accuracy"] == 0.0     # the fresh pass, reported apart
+    assert "This fresh pass matched your answer on 0%" in res["message"]
+
+
 def test_learning_says_when_it_is_too_early(conn, settings):
     for _ in range(4):
         _reviewed(conn, settings, "INTERIOR_CORRIDOR", "INTERIOR_CORRIDOR", 5)

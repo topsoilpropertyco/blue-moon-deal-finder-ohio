@@ -339,6 +339,7 @@ class JobIn(BaseModel):
     limit: int | None = Field(default=None, ge=1)
     dry_run: bool = False
     confirm: bool = False
+    approved: int | None = Field(default=None, ge=0)
 
 
 class LoginIn(BaseModel):
@@ -877,7 +878,8 @@ def estimate(slug: str, conn: Conn, limit: int | None = Query(None, ge=1)) -> di
 def start_job(slug: str, body: JobIn, conn: Conn) -> dict:
     require_market(conn, slug)
     start = optional_function("jobs", "start_job", "Background jobs")
-    job_id = start(body.step, slug, {"limit": body.limit, "dry_run": body.dry_run, "confirm": body.confirm})
+    job_id = start(body.step, slug, {"limit": body.limit, "dry_run": body.dry_run, "confirm": body.confirm,
+                                     "approved": body.approved})
     job = optional_function("jobs", "get_job", "Background jobs")(job_id)
     return {"job_id": job_id, "job": job}
 

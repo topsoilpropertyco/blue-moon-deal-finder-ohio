@@ -595,19 +595,24 @@ def scorecard(conn: sqlite3.Connection, market_slug: str) -> dict:
     ac = settings.asset_class(market["asset_class"])
     labels = labels_of(ac)
     reviewed = rows(conn, _REVIEWED_SQL, (market["id"],))
-    with_ai = [r for r in reviewed if r.get("ai_label") and r.get("checked_at")]
+    live = [r for r in reviewed if r.get("ai_label") and r.get("checked_at")]
+    # Judge the AI on the call you answered Yes/No to: a later Calibrate rewrites visual_checks.ai_label, but the
+    # example library keeps what the AI said when you reviewed it.
+    first = {rec.property_id: rec.ai_label for rec in _latest_per_property(read_examples(settings)) if rec.ai_label}
+    with_ai = [{**r, "ai_label": first.get(r["property_id"], r["ai_label"])} for r in live]
+    current_right = sum(1 for r in live if r["ai_label"] == r["reviewed_label"])
     confusion = {t: {a: 0 for a in labels} for t in labels}
     agree = 0
     binary_right = binary_n = 0
     buckets: dict[str, dict] = {c: {"color": c, "n": 0, "target": 0, "not_target": 0, "unknown": 0}
                                 for c in ("green", "yellow", "red", "na")}
-    for r in with_ai:
+    for r, now in zip(with_ai, live):
         truth_label, ai_label = r["reviewed_label"], r["ai_label"]
         if truth_label in confusion and ai_label in confusion[truth_label]:
             confusion[truth_label][ai_label] += 1
         agree += int(truth_label == ai_label)
         truth = truth_of(truth_label, ac)
-        b = buckets[_ai_color(r, ac, cfg, settings)]
+        b = buckets[_ai_color(now, ac, cfg, settings)]   # colors come from the saved ai_p with its own label
         b["n"] += 1
         b["unknown" if truth is None else ("target" if truth else "not_target")] += 1
         guess = truth_of(ai_label, ac)
@@ -630,6 +635,7 @@ def scorecard(conn: sqlite3.Connection, market_slug: str) -> dict:
         "target_name": _target_name(ac),
         "reviewed": len(reviewed), "with_ai": len(with_ai), "ai_right": agree,
         "label_accuracy": _pct(agree, len(with_ai)),
+        "current_right": current_right, "current_accuracy": _pct(current_right, len(live)),
         "by_label": _by_label(with_ai, labels, ac),
         "learning": _learning(with_ai, cfg.learning_window),
         "target_accuracy": _pct(binary_right, binary_n),
@@ -754,7 +760,11 @@ def calibrate(conn: sqlite3.Connection, market_slug: str, backend: Any = None, *
     card = scorecard(conn, market_slug)
     card["calibrated_at"] = now_iso()
     write_scorecard(card, settings)
-    msg = f"Calibrate: checked {run.get('classified', 0):,} reviewed properties again. {card['message']}"
+    msg = f"Calibrate: checked {run.get('classified', 0):,} reviewed properties again."
+    if card["current_accuracy"] is not None:
+        msg += (f" This fresh pass matched your answer on {card['current_accuracy']:.0f}% of "
+                f"{card['with_ai']:,}. The scorecard still judges the AI on the calls you answered.")
+    msg += f" {card['message']}"
     if run.get("error"):
         msg += f" Stopped early: {run['error']}"
     return {**run, "scorecard": card, "message": msg}

@@ -51,6 +51,7 @@ MAX_LIST = 200
 PID_KEY = "_pid"                 # stored in params_json so another process can tell whose job it is
 # Steps with a line of their own instead of their market's line.
 OWN_LANES = {"research": "claude:research"}
+ONE_AT_A_TIME = frozenset({"photos_all"})   # paid steps that never queue twice in one market (one OK, one run)
 
 Progress = Callable[[float, str], None]
 Execute = Callable[[sqlite3.Connection, str, str, "JobParams", Progress], dict]
@@ -70,6 +71,7 @@ class JobParams(BaseModel):
     limit: int | None = Field(None, ge=1)
     dry_run: bool = False
     confirm: bool = False
+    approved: int | None = Field(None, ge=0)   # the property count Seth said yes to (the one photo button)
     path: str | list[str] | None = None
 
 
@@ -94,7 +96,8 @@ def run_pipeline_step(conn: sqlite3.Connection, kind: str, market_slug: str, par
                       progress: Progress) -> dict:
     """The default job body: one pipeline step."""
     return pipeline.run_step(conn, market_slug, kind, limit=params.limit, dry_run=params.dry_run,
-                             confirm=params.confirm, progress=progress, path=params.path)
+                             confirm=params.confirm, progress=progress, path=params.path,
+                             approved=params.approved)
 
 
 class JobRunner:
@@ -123,6 +126,12 @@ class JobRunner:
             lane = OWN_LANES.get(step, market_slug)
             with self._lock:
                 busy = lane in self._workers
+                twice = step in ONE_AT_A_TIME and not job_params.dry_run and any(
+                    j.kind == step and j.market == market_slug and j.status in ACTIVE and not j.params.dry_run
+                    for j in self._jobs.values())
+            if twice:
+                raise ValueError(f"{pipeline.step_label(step)} is already queued or running for this market. "
+                                 "It carries on by itself; press the button again after it finishes.")
             ahead = "Waiting for the AI research job ahead of it" if lane != market_slug else \
                 "Waiting for the job ahead of it in this market"
             message = ahead if busy else "Starting"

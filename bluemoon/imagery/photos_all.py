@@ -123,8 +123,10 @@ def estimate(conn: sqlite3.Connection, market_slug: str, limit: int | None = Non
     this_run = int(photos.get("within_caps", to_fetch) or 0) if has_key else 0
     google_capped = has_key and this_run < to_fetch
     ai = classify_estimate(conn, market_slug, limit, be)
-    waiting, cached = int(ai.get("properties") or 0), int(ai.get("cached") or 0)
-    ai_total = waiting + this_run
+    cached = int(ai.get("cached") or 0)
+    # A lead with some photos saved and one still missing is in both lists: count each property once.
+    photo_ids = set(photos.pop("within_caps_ids", None) or []) if has_key else set()
+    ai_total = len(set(ai.pop("property_ids", None) or []) | photo_ids)
     if limit is not None:
         ai_total = min(int(limit), ai_total)
     needed = max(0, ai_total - cached)
@@ -136,7 +138,7 @@ def estimate(conn: sqlite3.Connection, market_slug: str, limit: int | None = Non
     usd = round(photo_usd + ai_usd, 2)
     sv = int(photos.get("street_view_images") or 0) if has_key else 0
     sat = int(photos.get("satellite_images") or 0) if has_key else 0
-    properties = this_run + waiting if limit is None else min(int(limit), this_run + waiting)
+    properties = ai_total
     over = vcfg.confirm_over_properties
     needs_confirm = this_run > over or (be.name != "mock" and calls > over)
     nothing = not this_run and not ai_total
@@ -227,11 +229,15 @@ def _pulled_since(conn: sqlite3.Connection, since: str) -> list[int]:
 
 
 def run(conn: sqlite3.Connection, market_slug: str, limit: int | None = None, dry_run: bool = False,
-        confirm: bool = False, progress: Progress = None, backend: Any = None, client: Any = None) -> dict:
+        confirm: bool = False, progress: Progress = None, backend: Any = None, client: Any = None,
+        approved: int | None = None) -> dict:
     """Photos for every lead that has none, then the AI's call on every lead with photos and no call.
 
     limit: at most this many properties (Test on 5). dry_run: the estimate only. confirm: the OK for a run over
-    safety.confirm_over_properties; without it a big run returns needs_confirm and calls nothing."""
+    safety.confirm_over_properties; without it a big run returns needs_confirm and calls nothing.
+    approved: the number of properties that OK was given for (the Run screen sends the estimate it showed). If the
+    job finds more when it starts (new leads came in, or it waited behind another job) and the run needs an OK,
+    it asks again instead of spending."""
     s = get_settings()
     be = _backend(backend, s)
     est = estimate(conn, market_slug, limit, be)
@@ -241,6 +247,10 @@ def run(conn: sqlite3.Connection, market_slug: str, limit: int | None = None, dr
         return {**est, "dry_run": False, "fetched": 0, "checked": 0}
     if est["needs_confirm"] and not confirm:
         return {**est, "dry_run": False, "message": f"Waiting for your OK: {est['message']}"}
+    if est["needs_confirm"] and approved is not None and int(est["properties"]) > int(approved):
+        return {**est, "dry_run": False,
+                "message": f"The numbers changed since you said yes to {_plural(int(approved), 'property', 'properties')}, "
+                           f"so nothing was started. Waiting for your OK again: {est['message']}"}
     if not est["ready"] and not est["photos"]:
         why = est.get("not_ready_reason") or "The AI isn't set up on this computer yet."
         return {**est, "dry_run": False, "error": why, "message": why, "fetched": 0, "checked": 0}

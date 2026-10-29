@@ -705,6 +705,7 @@
     const body = {step: stepKey};
     if (opts.limit) body.limit = opts.limit;
     if (opts.confirm) body.confirm = true;
+    if (opts.approved !== undefined && opts.approved !== null) body.approved = opts.approved;
     S.jobs[stepKey] = {id: null, status: 'queued', done: false, message: 'Starting…', progress: 0, params: body};
     paintCard(stepKey);
     try {
@@ -742,8 +743,10 @@
     const key = b.getAttribute('data-step');
     if (act === 'ph-ask') askPhotos();
     else if (act === 'ph-go') {
+      /* The OK covers the numbers shown: if the job finds more when it starts, it asks again. */
+      const shown = S.phEst && typeof S.phEst === 'object' && !(S.phEst instanceof Error) ? toNum(S.phEst.properties) : null;
       S.phEst = null;
-      start(PHOTO_STEP.key, {confirm: true});
+      start(PHOTO_STEP.key, {confirm: true, approved: shown === null ? 0 : shown});
     } else if (act === 'ph-test') {
       S.phEst = null;
       start(PHOTO_STEP.key, {limit: TEST_N});

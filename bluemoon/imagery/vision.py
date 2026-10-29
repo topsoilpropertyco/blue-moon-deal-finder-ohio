@@ -1301,7 +1301,7 @@ def _estimate(conn: sqlite3.Connection, slug: str, ac: AssetClass, targets: list
     if not ready:
         msg += f" {why}"
     return {"dry_run": True, "enabled": True, "asset_class": ac.key, "backend": backend.name, "model": backend.model,
-            "properties": len(targets), "cached": cached, "calls": planned, "capped": calls > planned,
+            "properties": len(targets), "property_ids": [t.pid for t in targets], "cached": cached, "calls": planned, "capped": calls > planned,
             "est_cost_usd": usd, "ready": ready, "not_ready_reason": why, "examples": len(asker.pool),
             "needs_confirm": backend.name != "mock" and planned > cfg.confirm_over_properties,
             "reviewed_only": reviewed_only, "market": slug, "message": msg}

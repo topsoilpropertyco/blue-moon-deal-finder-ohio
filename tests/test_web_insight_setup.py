@@ -368,7 +368,7 @@ def test_import_preview_then_import(rendered):
     assert all(c["form"] for c in posts)
 
 
-def test_run_cards_and_the_ok_before_spending(rendered):
+def test_run_cards_and_the_ok_before_spending(rendered, fixtures):
     html = rendered["run"]
     for text in ("Run the pipeline", "Owners", "Drive times", "Rent", "Photos", "Photo check", "Score",
                  "DRILL auto-stages", "Run everything", "Test on 5", "Estimate", "Recent jobs", "of 11 done"):
@@ -377,8 +377,12 @@ def test_run_cards_and_the_ok_before_spending(rendered):
     assert "Waiting for your OK" in waiting and "Yes, spend it" in waiting and "$4.90" in waiting
     assert "Google Routes (drive times):</b> 2,981 calls" in waiting
     jobs = [c for c in rendered["calls"] if c["key"] == f"POST /api/m/{MARKET}/jobs"]
-    assert [j["body"] for j in jobs] == [{"step": "drive"}, {"step": "drive", "confirm": True},
-                                         {"step": "photos", "limit": 5}, {"step": "photos_all", "confirm": True}]
+    bodies = [j["body"] for j in jobs]
+    assert bodies[:3] == [{"step": "drive"}, {"step": "drive", "confirm": True}, {"step": "photos", "limit": 5}]
+    # "Yes, start it" sends the property count it showed, so a bigger job found later asks again.
+    api = json.loads(fixtures.read_text(encoding="utf-8"))["api"]
+    shown = api[f"GET /api/m/{MARKET}/photos/all?estimate=1"]["estimate"]["properties"]
+    assert bodies[3] == {"step": "photos_all", "confirm": True, "approved": shown} and shown > 0
     keys = [c["key"] for c in rendered["calls"]]
     assert "GET /api/jobs/901" in keys and "POST /api/jobs/901/cancel" in keys
     assert any("Stopping at the next safe point" in t for t in rendered["toasts"])
