@@ -20,6 +20,7 @@
   const TEST_N = 5;
   const EST_FRESH_MS = 60000;
   const RECENT_N = 10;
+  const PHOTO_COUNT_MS = 3000;    // refresh the photo button's count this often while its job runs
   const ACTIVE = ['queued', 'running'];
 
   /* The steps, top to bottom in the order to do them. `layers`: keys in summary.layers. `go`: a screen where a
@@ -62,15 +63,15 @@
   ];
   const LIST = STEPS.filter((st) => st.key !== 'all');
 
-  /* The monthly photo goal: two jobs that pull photos and then run the AI check for the next batch (see imagery/monthly.py). */
-  const MONTH_STEPS = [
-    {key: 'photo_batch', title: 'Photos and AI check: next batch', month: true},
-    {key: 'photo_keep_going', title: 'Photos and AI check: keep going', month: true},
-  ];
-  const isMonthKey = (key) => MONTH_STEPS.some((st) => st.key === key);
+  /* The one photo button: photos for every lead with none, then the AI's call on each, as one job (imagery/photos_all.py). */
+  const PHOTO_STEP = {key: 'photos_all', title: 'Photos and the AI\'s call for every lead', photo: true};
+  const isPhotoKey = (key) => key === PHOTO_STEP.key;
 
   const S = {
-    root: null, market: null, ctx: null, month: null,
+    root: null, market: null, ctx: null,
+    ph: null,          // the photo button's status ("312 of 2,981 done"), or an Error
+    phEst: null,       // its estimate once pressed: null | 'loading' | Error | the estimate
+    phAt: 0,           // when the photo count was last refreshed during a run
     est: null, estAt: 0, estBusy: false, estAgain: false, estError: null, estShown: new Set(),
     jobs: {},          // step key -> latest job this session (kept until dismissed)
     recent: null,      // recent jobs list, or an Error
@@ -80,7 +81,7 @@
   function resetForMarket() {
     stopPolling();
     Object.assign(S, {est: null, estAt: 0, estBusy: false, estAgain: false, estError: null, estShown: new Set(), jobs: {},
-      recent: null, month: null});
+      recent: null, ph: null, phEst: null});
   }
 
   /* ---------- context: summary, health, settings ---------- */
@@ -267,11 +268,10 @@
           go: step.go, jump: step.go ? null : step.key, label: step.go ? step.goLabel : 'Go to step'});
       }
     });
-    const m = S.month;
-    if (m && m.enabled && !m.reached && c.google && ((m.pool || {}).total || m.ai_waiting)) {
-      out.unshift({key: 'month', html: '<b>Photos and AI check:</b> ' + num(m.done) + ' of ' + num(m.target) +
-        ' done in ' + esc(m.month) + '. Press <b>Keep going</b> to pull the next photos and let the AI look at them.',
-        jump: 'month', label: 'Show'});
+    const p = S.ph;
+    if (p && p.enabled && (c.google ? (p.photos_left || {}).total || p.ai_left : p.ai_left)) {
+      out.unshift({key: 'photos', html: '<b>Photos and the AI\'s ' + esc(String(p.target_name || 'photo').toLowerCase()) + ' call:</b> ' +
+        num(p.done) + ' of ' + num(p.total) + ' done. One button below does the rest.', jump: 'photos', label: 'Show'});
     }
     return out.slice(0, 3);
   }
@@ -432,7 +432,7 @@
       (usd !== null ? '<p class="vw-tight"><b>Estimated cost: ' + money(usd) + '</b> after Google\'s free monthly calls.</p>' : '') +
       '<div class="bar vw-actions"><button type="button" class="btn primary" data-ru="confirm" data-step="' + esc(step.key) + '"' +
       (limit ? ' data-limit="' + limit + '"' : '') + '>' +
-      (step.month ? 'Yes, go ahead' + (usd !== null ? ' (about ' + money(usd) + ')' : '') : 'Yes, spend it') + '</button>' +
+      (step.photo ? 'Yes, start it' + (usd !== null ? ' (about ' + money(usd) + ')' : '') : 'Yes, spend it') + '</button>' +
       '<button type="button" class="btn" data-ru="dismiss" data-step="' + esc(step.key) + '">Not now</button></div></div>';
   }
 
@@ -516,7 +516,7 @@
   }
 
   function stepByKey(key) {
-    return STEPS.find((s) => s.key === key) || MONTH_STEPS.find((s) => s.key === key) || null;
+    return STEPS.find((s) => s.key === key) || (isPhotoKey(key) ? PHOTO_STEP : null);
   }
 
   function cardEl(key) {
@@ -524,7 +524,7 @@
   }
 
   function paintCard(key) {
-    if (isMonthKey(key)) return paintMonth();
+    if (isPhotoKey(key)) return paintPhotos();
     const el = cardEl(key);
     const step = stepByKey(key);
     if (!el || !step || !S.ctx) return;
@@ -539,7 +539,7 @@
   function paintAll() {
     if (!S.root || !S.root.isConnected) return;
     STEPS.forEach((s) => paintCard(s.key));
-    paintMonth();
+    paintPhotos();
     markFirstNext();
     paintNext();
   }
@@ -557,7 +557,7 @@
 
   /** While a job runs, move its bar and message in place (keeps keyboard focus on Cancel). */
   function paintJob(key) {
-    const el = isMonthKey(key) ? (S.root && S.root.querySelector('[data-ru-month]')) : cardEl(key);
+    const el = isPhotoKey(key) ? (S.root && S.root.querySelector('[data-ru-photos]')) : cardEl(key);
     const job = S.jobs[key];
     if (!el) return;
     const live = el.querySelector('.ru-live');
@@ -618,7 +618,7 @@
   function adoptActive(list) {
     let found = false;
     list.slice().reverse().forEach((j) => {
-      if (!isActive(j) || !stepByKey(j.kind)) return;       // (the monthly photo jobs are steps too)
+      if (!isActive(j) || !stepByKey(j.kind)) return;       // (the photo button's job is a step too)
       const mine = S.jobs[j.kind];
       if (!mine || mine.id !== j.id) {
         S.jobs[j.kind] = j;
@@ -658,6 +658,10 @@
         }
         if (market !== S.market || !fresh) return undefined;
         S.jobs[key] = fresh;
+        if (isActive(fresh) && isPhotoKey(key) && Date.now() - S.phAt > PHOTO_COUNT_MS) {
+          S.phAt = Date.now();
+          loadPhotos();          // keep "312 of 2,981 done" moving while the photo job runs
+        }
         if (isActive(fresh)) paintJob(key);
         else {
           finished = true;
@@ -689,7 +693,7 @@
     } catch (e) { /* keep the old layer numbers */ }
     paintAll();
     loadRecent();
-    loadMonth();
+    loadPhotos();
     if (S.estShown.size) loadEstimate(true);   // keep any open estimate boxes current
   }
 
@@ -736,16 +740,23 @@
     if (!b || b.disabled) return;
     const act = b.getAttribute('data-ru');
     const key = b.getAttribute('data-step');
-    if (act === 'month-test') start('photo_batch', {limit: TEST_N});
-    else if (act === 'month-batch') start('photo_batch', {});
-    else if (act === 'month-go') start('photo_keep_going', {});
-    else if (act === 'run') start(key, {});
+    if (act === 'ph-ask') askPhotos();
+    else if (act === 'ph-go') {
+      S.phEst = null;
+      start(PHOTO_STEP.key, {confirm: true});
+    } else if (act === 'ph-test') {
+      S.phEst = null;
+      start(PHOTO_STEP.key, {limit: TEST_N});
+    } else if (act === 'ph-close') {
+      S.phEst = null;
+      paintPhotos();
+    } else if (act === 'run') start(key, {});
     else if (act === 'test') start(key, {limit: TEST_N});
     else if (act === 'confirm') start(key, {confirm: true, limit: toNum(b.getAttribute('data-limit'))});
     else if (act === 'cancel') cancel(b.getAttribute('data-id'));
     else if (act === 'go') BM.go(b.getAttribute('data-go'));
     else if (act === 'jump') {
-      const row = key === 'month' ? (S.root && S.root.querySelector('[data-ru-month]')) : cardEl(key);
+      const row = key === 'photos' ? (S.root && S.root.querySelector('[data-ru-photos]')) : cardEl(key);
       if (row && row.scrollIntoView) row.scrollIntoView({behavior: 'smooth', block: 'center'});
     }
     else if (act === 'dismiss') {
@@ -767,87 +778,119 @@
     }
   }
 
-  /* ---------- the monthly photo goal ---------- */
+  /* ---------- the one photo button ---------- */
 
-  function monthBusy() {
-    return MONTH_STEPS.some((st) => isActive(S.jobs[st.key]));
+  function photoBusy() {
+    return isActive(S.jobs[PHOTO_STEP.key]);
   }
 
-  function estText(label, e) {
+  function photoEstHtml() {
+    const e = S.phEst;
     if (!e) return '';
-    const ai = e.backend === 'anthropic_api' ? ' and the AI check' : '';
-    return '<li><b>' + esc(label) + ':</b> ' + (toNum(e.photos) ? plural(e.photos, 'property', 'properties') + ' to photograph' : 'no new photos') +
-      ', ' + plural(e.ai_checks, 'AI check') + ' · about <b>' + money(e.usd) + '</b> for Google' + ai +
-      (e.needs_confirm ? ' · asks for your OK first' : '') + '</li>';
+    let inner;
+    let buttons = '<button type="button" class="btn" data-ru="ph-close">Close</button>';
+    if (e === 'loading') inner = H.loading('Counting properties, photos and cost (nothing is called)…');
+    else if (e instanceof Error) inner = '<p class="note">' + esc(e.message) + '</p>';
+    else {
+      const usd = toNum((e.cost || {}).usd) || 0;
+      inner = '<ul class="ru-phlines">' + (e.lines || []).map((l) => '<li>' + esc(l) + '</li>').join('') + '</ul>' +
+        (e.nothing_to_do ? '' : '<p class="vw-tight"><b>About ' + money(usd) + ' in all</b>' +
+          (usd === 0 ? ' (Google\'s free monthly allowance covers it)' : '') + '.</p>');
+      const canStart = !e.nothing_to_do && (toNum(e.photos) || e.ready !== false);
+      if (canStart) {
+        buttons = '<button type="button" class="btn primary" data-ru="ph-go">Yes, start it' +
+          (usd ? ' (about ' + money(usd) + ')' : '') + '</button>' +
+          '<button type="button" class="btn" data-ru="ph-close">Not now</button>';
+      }
+    }
+    return '<div class="ru-est ru-phest" role="region" aria-label="What it will do"><div class="ru-boxhead"><b>Before it starts</b>' +
+      '<span class="note">estimate, nothing called yet</span></div>' + inner +
+      '<div class="bar vw-actions">' + buttons + '</div></div>';
   }
 
-  function monthBody(c) {
-    const m = S.month;
-    if (m === null) return H.loading('Counting this month\'s photos…');
-    if (m instanceof Error) return '<p class="note">' + esc(m.message) + '</p>';
-    if (!m.enabled) return '<p class="note">' + esc(m.message || 'No monthly photo goal for this market.') + '</p>';
-    const pool = m.pool || {};
-    const off = monthBusy() ? ' disabled' : '';
-    const noKey = !c.google;
-    const est = m.estimate || null;
-    const left = [];
-    if (pool.buybox) left.push(plural(pool.buybox, 'buy-box property', 'buy-box properties') + ' with no photos');
-    if (pool.rest) left.push(num(pool.rest) + ' more outside the buy box');
-    if (m.ai_waiting) left.push(plural(m.ai_waiting, 'photo set') + ' waiting for the AI');
-    return '<div class="ru-monthhead"><p class="ru-monthnum"><b>' + num(m.done) + '</b> of <b>' + num(m.target) + '</b> done this month' +
-      '<span class="note"> · ' + esc(m.month) + '</span></p>' +
-      '<span class="pill ' + (m.reached ? 'good' : '') + '">' + (m.reached ? 'Goal reached' : num(m.remaining) + ' to go') + '</span></div>' +
-      progressBar(m.pct / 100, 'Photos pulled this month', true) +
-      '<p class="note vw-tight">Best Blue Moon score first, buy-box properties before the rest.' +
-      (left.length ? ' Waiting: ' + esc(left.join(', ')) + '.' : ' Nothing waiting right now.') + '</p>' +
-      (noKey ? '<p class="note vw-tight ru-note">Needs the Google key first (Settings has the steps). The AI check can still look at photos you already have.</p>' : '') +
+  function photoBody(c) {
+    const p = S.ph;
+    if (p === null) return H.loading('Counting photos and AI calls…');
+    if (p instanceof Error) return '<p class="note">' + esc(p.message) + '</p>';
+    if (!p.enabled) return '<p class="note">' + esc(p.message || 'No photo check for this market.') + '</p>';
+    const off = photoBusy() || S.phEst === 'loading' ? ' disabled' : '';
+    const left = p.photos_left || {};
+    const waiting = [];
+    if (left.total) {
+      waiting.push(plural(left.total, 'lead') + ' with no photos yet' +
+        (left.buybox ? ' (' + num(left.buybox) + ' in the buy box, done first)' : ''));
+    }
+    if (p.ai_left) waiting.push(plural(p.ai_left, 'lead') + ' with photos waiting for the AI');
+    const target = String(p.target_name || 'photo').toLowerCase();
+    const allDone = p.total && !p.left;
+    return '<div class="ru-phhead"><p class="ru-phnum"><b>' + num(p.done) + '</b> of <b>' + num(p.total) + '</b> done</p>' +
+      '<span class="pill ' + (allDone ? 'good' : '') + '">' + (allDone ? 'All done' : num(p.left) + ' to go') + '</span></div>' +
+      progressBar(p.total ? p.done / p.total : 0, 'Leads with the AI\'s call', true) +
+      '<p class="note vw-tight">Every lead gets Street View and satellite photos, then the AI says whether it is a ' + esc(target) +
+      '. You check its calls in Photo review.' + (waiting.length ? ' Waiting: ' + esc(waiting.join(', ')) + '.' : '') +
+      (p.no_location ? ' ' + esc(plural(p.no_location, 'lead has', 'leads have')) + ' no map location yet.' : '') + '</p>' +
+      (c.google ? '' : '<p class="note vw-tight ru-note">Needs the Google key for new photos (Settings has the steps). The AI can still look at photos you already have.</p>') +
       '<div class="bar ru-actions">' +
-      '<button type="button" class="btn" data-ru="month-test"' + off + ' title="Photos and the AI check for ' + TEST_N + ' properties">Test on ' + TEST_N + '</button>' +
-      '<button type="button" class="btn" data-ru="month-batch"' + off + '>Do the next ' + num(m.batch) + '</button>' +
-      '<button type="button" class="btn primary" data-ru="month-go"' + off + ' title="Batch after batch until the monthly goal">Keep going</button></div>' +
-      (est ? '<ul class="ru-skus ru-monthest">' + estText('Test on ' + TEST_N, est.test) + estText('Next ' + num(m.batch), est.batch) +
-        estText(m.reached ? 'Keep going (one more batch)' : 'Keep going (' + num(m.keep_going_to) + ' more)', est.keep_going) + '</ul>' :
-        '<p class="note vw-tight">Counting the cost (nothing is called)…</p>') +
-      '<p class="note vw-tight">Change the goal or the batch size in Settings (Monthly photo goal). Runs over ' + num(c.confirmOver) +
-      ' properties ask for your OK, with the cost, before spending.</p>';
+      '<button type="button" class="btn primary ru-phbtn" data-ru="ph-ask"' + off + '>' +
+      esc(p.button || 'Get photos and the AI\'s call for every lead') + '</button>' +
+      '<button type="button" class="btn" data-ru="ph-test"' + off + ' title="Photos and the AI\'s call for ' + TEST_N +
+      ' properties">Test on ' + TEST_N + '</button></div>' +
+      photoEstHtml() +
+      '<p class="note vw-tight">It shows the cost first and starts on your OK. Stopped, cancelled or hit a limit? Press it again: ' +
+      'it carries on where it left off, and photos and answers you already have are never paid for twice.</p>';
   }
 
-  function monthJobs() {
-    return MONTH_STEPS.map((st) => jobHtml(st)).join('');
-  }
-
-  function monthHtml(c) {
+  function photosHtml(c) {
     if (c.ac && c.ac.visual_enabled === false) return '';
-    return '<section class="panel ru-month" data-ru-month aria-label="Photos and AI check for this month"><div class="ru-top"><h2>Photos and AI check for this month</h2>' +
+    return '<section class="panel ru-photos" data-ru-photos aria-label="Photos and the AI\'s call for every lead">' +
+      '<div class="ru-top"><h2>Photos and the AI\'s call for every lead</h2>' +
       '<span class="pill warn">Google photos + your Claude plan</span></div>' +
-      '<div data-ru-monthbody>' + monthBody(c) + '</div><div data-ru-monthjobs>' + monthJobs() + '</div></section>';
+      '<div data-ru-photobody>' + photoBody(c) + '</div><div data-ru-photojob>' + jobHtml(PHOTO_STEP) + '</div></section>';
   }
 
-  function paintMonth() {
-    const box = S.root && S.root.isConnected ? S.root.querySelector('[data-ru-month]') : null;
+  function paintPhotos() {
+    const box = S.root && S.root.isConnected ? S.root.querySelector('[data-ru-photos]') : null;
     if (!box || !S.ctx) return;
-    const live = box.querySelector('.ru-live');
-    const job = live ? MONTH_STEPS.map((st) => S.jobs[st.key]).find((j) => j && isActive(j)) : null;
-    if (live && job && live.getAttribute('data-job-id') === String(job.id)) return;   // paintJob moves its bar in place
-    const body = S.root.querySelector('[data-ru-monthbody]');
-    const jobs = S.root.querySelector('[data-ru-monthjobs]');
-    if (!body || !jobs) return;
-    body.innerHTML = monthBody(S.ctx);
-    jobs.innerHTML = monthJobs();
+    const body = S.root.querySelector('[data-ru-photobody]');
+    const jobBox = S.root.querySelector('[data-ru-photojob]');
+    if (body) body.innerHTML = photoBody(S.ctx);
+    const live = jobBox && jobBox.querySelector ? jobBox.querySelector('.ru-live') : null;
+    const job = S.jobs[PHOTO_STEP.key];
+    if (live && isActive(job) && live.getAttribute('data-job-id') === String(job.id)) return;   // paintJob moves its bar
+    if (jobBox) jobBox.innerHTML = jobHtml(PHOTO_STEP);
   }
 
-  async function loadMonth() {
+  async function loadPhotos() {
     const market = S.market;
     try {
-      const m = await BM.api(H.mpath('/photos/month?estimate=1'));
+      const p = await BM.api(H.mpath('/photos/all'));
       if (market !== S.market) return;
-      S.month = m || {enabled: false};
+      S.ph = p || {enabled: false};
     } catch (err) {
       if (market !== S.market) return;
-      S.month = err;
+      S.ph = err;
     }
-    paintMonth();
+    paintPhotos();
     paintNext();
+  }
+
+  /** The big button: show what it would do and cost (a dry run); then one "Yes, start it" starts the job. */
+  async function askPhotos() {
+    const market = S.market;
+    S.phEst = 'loading';
+    paintPhotos();
+    try {
+      const p = await BM.api(H.mpath('/photos/all?estimate=1'));
+      if (market !== S.market) return;
+      S.phEst = (p && p.estimate) || new Error('No estimate came back. Try again.');
+      if (p && p.enabled !== undefined) S.ph = p;
+    } catch (err) {
+      if (market !== S.market) return;
+      S.phEst = err;
+    }
+    paintPhotos();
+    const box = S.root && S.root.querySelector ? S.root.querySelector('.ru-phest') : null;
+    if (box && box.scrollIntoView) box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
   }
 
   /* ---------- page ---------- */
@@ -862,7 +905,7 @@
   }
 
   function page(c) {
-    return heading(c) + '<div data-ru-next>' + nextHtml(c) + '</div>' + monthHtml(c) +
+    return heading(c) + '<div data-ru-next>' + nextHtml(c) + '</div>' + photosHtml(c) +
       '<ol class="ru-list">' + LIST.map((s) => card(s, c)).join('') + '</ol>' +
       '<div class="bar ru-toolbar"><button type="button" class="btn" data-ru="estimate-all">Estimate everything</button>' +
       '<span class="note">Counts calls and dollars without calling anything.</span></div>' +
@@ -870,7 +913,7 @@
       '<section class="vw-sec"><h2 class="vw-sub">Recent jobs</h2><div data-ru-recent>' + recentHtml() + '</div></section>';
   }
 
-  async function render(root) {
+  async function render(root, params) {
     if (S.market !== BM.state.market) {
       resetForMarket();
       S.market = BM.state.market;
@@ -895,8 +938,12 @@
     root.addEventListener('click', onClick);
     if (Object.values(S.jobs).some(isActive)) startPolling();
     loadEstimate(false);          // free dry run: tells which steps still have work (no calls are made)
-    loadMonth();                  // this month's photo count and what the next batch would cost (dry run)
+    loadPhotos();                 // "312 of 2,981 done" for the photo button
     await loadRecent();
+    if (params && params[0] === 'photos') {      // linked from Photo review: show the photo button
+      const box = root.querySelector('[data-ru-photos]');
+      if (box && box.scrollIntoView) box.scrollIntoView({behavior: 'smooth', block: 'start'});
+    }
   }
 
   BM.registerView('run', {label: 'Run', group: 'setup', order: 2, render});

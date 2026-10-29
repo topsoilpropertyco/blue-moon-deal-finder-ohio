@@ -34,7 +34,7 @@ from .drill import engine
 from .drill import research as drill_research
 from .enrich import drive, geo, owners, parcels, rent
 from .imagery import calibrate as imagery_calibrate
-from .imagery import monthly as imagery_monthly
+from .imagery import photos_all as imagery_photos_all
 from .imagery import (
     classify_estimate,
     classify_properties,
@@ -53,7 +53,7 @@ PathArg = str | Path | Iterable[str | Path] | None
 # The steps Seth can run, in the order the dashboard lists them.
 STEPS: list[str] = ["import", "owners", "drive", "rent", "parcels", "photos", "classify", "score", "drill", "research", "all"]
 # Also runnable (CLI commands and background jobs), but not part of `all`.
-EXTRA_STEPS: list[str] = ["calibrate", "export", "estimate", "after_import", "photo_batch", "photo_keep_going"]
+EXTRA_STEPS: list[str] = ["calibrate", "export", "estimate", "after_import", "photos_all"]
 STEP_LABELS: dict[str, str] = {
     "import": "Import", "owners": "Owners", "drive": "Drive times", "rent": "Rent check",
     "parcels": "County records", "photos": "Photos",
@@ -61,21 +61,21 @@ STEP_LABELS: dict[str, str] = {
     "all": "Everything",
     "calibrate": "Calibrate the photo check", "export": "Export files", "estimate": "Cost estimate",
     "after_import": "Rank the new import",
-    "photo_batch": "Photos and AI check: next batch", "photo_keep_going": "Photos and AI check: keep going",
+    "photos_all": "Photos and the AI's call for every lead",
 }
 # Other names for the same steps (older docs used visual_fetch / visual_classify).
 STEP_ALIASES: dict[str, str] = {
     "visual_fetch": "photos", "imagery": "photos", "visual_classify": "classify", "vision": "classify",
     "drive_times": "drive", "scores": "score", "rank": "score", "auto": "drill", "everything": "all",
     "ai_research": "research", "web_research": "research", "county_records": "parcels", "county": "parcels",
+    # the old monthly-goal buttons (jobs made before 2026-10-30 still carry these names)
+    "photo_batch": "photos_all", "photo_keep_going": "photos_all", "every_lead": "photos_all",
 }
 # Steps that stop for an OK on big runs. research has no per-call bill, but it uses your Claude plan for hours.
-PAID_STEPS: frozenset[str] = frozenset({"drive", "photos", "classify", "calibrate", "research", "photo_batch",
-                                        "photo_keep_going"})
+PAID_STEPS: frozenset[str] = frozenset({"drive", "photos", "classify", "calibrate", "research", "photos_all"})
 # Run on their own, these steps change what the buy box, colors and rank are made from, so the scores are
 # brought up to date right after (free, about a second). `all` and after_import already have score steps.
-RESCORE_AFTER: frozenset[str] = frozenset({"drive", "rent", "photos", "classify", "calibrate", "photo_batch",
-                                           "photo_keep_going"})
+RESCORE_AFTER: frozenset[str] = frozenset({"drive", "rent", "photos", "classify", "calibrate", "photos_all"})
 # (step, share of the progress bar) for `all` and for the free steps after an import.
 ALL_PLAN: tuple[tuple[str, float], ...] = (
     ("owners", 0.04), ("drive", 0.14), ("rent", 0.14), ("score", 0.04), ("parcels", 0.10),
@@ -96,10 +96,8 @@ COUNT_KEYS: dict[str, tuple[str, ...]] = {
                "satellite_images"),
     "classify": ("properties", "calls", "cached", "classified", "needs_review", "colors", "errors"),
     "calibrate": ("properties", "calls", "classified"),
-    "photo_batch": ("properties", "photos", "fetched", "checked", "calls", "needs_review", "errors",
-                    "done_this_month", "colors"),
-    "photo_keep_going": ("properties", "photos", "fetched", "checked", "calls", "needs_review", "errors", "batches",
-                         "done_this_month", "colors"),
+    "photos_all": ("properties", "photos", "ai_checks", "fetched", "checked", "calls", "needs_review", "errors",
+                   "done", "total", "colors"),
     "score": ("properties", "in_buybox", "excluded", "exclusion_counts", "by_hand"),
     "drill": ("properties", "levels", "changed"),
     "research": ("owners", "properties", "calls", "cached", "researched", "found", "nothing", "contacts_added",
@@ -533,22 +531,14 @@ def _run_classify(run: StepRun) -> dict:
     return _from_module("classify", raw)
 
 
-def _run_photo_batch(run: StepRun) -> dict:
-    """Photos, then the AI check, for the next batch of the monthly photo goal (see imagery/monthly.py)."""
+def _run_photos_all(run: StepRun) -> dict:
+    """The Run screen's one photo button: photos for every lead that has none (buy box first), then the AI's
+    call on every lead with photos and no call yet (see imagery/photos_all.py)."""
     if not run.dry_run:
         _fresh_scores(run.conn, run.market)
-    raw = imagery_monthly.run_batch(run.conn, run.market, limit=run.limit, dry_run=run.dry_run, confirm=run.confirm,
-                                    progress=run.progress)
-    return _from_module("photo_batch", raw)
-
-
-def _run_photo_keep_going(run: StepRun) -> dict:
-    """The same, batch after batch until this month's photo goal is reached."""
-    if not run.dry_run:
-        _fresh_scores(run.conn, run.market)
-    raw = imagery_monthly.run_keep_going(run.conn, run.market, dry_run=run.dry_run, confirm=run.confirm,
-                                         progress=run.progress)
-    return _from_module("photo_keep_going", raw)
+    raw = imagery_photos_all.run(run.conn, run.market, limit=run.limit, dry_run=run.dry_run, confirm=run.confirm,
+                                 progress=run.progress)
+    return _from_module("photos_all", raw)
 
 
 def _run_calibrate(run: StepRun) -> dict:
@@ -647,7 +637,7 @@ RUNNERS: dict[str, Callable[[StepRun], dict]] = {
     "import": _run_import, "owners": _run_owners, "drive": _run_drive, "drive_estimate": _run_drive_estimate,
     "rent": _run_rent, "parcels": _run_parcels, "photos": _run_photos, "classify": _run_classify, "score": _run_score,
     "drill": _run_drill, "research": _run_research, "all": _run_all_steps, "calibrate": _run_calibrate,
-    "export": _run_export, "photo_batch": _run_photo_batch, "photo_keep_going": _run_photo_keep_going,
+    "export": _run_export, "photos_all": _run_photos_all,
     "estimate": _run_estimate, "after_import": _run_after_import,
 }
 

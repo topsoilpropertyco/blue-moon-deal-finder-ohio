@@ -318,14 +318,15 @@ details[open] > .why-rs .why-more .hide{display:inline}
 .ru-wide{margin-top:4px}
 
 /* --- Run: Photos and AI check for this month ---------------------------------------------------------- */
-.ru-month{margin:var(--s6) 0 var(--s2);gap:var(--s4)}
-.ru-month .ru-top h2{font-size:17px;margin:0}
-.ru-monthhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.ru-monthnum{margin:0;font-size:18px}
-.ru-monthnum b{font-size:26px;font-variant-numeric:tabular-nums}
-.ru-monthest{margin:0}
-[data-ru-monthjobs]{display:flex;flex-direction:column;gap:var(--s3)}
-[data-ru-monthjobs]:empty{display:none}
+.ru-photos{margin:var(--s6) 0 var(--s2);gap:var(--s4)}
+.ru-photos .ru-top h2{font-size:17px;margin:0}
+.ru-phhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.ru-phnum{margin:0;font-size:18px}
+.ru-phnum b{font-size:26px;font-variant-numeric:tabular-nums}
+.ru-phlines{margin:4px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px;font-size:14px}
+.ru-phbtn{white-space:normal;text-align:left;line-height:1.25}
+[data-ru-photojob]{display:flex;flex-direction:column;gap:var(--s3)}
+[data-ru-photojob]:empty{display:none}
 .cr-how4{grid-template-columns:repeat(4,minmax(0,1fr))}
 @media (max-width:1100px){.cr-how4{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:760px){.cr-how4{grid-template-columns:1fr}}

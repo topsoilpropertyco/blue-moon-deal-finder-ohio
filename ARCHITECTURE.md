@@ -171,7 +171,8 @@ Every function that writes commits its own transaction.
   Saves to `images/{property_id}/sv_0.jpg, sv_1.jpg, sv_2.jpg, sat.jpg`. Only for asset classes with
   visual_check enabled and properties in the buy box (or all with `include_excluded=True`; buy-box properties always
   go first, best Blue Moon rank first, then the rest the same way). Caps from config. Each time photos are saved
-  `record_pull(conn, property_id)` adds a row to `photo_pulls(property_id, pulled_at)`.
+  `record_pull(conn, property_id)` adds a row to `photo_pulls(property_id, pulled_at)`. The estimate's
+  `within_caps` is how many properties' photos fit under the per-run caps.
 - `vision.py`: backends with `.name` and `.classify(image_paths: list[Path], prompt: str) -> str` —
   `ClaudeCLIBackend` (runs `claude -p` with `--output-format json`, the Read tool allowed for the image dir,
   ANTHROPIC_API_KEY removed from the child env so the Claude plan is used), `AnthropicAPIBackend`, `MockBackend`.
@@ -188,17 +189,20 @@ Every function that writes commits its own transaction.
   database gets the columns on its next connect). Answers saved before this have none. Colors and "unsure" still
   come only from final_p (the same green/yellow/red thresholds). `classify_properties(..., prefer_ids=[...])`
   checks those properties first (the batch whose photos were just pulled).
-- `monthly.py`: the monthly photo goal (`photos:` in config.yaml: `monthly_target` 600, `batch` 100; your own
-  numbers in config.local.yaml). `status(conn, slug)` -> `{done, target, remaining, reached, pool:{buybox, rest},
-  ai_waiting, batch, keep_going_to}` ("412 of 600 done this month": distinct properties in `photo_pulls` this
-  calendar month, local time; photos saved before the table existed are counted once from their files' dates,
-  `backfill`); `photo_pool(conn, slug)` = properties still needing photos, buy box first by rank, then the rest;
-  `estimate_batch(conn, slug, n)` = a dry run of photos + the AI check (calls nothing; `needs_confirm` over
-  `safety.confirm_over_properties`); `run_batch(conn, slug, limit=None, dry_run, confirm, progress)` = photos for
-  the next `limit` (default `batch`) properties with `include_excluded=True`, then the AI check, newly photographed
-  properties first; `run_keep_going(...)` = batches of `batch` until the month's goal (one batch when it is already
-  met), one OK for all of it, stopping at `google.max_*_per_run` and `vision.max_calls_per_run` counted over the
-  whole run, at a fatal problem, or when nothing is left. Never writes anything the two steps it calls would not.
+- `photos_all.py`: the Run screen's one photo button and `run.py photos all`. `status(conn, slug)` ->
+  `{enabled, total, done, left, pct, photos_left:{buybox, rest, total}, ai_left, no_location, target_name, button,
+  message}` ("312 of 2,981 done": properties with an AI call (`ai_label` + `checked_at`) or your answer, out of
+  every property in the market). `estimate(conn, slug, limit=None, backend=None)` = a dry run (calls nothing):
+  photos for every lead with none (`streetview.imagery_estimate(..., include_excluded=True)`, buy box first; only as
+  many as fit under `google.max_*_per_run`, `within_caps`), then the AI's call on every lead with photos and no
+  call (`vision.classify_estimate`, capped at `vision.max_calls_per_run`); returns counts, cost, `needs_confirm`
+  (over `safety.confirm_over_properties`), `google_capped` / `ai_capped`, `nothing_to_do` and `lines` (the
+  plain-English sentences the screen and the CLI show, including what a cap will stop).
+  `run(conn, slug, limit=None, dry_run, confirm, progress, backend, client)` = one OK, then `fetch_imagery(...,
+  include_excluded=True, confirm=True)` and `classify_properties(..., confirm=True)` in one job (with `limit`, the
+  AI checks the properties just pulled first, from `photo_pulls`). Progress messages read "N of M done. ...".
+  Resumable: saved photos and cached answers are skipped, so pressing again after a cancel, a cap or a Claude usage
+  limit carries on. Never writes anything the two steps it calls would not.
 - `review.py`: `review_queue(conn, market_slug, limit=50, offset=0, include_excluded=False, scope=None) -> list[dict]`.
   Order: needs-a-look (final_p NULL) and unsure (21-79) first, then checked-nothing/no-photos, then the AI's calls
   (group `confirm`: green and red) most valuable first (in the buy box, the AI says target, best rank). `scope`
@@ -349,8 +353,9 @@ nothing for 'Not Matched'. A batch's rows are 'sent' (in flight) until Crexi ret
 
 ### pipeline + jobs + exports
 - `bluemoon/pipeline.py`: `STEPS = ["import","owners","drive","rent","parcels","photos","classify","score","drill","research","all"]`
-  (`EXTRA_STEPS` also holds `photo_batch` and `photo_keep_going`: the Run screen's monthly photo goal buttons, both
-  paid steps that re-score afterwards; `all` is unchanged)
+  (`EXTRA_STEPS` also holds `photos_all`, label "Photos and the AI's call for every lead": the Run screen's photo
+  button, a paid step that re-scores afterwards; the old names `photo_batch` and `photo_keep_going` are aliases of it;
+  `all` is unchanged)
   (`parcels`, label "County records", is free and not in `PAID_STEPS`; it runs inside `all` after the first `score`,
   so the buy box is known, and before the paid steps; `after_import` does not run it because it uses the network;
   aliases `county_records` and `county`)
@@ -429,7 +434,7 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | GET | `/api/m/{slug}/drill/queue/{stage_key}?limit=&offset=&scope=` | stage queue (`stage_key=validate` for reach-out queue; `scope` as above) |
 | GET | `/api/m/{slug}/credits` | `{status, plan:[...], extras:[...], planned, planned_all, extra_count, extras_all, other_markets, others:[{slug,name,planned,extras}], shortfall, level1_open, message, log:[...]}` (credits are shared: *_all, shortfall and level1_open count every market) |
 | GET | `/api/m/{slug}/review/queue?limit=&offset=&include_excluded=&scope=` | `{total, scope, counts:{total, scope, scopes:{everything, unsure}, needs_review, unsure, not_checked, no_photos, confirm, spot_check, reviewed}, items}`; `scope` = everything (default) or unsure |
-| GET | `/api/m/{slug}/photos/month?estimate=` | the monthly photo goal: `{enabled, month, target, batch, done, remaining, reached, pct, pool:{buybox, rest, total}, ai_waiting, keep_going_to, message}`; with `estimate=1` also `estimate:{test, batch, keep_going}` each `{properties, photos, ai_checks, calls, usd, needs_confirm, ...}` (dry runs) |
+| GET | `/api/m/{slug}/photos/all?estimate=&limit=` | the photo button: `photos_all.status` (`{enabled, total, done, left, pct, photos_left, ai_left, no_location, target_name, button, message}`); with `estimate=1` also `estimate` (`photos_all.estimate`, a dry run, without `details`); start it with `POST /api/m/{slug}/jobs {"step": "photos_all", "confirm": true}` |
 | GET | `/api/m/{slug}/review/scorecard` | scorecard: confusion matrix, by-color accuracy, acceptance, plus `ai_right`, `by_label`, `learning` |
 | GET | `/api/crexi/status` | `{status (credit_status), open_batches, topup:{suggested,message,close_first,batch_id}, default_count}` |
 | GET | `/api/crexi/history` | `{periods:[{period,label,current,batches:[...],sent,returned,by_hand,not_returned,matched_pct,enrichment}], current}` |

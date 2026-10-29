@@ -116,7 +116,8 @@ CREATE TABLE IF NOT EXISTS visual_checks (
   checked_at TEXT
 );
 
--- One row each time a property's photos are pulled from Google (the monthly photo goal counts these).
+-- One row each time a property's photos are pulled from Google. "Test on 5" on the photo button gives the AI
+-- the properties it just pulled first; the rows are also a log of every pull.
 CREATE TABLE IF NOT EXISTS photo_pulls (
   property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
   pulled_at TEXT NOT NULL          -- UTC, like every other timestamp

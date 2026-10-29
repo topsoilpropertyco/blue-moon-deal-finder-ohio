@@ -208,7 +208,7 @@ async function render(key) {
 
   // Run: a big paid run waits for an OK, then "Yes, spend it" starts it again with confirm.
   const run = await render('run');
-  out.runMonth = text(run);
+  out.runPhotos = text(run);
   await fire(run, 'click', target(Element, {'data-ru': 'run', 'data-step': 'drive'}));
   await tick();
   out.runWaiting = text(run);
@@ -216,10 +216,11 @@ async function render(key) {
   out.runConfirmed = text(run);
   await fire(run, 'click', target(Element, {'data-ru': 'cancel', 'data-id': 901}));
   await fire(run, 'click', target(Element, {'data-ru': 'test', 'data-step': 'photos'}));
-  // The monthly photo goal: Keep going starts the combined job; a big one waits for one click with the cost shown.
-  await fire(run, 'click', target(Element, {'data-ru': 'month-go'}));
-  await tick();
-  out.runMonthWaiting = text(run);
+  // The one photo button: pressing it shows the estimate (a dry run); one "Yes, start it" starts the whole job.
+  await fire(run, 'click', target(Element, {'data-ru': 'ph-ask'}));
+  out.runPhotosEstimate = text(run);
+  await fire(run, 'click', target(Element, {'data-ru': 'ph-go'}));
+  out.runPhotosStarted = text(run);
 
   // A market with no properties: friendly empty states with a way to the Import screen.
   setMarket(fx.empty);
@@ -268,7 +269,7 @@ def fixtures(tmp_root, settings, sample_csv, monkeypatch, tmp_path) -> Path:
 
         upload(f"/api/m/{MARKET}/import/preview", f"/api/m/{MARKET}/import/preview")
         upload(f"/api/m/{MARKET}/import", f"/api/m/{MARKET}/import")
-        for rest in ("/funnel", "/analytics", "/model", "/estimate", "/photos/month?estimate=1"):
+        for rest in ("/funnel", "/analytics", "/model", "/estimate", "/photos/all", "/photos/all?estimate=1"):
             get(f"/api/m/{MARKET}{rest}")
         for path in ("/api/sources", "/api/settings", "/api/health", f"/api/jobs?market={MARKET}&limit=10",
                      f"/api/m/{EMPTY}/funnel", f"/api/m/{EMPTY}/analytics"):
@@ -377,20 +378,26 @@ def test_run_cards_and_the_ok_before_spending(rendered):
     assert "Google Routes (drive times):</b> 2,981 calls" in waiting
     jobs = [c for c in rendered["calls"] if c["key"] == f"POST /api/m/{MARKET}/jobs"]
     assert [j["body"] for j in jobs] == [{"step": "drive"}, {"step": "drive", "confirm": True},
-                                         {"step": "photos", "limit": 5}, {"step": "photo_keep_going"}]
+                                         {"step": "photos", "limit": 5}, {"step": "photos_all", "confirm": True}]
     keys = [c["key"] for c in rendered["calls"]]
     assert "GET /api/jobs/901" in keys and "POST /api/jobs/901/cancel" in keys
     assert any("Stopping at the next safe point" in t for t in rendered["toasts"])
 
 
-def test_run_has_the_monthly_photo_goal_row(rendered):
-    month = rendered["runMonth"]
-    for text in ("Photos and AI check for this month", "of <b>600</b> done this month", "Test on 5",
-                 "Do the next 100", "Keep going", "Change the goal or the batch size in Settings"):
-        assert text in month, text
-    assert "Next 100" in month and "AI check" in month                      # the cost line under the buttons
-    waiting = rendered["runMonthWaiting"]
-    assert "Waiting for your OK" in waiting and "Yes, go ahead (about $4.90)" in waiting   # one click, cost shown
+def test_run_has_one_photo_button(rendered):
+    html = re.sub(r"&#0?39;|&apos;", "'", rendered["runPhotos"])
+    box = html.split("data-ru-photos", 1)[1].split("</section>", 1)[0]
+    for text in ("Photos and the AI's call for every lead", "Get photos and the AI's walk-up call for every lead",
+                 "Test on 5", " done", "It shows the cost first and starts on your OK", "carries on where it left off"):
+        assert text in html, text
+    for gone in ("this month", "Keep going", "Do the next", "monthly", "batch", "goal"):
+        assert gone not in box, gone
+    est = rendered["runPhotosEstimate"]
+    assert "Before it starts" in est and "nothing called yet" in est and "Yes, start it" in est
+    assert "buy box first" in est and "in all" in est
+    assert any(t.startswith("Started: Photos and the AI") for t in rendered["toasts"])
+    keys = [c["key"] for c in rendered["calls"]]
+    assert f"GET /api/m/{MARKET}/photos/all" in keys and f"GET /api/m/{MARKET}/photos/all?estimate=1" in keys
 
 
 def test_exports(rendered):
@@ -404,8 +411,7 @@ def test_exports(rendered):
 def test_settings_shows_keys_as_yes_no_only(rendered):
     html = rendered["settings"]
     for text in ("Markets", "Buy box: Apartments", "20–50 units", "Studio $800", "GOOGLE_MAPS_API_KEY",
-                 "Photo check", "Monthly photo goal", "600 a month, 100 at a time", "config.local.yaml",
-                 "monthly_target: 800", "Google free usage this month", "Where the data lives", "data/bluemoon.sqlite",
+                 "Photo check", "Google free usage this month", "Where the data lives", "data/bluemoon.sqlite",
                  "How to change a setting", "open -e config.yaml", "launchctl kickstart"):
         assert text in html, text
     assert FAKE_KEY not in html

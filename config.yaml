@@ -163,12 +163,6 @@ vision:
   images_per_example: 2          # photos sent per labeled example
   max_consecutive_errors: 3      # stop a run after this many errors in a row
 
-# The monthly photo goal (Run screen: "Photos and AI check for this month"). Put your own numbers in
-# config.local.yaml (see config.local.yaml.example); updates never touch that file.
-photos:
-  monthly_target: 600            # properties that should have Street View photos and an AI first look each month
-  batch: 100                     # how many "Do the next 100" does (and what "Keep going" runs in one go)
-
 review:
   default_scope: everything      # everything = the AI's unsure ones first, then every call it made | unsure = unsure only
   learning_window: 50            # Scorecard "learning over time": your latest this-many reviews vs the earlier ones

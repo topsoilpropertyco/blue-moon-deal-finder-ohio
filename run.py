@@ -6,6 +6,7 @@
     uv run run.py all --limit 5
     uv run run.py estimate
     uv run run.py photos --limit 5 --dry-run
+    uv run run.py photos all --limit 5         (photos and the AI's call for every lead; drop --limit for all)
     uv run run.py research --limit 5 --dry-run
     uv run run.py export
     uv run run.py serve
@@ -47,20 +48,21 @@ STEP_HELP = {
     "rent": "HUD rents compared with the rent scale (free).",
     "parcels": "County records: the owner and the tax mailing address from each Ohio county's free public parcel "
                "map, buy box first. Fills the DRILL's county auditor stage (free). Try --limit 5 --dry-run, then --limit 5.",
-    "photos": "Street View + satellite photos for buy-box properties (Google, paid).",
+    "photos": "Street View + satellite photos for buy-box properties (Google, paid). 'photos all': photos for "
+              "every lead that has none (buy box first), then the AI's call on every lead with photos and no call "
+              "yet, in one go. Try 'photos all --limit 5' first; --dry-run shows the cost.",
     "classify": "Claude looks at the photos (your Claude plan).",
     "score": "Buy box, colors, Blue Moon score and rank (free).",
     "drill": "DRILL automatic stages and contact levels (free).",
     "all": "Every step in order: owners, drive, rent, score, county records, photos, classify, score, drill.",
     "calibrate": "Re-check the photos you reviewed and report the photo check's accuracy.",
-    "photo_batch": "Photos, then the AI check, for the next batch of this month's photo goal (config.yaml photos: "
-                   "batch, default 100). Try --limit 5 first.",
-    "photo_keep_going": "Photos and the AI check, batch after batch, until this month's photo goal "
-                        "(photos: monthly_target, default 600) is reached.",
     "research": "AI research: Claude searches the web for each buy-box owner's business filing, officers and agent, "
                 "website, business phone and email, and social pages (your Claude plan; never people-search sites "
                 "or Crexi). Everything it finds stays 'not tested yet'. Try --limit 5 first.",
 }
+
+# Steps typed as two words on the command line.
+COMMAND_WORDS = {"photos_all": "photos all"}
 
 log = logging.getLogger("bluemoon.cli")
 
@@ -109,7 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--force", action="store_true",
                      help="re-import files in the folder that were imported before")
     for name, help_text in STEP_HELP.items():
-        add(name, help_text)
+        p = add(name, help_text)
+        if name == "photos":
+            p.add_argument("what", nargs="?", choices=["all"],
+                           help="all = photos and the AI's call for every lead (the Run screen's photo button)")
     add("estimate", "What every step would do and cost, without calling anything.")
     add("export", "Write ranked_list.xlsx/.csv, excluded_*.csv, crm_handoff.csv, mailing_list.csv, "
                   "drill_worklist.csv and run_summary.md to output/<market>/.")
@@ -147,6 +152,11 @@ def show_result(result: dict, indent: str = "") -> None:
     say(result["message"], indent)
     for w in result.get("warnings") or []:
         say(f"Note: {w}", indent)
+
+
+def show_lines(lines: list[str]) -> None:
+    for line in lines:
+        say(f"- {line}", "  ")
 
 
 def show_steps(steps: list[dict]) -> None:
@@ -226,7 +236,7 @@ def resolve_market(wanted: str | None, settings: Settings) -> str:
 
 def rerun_command(args: argparse.Namespace, market: str) -> str:
     """The command to copy and paste to go ahead with a paid run."""
-    parts = ["uv run run.py", args.command, "--market", market]
+    parts = ["uv run run.py", COMMAND_WORDS.get(args.command, args.command), "--market", market]
     if args.limit:
         parts += ["--limit", str(args.limit)]
     return " ".join(parts + ["--yes"])
@@ -245,6 +255,8 @@ def run_with_ok(args: argparse.Namespace, market: str, run: Callable[[bool], dic
         say()
         say("Before spending money:")
         show_estimate(result["estimate"])
+    elif (result.get("estimate") or {}).get("lines"):
+        show_lines(result["estimate"]["lines"])
     else:
         say((result.get("estimate") or {}).get("message") or result["message"])
     if interactive() and ask_ok():
@@ -273,6 +285,8 @@ def cmd_step(args: argparse.Namespace, conn: sqlite3.Connection, market: str) ->
         say()
     if result["dry_run"] and result.get("estimate", {}).get("steps"):
         show_estimate(result["estimate"])
+    elif result["dry_run"] and result.get("estimate", {}).get("lines"):
+        show_lines(result["estimate"]["lines"])
     else:
         show_result(result)
     say(f"Done in {elapsed(started)}.")
@@ -602,6 +616,8 @@ def dispatch(args: argparse.Namespace, conn: sqlite3.Connection, markets: list[s
         return cmd_estimate(args, conn, market)
     if args.command == "export":
         return cmd_export(args, conn, market)
+    if args.command == "photos" and getattr(args, "what", None) == "all":
+        args.command = "photos_all"
     return cmd_step(args, conn, market)
 
 

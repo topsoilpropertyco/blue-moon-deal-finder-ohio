@@ -198,7 +198,7 @@
         '<button class="btn primary" data-act="restart">Back to the first one</button>');
     }
     if (BM.state.summary && BM.state.summary.properties === 0) {
-      return W.emptyMarket('Then fetch photos and run the photo check from the Run screen.');
+      return W.emptyMarket('Then press the photo button on the Run screen: photos and the AI\'s call for every lead.');
     }
     const reviewed = Number(q.counts.reviewed) || 0;
     if (reviewed || q.done) {
@@ -209,8 +209,9 @@
         '<button class="btn" data-go="review" data-params="scorecard">See the scorecard</button>');
     }
     return BM.ui.empty('No photos to review yet',
-      'Photos come from Google Street View. Add your Google key to .env, then run Photos and then Photo check from the Run screen. Anything the AI is unsure about lands here.',
-      '<button class="btn primary" data-go="run">Open the Run screen</button>');
+      'One button on the Run screen gets Street View photos for every lead and the AI\'s call on each (it needs your Google key). ' +
+      'The AI\'s unsure calls land here first, then every call it made, for your Yes or No.',
+      '<button class="btn primary" data-go="run" data-params="photos">Get photos and the AI\'s call for every lead</button>');
   }
 
   function sortedImages(images) {
@@ -421,7 +422,7 @@
     S.mode = 'scorecard';
     paint(head('scorecard') + W.loading('Loading the scorecard…'));
     if (BM.state.summary && BM.state.summary.properties === 0) {
-      paint(head('scorecard') + W.emptyMarket('Then fetch photos, run the photo check and answer a few cards.'));
+      paint(head('scorecard') + W.emptyMarket('Then press the photo button on the Run screen and answer a few cards.'));
       return;
     }
     try {
