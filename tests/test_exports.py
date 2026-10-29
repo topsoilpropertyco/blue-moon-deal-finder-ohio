@@ -358,6 +358,26 @@ def test_exports_explain_the_score_and_the_photo_check(ranked, market_slug):
     assert "Why this score" in header and "Photo reasons" in header
 
 
+def test_ranked_list_has_the_ai_building_columns_added_at_the_end_of_the_photo_group(ranked, market_slug):
+    from bluemoon.scoring.rank import compute_scores
+    pid = ranked_ids(ranked)[0]
+    ranked.execute("INSERT OR REPLACE INTO visual_checks(property_id, status, ai_label, ai_p, image_quality, reasons, "
+                   "final_p, checked_at, ai_style, ai_stories, ai_buildings, ai_condition, reviewed_label) "
+                   "VALUES(?, 'done', 'EXTERIOR_CORRIDOR', 90, 'good', 'Walkways.', 90, ?, 'townhome-row', 2, 5, "
+                   "'fair', 'EXTERIOR_CORRIDOR')", (pid, now_iso()))
+    ranked.commit()
+    compute_scores(ranked, market_slug)
+    files = exports.export_market(ranked, market_slug, only=["ranked_list.csv", "ranked_list.xlsx"])
+    first = next(r for r in read_csv(files["ranked_list.csv"]) if int(r["Property ID"]) == pid)
+    assert first["Building style (AI)"] == "Townhome row" and first["Stories (AI estimate)"] == "2"
+    assert first["Buildings seen (AI)"] == "5" and first["Condition (AI)"] == "fair"
+    assert first["Photo answer from"] == "You (agreed with the AI)"
+    header = [c.value for c in load_workbook(files["ranked_list.xlsx"])["Ranked"][1]]
+    for old in ("Photo label", "Photo check %", "Photo color", "Photo needs review", "Photo reasons"):
+        assert old in header                                           # nothing renamed
+    assert header.index("Building style (AI)") == header.index("Photo reasons") + 1
+
+
 def test_export_without_stamping_leaves_handoffs_alone(ranked, market_slug):
     pid = ranked_ids(ranked)[0]
     engine.level_action(ranked, pid, "confirm", person="Pat Example")

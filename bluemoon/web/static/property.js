@@ -719,6 +719,9 @@
     if (v.image_quality) facts.push('Photo quality: ' + v.image_quality);
     if (v.property_visible === false) facts.push('The building is not visible in the photos');
     if (v.reasons) parts.push('<p class="note" style="margin:0">' + esc(v.reasons) + '</p>');
+    if (v.details_text) parts.push('<p class="note" style="margin:0"><b>The AI\'s read of the building:</b> ' + esc(v.details_text) + '. <span class="muted">(an estimate from the photos)</span></p>');
+    if (v.reviewed_label && v.agreed_with_ai === true) parts.push('<p class="note" style="margin:0">You agreed with the AI.</p>');
+    else if (v.reviewed_label && v.agreed_with_ai === false) parts.push('<p class="note" style="margin:0">You corrected the AI (it had said ' + esc(labelText(v.ai_label)) + ').</p>');
     if (facts.length) parts.push('<p class="note" style="margin:0">' + esc(facts.join(' · ')) + '</p>');
     const cues = Array.isArray(v.cues) ? v.cues.filter(Boolean) : [];
     if (cues.length) parts.push('<div class="p-cues">' + cues.map((c) => '<span class="pill">' + esc(typeof c === 'string' ? c : JSON.stringify(c)) + '</span>').join('') + '</div>');

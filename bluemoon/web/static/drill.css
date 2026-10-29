@@ -288,3 +288,31 @@ body:has(.dr-outcomes.dr-stick) .toast{bottom:calc(env(safe-area-inset-bottom,0p
 .dr-place{margin:6px 0 0;font-size:16px;color:var(--ink)}
 .dr-addphoto{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .dr-addphoto .note{flex:1;min-width:200px}
+
+/* --- photo review: the AI's call, Yes / No, the scope toggle, scorecard extras ---------------------- */
+.dr-scope{align-self:flex-start;margin:var(--s3) 0 0;max-width:100%;flex-wrap:wrap}
+.dr-verdict{border-radius:12px;padding:10px 14px;background:var(--sunk);border-left:4px solid var(--na);display:flex;flex-direction:column;gap:2px}
+.dr-verdict.is-target{border-left-color:var(--good)}
+.dr-verdict.not-target{border-left-color:var(--na)}
+.dr-verdict-t{margin:0;font-size:16px}
+.dr-yn{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--s3)}
+.dr-yn button{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:56px;padding:10px 14px;border-radius:14px;border:2px solid var(--line);background:var(--surface);font-size:15px;text-align:left}
+.dr-yn button b{font-weight:650}
+.dr-yn .dr-yes{border-color:var(--good)}
+.dr-yn .dr-yes:hover{background:var(--good);color:var(--surface)}
+.dr-yn .dr-no{border-color:var(--bad)}
+.dr-yn .dr-no[aria-expanded="true"],.dr-yn .dr-no:hover{background:var(--bad);color:var(--surface)}
+.dr-yn button:disabled{opacity:.5;cursor:default}
+.dr-pctcell{white-space:nowrap}
+.dr-pctbar{display:inline-block;width:70px;height:8px;border-radius:4px;background:var(--sunk);vertical-align:middle;overflow:hidden}
+.dr-pctbar i{display:block;height:100%;background:var(--good)}
+.dr-label-table{min-width:560px}
+.dr-label-table tbody tr{cursor:default}
+.dr-trend{display:flex;align-items:flex-end;gap:6px;height:120px;padding:4px 0 0;border-bottom:1px solid var(--line)}
+.dr-tbar{flex:1 1 0;min-width:0;max-width:56px;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:3px;font-size:11px;color:var(--muted)}
+.dr-tbar i{display:block;width:100%;background:var(--accent);border-radius:5px 5px 0 0;min-height:4px}
+.dr-tbar span{font-variant-numeric:tabular-nums;order:-1}
+@media (max-width:860px){
+  .dr-yn:not(:has(~ .dr-choices)){position:sticky;bottom:0;z-index:4;margin:0 calc(var(--pad) * -1);padding:10px var(--pad) calc(10px + env(safe-area-inset-bottom,0px));background:var(--surface);border-top:1px solid var(--line)}
+  body:has(.dr-yn) .toast{bottom:calc(env(safe-area-inset-bottom,0px) + 110px)}
+}

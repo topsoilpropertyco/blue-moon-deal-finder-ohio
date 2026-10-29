@@ -431,6 +431,34 @@ def test_photo_review_flow(client, built, settings):
     assert find["photo_checked"] == 1 and find["target"] == 1
 
 
+def test_yes_no_buttons_and_the_review_scope_through_the_api(client, built, settings):
+    pid = top_id(client)
+    _photo_property(built, settings, pid, ai_label="EXTERIOR_CORRIDOR", ai_p=92.0, final_p=90.0, ai_style="garden",
+                    ai_stories=3, ai_buildings=2, ai_condition="good")
+    everything = api(client, f"/api/m/{MARKET}/review/queue")
+    assert everything["scope"] == "everything" and everything["total"] == 1
+    card = everything["items"][0]
+    assert card["ai_called"] and card["group"] == "confirm" and card["details"]["stories"] == 3
+    assert everything["counts"]["scopes"] == {"everything": 1, "unsure": 0}
+    unsure = api(client, f"/api/m/{MARKET}/review/queue", scope="unsure")
+    assert unsure["scope"] == "unsure" and unsure["items"] == []        # the AI's call is not "unsure"
+    assert api(client, f"/api/m/{MARKET}/summary")["needs_review"] == 0   # the menu count is the unsure ones
+    assert client.get(f"/api/m/{MARKET}/review/queue", params={"scope": "weird"}).status_code == 422
+    detail = api(client, f"/api/m/{MARKET}/properties/{pid}")["visual_check"]
+    assert detail["details_text"] == "Garden style, about 3 stories, 2 buildings, good condition"
+    # "No, it's wrong" needs the right answer, and it must differ from the AI's
+    bad = client.post(f"/api/m/{MARKET}/properties/{pid}/review", json={"agreed": False})
+    assert bad.status_code == 400 and "Pick an answer" in bad.json()["detail"]
+    same = client.post(f"/api/m/{MARKET}/properties/{pid}/review", json={"label": 1, "agreed": False})
+    assert same.status_code == 400 and "what the AI said" in same.json()["detail"]
+    # "Yes, the AI is right": no label needed
+    yes = client.post(f"/api/m/{MARKET}/properties/{pid}/review", json={"agreed": True})
+    assert yes.status_code == 200 and yes.json()["label"] == "EXTERIOR_CORRIDOR" and yes.json()["agreed"] is True
+    card = api(client, f"/api/m/{MARKET}/review/scorecard")
+    assert card["ai_right"] == 1 and card["learning"]["verdict"] == "not_enough"
+    assert api(client, f"/api/m/{MARKET}/properties/{pid}")["visual_check"]["agreed_with_ai"] is True
+
+
 def test_outcome_and_model(client):
     pid = top_id(client)
     r = client.post(f"/api/m/{MARKET}/properties/{pid}/outcome", json={"outcome": "bought", "note": "Closed"})

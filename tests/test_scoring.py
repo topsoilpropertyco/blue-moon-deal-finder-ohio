@@ -276,7 +276,7 @@ def test_signal_buckets_and_multipliers(ac, settings):
     p = prop(owner_name="HOLLOWAY FAMILY TRUST", sale_date="1990-01-01", mailing_state="FL", mailing_city="MIAMI",
              usps_vacant=1, improvement_value=300000.0, total_value=1000000.0, preforeclosure=1, units=35)
     sigs = by_key(signals_for(p, enrich(minutes=25, final_p=85, fit="near"), ac, settings, today=TODAY))
-    expect = {"size": ("ideal", 1.3), "visual": ("green", 1.4), "rent_fit": ("near", 1.0), "drive": ("near", 1.1),
+    expect = {"size": ("ideal", 1.3), "visual": ("green", 1.8), "rent_fit": ("near", 1.0), "drive": ("near", 1.1),
               "owner_type": ("trust", 2.0), "years_owned": ("20+", 2.0), "debt": ("free_and_clear", 1.6),
               "absentee": ("outofstate", 1.4), "vacancy": ("vacant", 1.5), "condition": ("worn", 1.3),
               "distress": ("preforeclosure", 2.0)}
@@ -286,11 +286,32 @@ def test_signal_buckets_and_multipliers(ac, settings):
     assert sigs["absentee"]["value"] == "Out of state"
 
 
-@pytest.mark.parametrize("final_p, bucket, m", [(85, "green", 1.4), (60, "yellow_high", 1.1),
+@pytest.mark.parametrize("final_p, bucket, m", [(85, "green", 1.8), (60, "yellow_high", 1.1),
                                                 (35, "yellow_low", 0.8), (10, "red", 0.4)])
 def test_visual_buckets(ac, settings, final_p, bucket, m):
+    """Apartments: a walk-up (green) counts x1.8, up from the x1.4 default that the other asset classes keep."""
     s = by_key(signals_for(prop(), enrich(final_p=final_p), ac, settings, today=TODAY))["visual"]
     assert (s["bucket"], s["multiplier"]) == (bucket, m)
+
+
+def test_a_walk_up_raises_the_score_but_is_never_required(settings, ac):
+    p = prop()
+    asked = {"none": enrich(final_p=None), "walk_up": enrich(final_p=90), "not_walk_up": enrich(final_p=5)}
+    score = {k: probability(signals_for(p, e, ac, settings, today=TODAY), 0.015) for k, e in asked.items()}
+    assert score["not_walk_up"] < score["none"] < score["walk_up"]
+    odds = lambda x: x / (1 - x)                                     # noqa: E731
+    assert odds(score["walk_up"]) / odds(score["none"]) == pytest.approx(1.8, rel=1e-3)
+    # it is one multiplier among the others: level with the strongest owner signals, never a gate
+    sigs = by_key(signals_for(p, enrich(final_p=90), ac, settings, today=TODAY))
+    assert sigs["visual"]["multiplier"] >= 1.8 and sigs["visual"]["multiplier"] <= 2.0
+    for label in ("EXTERIOR_CORRIDOR", "DIRECT_ENTRY"):
+        assert label in ac.visual_check["target_labels"]
+    for verdict in (None, 90, 50, 5):                                 # any verdict, or none: same buy box answer
+        res = evaluate(p, enrich(final_p=verdict), ac, MARKET, settings)
+        assert res["in_buybox"] is True, verdict
+    storage = settings.asset_class("self_storage")                   # other asset classes keep the 1.4 default
+    assert by_key(signals_for(prop(units=None, building_sqft=45000), enrich(final_p=90), storage, settings,
+                              today=TODAY))["visual"]["multiplier"] == 1.4
 
 
 @pytest.mark.parametrize("minutes, bucket", [(10, "near"), (30, "near"), (31, "mid"), (50, "mid"), (55, "far")])

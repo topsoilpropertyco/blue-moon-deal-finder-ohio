@@ -30,6 +30,7 @@ from ..drill import links as drill_links
 from ..enrich import parcels
 from ..enrich.owners import OWNER_TYPE_LABELS as OWNER_TYPES
 from ..imagery import explain_prior, images_for, map_links, queue_counts
+from ..imagery.review import details_of, details_text
 from ..scoring import buckets as B
 from ..scoring import overrides
 from ..scoring.buybox import (
@@ -508,6 +509,9 @@ def _visual_detail(prop: Mapping[str, Any], v: Mapping[str, Any] | None, joined:
         **{k: v.get(k) for k in keep},
         "property_visible": None if visible is None else bool(visible),
         "cues": loads(v.get("cues_json"), []) or [],
+        "details": details_of(v), "details_text": details_text(v),
+        "agreed_with_ai": (None if not (v.get("reviewed_label") and v.get("ai_label"))
+                           else v["reviewed_label"] == v["ai_label"]),
         "color": visual_color(v or None, mc.ac, mc.cfg),
         "needs_review": needs_review(joined, mc) if joined else False,
         "images": [p["url"] for p in photos], "photos": photos,
@@ -661,7 +665,7 @@ def summary(conn: sqlite3.Connection, slug: str, settings: Settings | None = Non
     if mc.id in pending_rescore(conn):
         _rescore_once(conn, slug)
     c = _counts_row(conn, mc)
-    review = queue_counts(conn, slug) if mc.ac.visual_enabled else {"total": 0}
+    review = queue_counts(conn, slug, scope="unsure") if mc.ac.visual_enabled else {"total": 0}
     pen = round(c["pen_confirmed"] / c["pen_target"], 4) if c["pen_target"] else 0.0
     m = mc.market
     try:  # config.yaml is the source of truth; the markets row is a copy made at startup

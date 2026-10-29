@@ -62,8 +62,15 @@
   ];
   const LIST = STEPS.filter((st) => st.key !== 'all');
 
+  /* The monthly photo goal: two jobs that pull photos and then run the AI check for the next batch (see imagery/monthly.py). */
+  const MONTH_STEPS = [
+    {key: 'photo_batch', title: 'Photos and AI check: next batch', month: true},
+    {key: 'photo_keep_going', title: 'Photos and AI check: keep going', month: true},
+  ];
+  const isMonthKey = (key) => MONTH_STEPS.some((st) => st.key === key);
+
   const S = {
-    root: null, market: null, ctx: null,
+    root: null, market: null, ctx: null, month: null,
     est: null, estAt: 0, estBusy: false, estAgain: false, estError: null, estShown: new Set(),
     jobs: {},          // step key -> latest job this session (kept until dismissed)
     recent: null,      // recent jobs list, or an Error
@@ -73,7 +80,7 @@
   function resetForMarket() {
     stopPolling();
     Object.assign(S, {est: null, estAt: 0, estBusy: false, estAgain: false, estError: null, estShown: new Set(), jobs: {},
-      recent: null});
+      recent: null, month: null});
   }
 
   /* ---------- context: summary, health, settings ---------- */
@@ -260,6 +267,12 @@
           go: step.go, jump: step.go ? null : step.key, label: step.go ? step.goLabel : 'Go to step'});
       }
     });
+    const m = S.month;
+    if (m && m.enabled && !m.reached && c.google && ((m.pool || {}).total || m.ai_waiting)) {
+      out.unshift({key: 'month', html: '<b>Photos and AI check:</b> ' + num(m.done) + ' of ' + num(m.target) +
+        ' done in ' + esc(m.month) + '. Press <b>Keep going</b> to pull the next photos and let the AI look at them.',
+        jump: 'month', label: 'Show'});
+    }
     return out.slice(0, 3);
   }
 
@@ -418,7 +431,8 @@
       (estimateSkus(r.estimate).length ? '<ul class="ru-skus">' + estimateSkus(r.estimate).map(skuLine).join('') + '</ul>' : '') +
       (usd !== null ? '<p class="vw-tight"><b>Estimated cost: ' + money(usd) + '</b> after Google\'s free monthly calls.</p>' : '') +
       '<div class="bar vw-actions"><button type="button" class="btn primary" data-ru="confirm" data-step="' + esc(step.key) + '"' +
-      (limit ? ' data-limit="' + limit + '"' : '') + '>Yes, spend it</button>' +
+      (limit ? ' data-limit="' + limit + '"' : '') + '>' +
+      (step.month ? 'Yes, go ahead' + (usd !== null ? ' (about ' + money(usd) + ')' : '') : 'Yes, spend it') + '</button>' +
       '<button type="button" class="btn" data-ru="dismiss" data-step="' + esc(step.key) + '">Not now</button></div></div>';
   }
 
@@ -502,7 +516,7 @@
   }
 
   function stepByKey(key) {
-    return STEPS.find((s) => s.key === key) || null;
+    return STEPS.find((s) => s.key === key) || MONTH_STEPS.find((s) => s.key === key) || null;
   }
 
   function cardEl(key) {
@@ -510,6 +524,7 @@
   }
 
   function paintCard(key) {
+    if (isMonthKey(key)) return paintMonth();
     const el = cardEl(key);
     const step = stepByKey(key);
     if (!el || !step || !S.ctx) return;
@@ -524,6 +539,7 @@
   function paintAll() {
     if (!S.root || !S.root.isConnected) return;
     STEPS.forEach((s) => paintCard(s.key));
+    paintMonth();
     markFirstNext();
     paintNext();
   }
@@ -541,7 +557,7 @@
 
   /** While a job runs, move its bar and message in place (keeps keyboard focus on Cancel). */
   function paintJob(key) {
-    const el = cardEl(key);
+    const el = isMonthKey(key) ? (S.root && S.root.querySelector('[data-ru-month]')) : cardEl(key);
     const job = S.jobs[key];
     if (!el) return;
     const live = el.querySelector('.ru-live');
@@ -602,7 +618,7 @@
   function adoptActive(list) {
     let found = false;
     list.slice().reverse().forEach((j) => {
-      if (!isActive(j) || !stepByKey(j.kind)) return;
+      if (!isActive(j) || !stepByKey(j.kind)) return;       // (the monthly photo jobs are steps too)
       const mine = S.jobs[j.kind];
       if (!mine || mine.id !== j.id) {
         S.jobs[j.kind] = j;
@@ -673,6 +689,7 @@
     } catch (e) { /* keep the old layer numbers */ }
     paintAll();
     loadRecent();
+    loadMonth();
     if (S.estShown.size) loadEstimate(true);   // keep any open estimate boxes current
   }
 
@@ -719,13 +736,16 @@
     if (!b || b.disabled) return;
     const act = b.getAttribute('data-ru');
     const key = b.getAttribute('data-step');
-    if (act === 'run') start(key, {});
+    if (act === 'month-test') start('photo_batch', {limit: TEST_N});
+    else if (act === 'month-batch') start('photo_batch', {});
+    else if (act === 'month-go') start('photo_keep_going', {});
+    else if (act === 'run') start(key, {});
     else if (act === 'test') start(key, {limit: TEST_N});
     else if (act === 'confirm') start(key, {confirm: true, limit: toNum(b.getAttribute('data-limit'))});
     else if (act === 'cancel') cancel(b.getAttribute('data-id'));
     else if (act === 'go') BM.go(b.getAttribute('data-go'));
     else if (act === 'jump') {
-      const row = cardEl(key);
+      const row = key === 'month' ? (S.root && S.root.querySelector('[data-ru-month]')) : cardEl(key);
       if (row && row.scrollIntoView) row.scrollIntoView({behavior: 'smooth', block: 'center'});
     }
     else if (act === 'dismiss') {
@@ -747,6 +767,89 @@
     }
   }
 
+  /* ---------- the monthly photo goal ---------- */
+
+  function monthBusy() {
+    return MONTH_STEPS.some((st) => isActive(S.jobs[st.key]));
+  }
+
+  function estText(label, e) {
+    if (!e) return '';
+    const ai = e.backend === 'anthropic_api' ? ' and the AI check' : '';
+    return '<li><b>' + esc(label) + ':</b> ' + (toNum(e.photos) ? plural(e.photos, 'property', 'properties') + ' to photograph' : 'no new photos') +
+      ', ' + plural(e.ai_checks, 'AI check') + ' · about <b>' + money(e.usd) + '</b> for Google' + ai +
+      (e.needs_confirm ? ' · asks for your OK first' : '') + '</li>';
+  }
+
+  function monthBody(c) {
+    const m = S.month;
+    if (m === null) return H.loading('Counting this month\'s photos…');
+    if (m instanceof Error) return '<p class="note">' + esc(m.message) + '</p>';
+    if (!m.enabled) return '<p class="note">' + esc(m.message || 'No monthly photo goal for this market.') + '</p>';
+    const pool = m.pool || {};
+    const off = monthBusy() ? ' disabled' : '';
+    const noKey = !c.google;
+    const est = m.estimate || null;
+    const left = [];
+    if (pool.buybox) left.push(plural(pool.buybox, 'buy-box property', 'buy-box properties') + ' with no photos');
+    if (pool.rest) left.push(num(pool.rest) + ' more outside the buy box');
+    if (m.ai_waiting) left.push(plural(m.ai_waiting, 'photo set') + ' waiting for the AI');
+    return '<div class="ru-monthhead"><p class="ru-monthnum"><b>' + num(m.done) + '</b> of <b>' + num(m.target) + '</b> done this month' +
+      '<span class="note"> · ' + esc(m.month) + '</span></p>' +
+      '<span class="pill ' + (m.reached ? 'good' : '') + '">' + (m.reached ? 'Goal reached' : num(m.remaining) + ' to go') + '</span></div>' +
+      progressBar(m.pct / 100, 'Photos pulled this month', true) +
+      '<p class="note vw-tight">Best Blue Moon score first, buy-box properties before the rest.' +
+      (left.length ? ' Waiting: ' + esc(left.join(', ')) + '.' : ' Nothing waiting right now.') + '</p>' +
+      (noKey ? '<p class="note vw-tight ru-note">Needs the Google key first (Settings has the steps). The AI check can still look at photos you already have.</p>' : '') +
+      '<div class="bar ru-actions">' +
+      '<button type="button" class="btn" data-ru="month-test"' + off + ' title="Photos and the AI check for ' + TEST_N + ' properties">Test on ' + TEST_N + '</button>' +
+      '<button type="button" class="btn" data-ru="month-batch"' + off + '>Do the next ' + num(m.batch) + '</button>' +
+      '<button type="button" class="btn primary" data-ru="month-go"' + off + ' title="Batch after batch until the monthly goal">Keep going</button></div>' +
+      (est ? '<ul class="ru-skus ru-monthest">' + estText('Test on ' + TEST_N, est.test) + estText('Next ' + num(m.batch), est.batch) +
+        estText(m.reached ? 'Keep going (one more batch)' : 'Keep going (' + num(m.keep_going_to) + ' more)', est.keep_going) + '</ul>' :
+        '<p class="note vw-tight">Counting the cost (nothing is called)…</p>') +
+      '<p class="note vw-tight">Change the goal or the batch size in Settings (Monthly photo goal). Runs over ' + num(c.confirmOver) +
+      ' properties ask for your OK, with the cost, before spending.</p>';
+  }
+
+  function monthJobs() {
+    return MONTH_STEPS.map((st) => jobHtml(st)).join('');
+  }
+
+  function monthHtml(c) {
+    if (c.ac && c.ac.visual_enabled === false) return '';
+    return '<section class="panel ru-month" data-ru-month aria-label="Photos and AI check for this month"><div class="ru-top"><h2>Photos and AI check for this month</h2>' +
+      '<span class="pill warn">Google photos + your Claude plan</span></div>' +
+      '<div data-ru-monthbody>' + monthBody(c) + '</div><div data-ru-monthjobs>' + monthJobs() + '</div></section>';
+  }
+
+  function paintMonth() {
+    const box = S.root && S.root.isConnected ? S.root.querySelector('[data-ru-month]') : null;
+    if (!box || !S.ctx) return;
+    const live = box.querySelector('.ru-live');
+    const job = live ? MONTH_STEPS.map((st) => S.jobs[st.key]).find((j) => j && isActive(j)) : null;
+    if (live && job && live.getAttribute('data-job-id') === String(job.id)) return;   // paintJob moves its bar in place
+    const body = S.root.querySelector('[data-ru-monthbody]');
+    const jobs = S.root.querySelector('[data-ru-monthjobs]');
+    if (!body || !jobs) return;
+    body.innerHTML = monthBody(S.ctx);
+    jobs.innerHTML = monthJobs();
+  }
+
+  async function loadMonth() {
+    const market = S.market;
+    try {
+      const m = await BM.api(H.mpath('/photos/month?estimate=1'));
+      if (market !== S.market) return;
+      S.month = m || {enabled: false};
+    } catch (err) {
+      if (market !== S.market) return;
+      S.month = err;
+    }
+    paintMonth();
+    paintNext();
+  }
+
   /* ---------- page ---------- */
 
   function heading(c) {
@@ -759,7 +862,7 @@
   }
 
   function page(c) {
-    return heading(c) + '<div data-ru-next>' + nextHtml(c) + '</div>' +
+    return heading(c) + '<div data-ru-next>' + nextHtml(c) + '</div>' + monthHtml(c) +
       '<ol class="ru-list">' + LIST.map((s) => card(s, c)).join('') + '</ol>' +
       '<div class="bar ru-toolbar"><button type="button" class="btn" data-ru="estimate-all">Estimate everything</button>' +
       '<span class="note">Counts calls and dollars without calling anything.</span></div>' +
@@ -792,6 +895,7 @@
     root.addEventListener('click', onClick);
     if (Object.values(S.jobs).some(isActive)) startPolling();
     loadEstimate(false);          // free dry run: tells which steps still have work (no calls are made)
+    loadMonth();                  // this month's photo count and what the next batch would cost (dry run)
     await loadRecent();
   }
 

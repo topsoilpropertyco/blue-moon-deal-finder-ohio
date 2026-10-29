@@ -64,6 +64,7 @@ from ..imagery import (
     scorecard,
     vision_config,
 )
+from ..imagery import monthly as photo_month
 from ..imagery import queue_counts as review_counts
 from ..imagery import streetview
 from ..ingest import IngestError, import_file, preview_file
@@ -305,8 +306,9 @@ class CreditIn(BaseModel):
 
 
 class ReviewIn(BaseModel):
-    label: str | int
+    label: str | int | None = None      # optional with agreed=True ("Yes, the AI is right")
     note: Text = None
+    agreed: bool | None = None          # True: the AI is right; False: it's wrong and `label` is the right answer
 
 
 class OutcomeIn(BaseModel):
@@ -676,7 +678,7 @@ def use_credit(slug: str, pid: int, body: CreditIn, conn: Conn) -> dict:
 @router.post("/api/m/{slug}/properties/{pid}/review")
 def review(slug: str, pid: int, body: ReviewIn, conn: Conn) -> dict:
     require_property(conn, slug, pid)
-    result = save_review(conn, pid, str(body.label), body.note)
+    result = save_review(conn, pid, None if body.label is None else str(body.label), body.note, body.agreed)
     result["rescore"] = rescorer.schedule(slug)
     return result
 
@@ -718,11 +720,32 @@ def credits(slug: str, conn: Conn, limit: int = Query(25, ge=0, le=1000)) -> dic
 
 @router.get("/api/m/{slug}/review/queue")
 def review_queue_view(slug: str, conn: Conn, limit: int = Query(20, ge=1, le=200), offset: int = Query(0, ge=0),
-                      include_excluded: bool = False) -> dict:
+                      include_excluded: bool = False,
+                      scope: Annotated[str | None, Query(pattern="^(everything|unsure)$")] = None) -> dict:
+    """scope: everything (the AI's unsure ones first, then each call it made) or unsure (default: review.default_scope)."""
     require_market(conn, slug)
-    items = review_queue(conn, slug, limit=limit, offset=offset, include_excluded=include_excluded)
-    counts = review_counts(conn, slug, include_excluded=include_excluded)
-    return {"total": counts["total"], "counts": counts, "limit": limit, "offset": offset, "items": items}
+    items = review_queue(conn, slug, limit=limit, offset=offset, include_excluded=include_excluded, scope=scope)
+    counts = review_counts(conn, slug, include_excluded=include_excluded, scope=scope)
+    return {"total": counts["total"], "scope": counts["scope"], "counts": counts, "limit": limit, "offset": offset,
+            "items": items}
+
+
+@router.get("/api/m/{slug}/photos/month")
+def photos_month(slug: str, conn: Conn, estimate: bool = False) -> dict:
+    """The monthly photo goal ("412 of 600 done this month") and, with estimate=1, what the next batch and
+    Keep going would cost (a dry run: nothing is called)."""
+    require_market(conn, slug)
+    out = photo_month.status(conn, slug)
+    if estimate and out.get("enabled"):
+        out["estimate"] = {"test": _brief(photo_month.estimate_batch(conn, slug, 5)),
+                           "batch": _brief(photo_month.estimate_batch(conn, slug, out["batch"])),
+                           "keep_going": _brief(photo_month.estimate_batch(conn, slug, out["keep_going_to"]))}
+    return out
+
+
+def _brief(est: dict) -> dict:
+    keys = ("properties", "photos", "ai_checks", "calls", "needs_confirm", "has_key", "backend", "ready", "message")
+    return {**{k: est.get(k) for k in keys}, "usd": (est.get("cost") or {}).get("usd", 0.0)}
 
 
 @router.get("/api/m/{slug}/review/scorecard")

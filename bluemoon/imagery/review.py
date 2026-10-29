@@ -1,15 +1,20 @@
 """Human review of the photo check: the queue, your answers, the example library and the scorecard.
 
 - `review_queue`: what to look at next. Photos the AI couldn't judge (needs review) and unsure
-  (yellow, 21-79) results first, then photos the AI hasn't checked yet, then places with no photos,
-  then a small, stable random sample (`review.spot_check_fraction`, 5%) of greens and reds as spot checks.
+  (yellow, 21-79) results first, then photos the AI hasn't checked yet, then places with no photos, then
+  every call the AI made (green and red) for you to confirm or correct, most valuable first: buy-box places,
+  the ones the AI says are targets (walk-ups), then the best Blue Moon rank. `scope='unsure'` ("Unsure only")
+  leaves out the AI's calls (unless `review.spot_check_fraction` asks for a small, stable random sample).
 - `save_review`: your answer wins. It sets `reviewed_label` and final_p (target 100, mixed 60, other 0),
-  copies the photos into `labels/examples/{property_id}/`, appends a line to `labels/examples.jsonl`,
-  and updates `labels/scorecard.json`.
+  copies the photos into `labels/examples/{property_id}/`, appends a line to `labels/examples.jsonl`
+  (with `agreed`: did you agree with the AI?), and updates `labels/scorecard.json`.
+  "Yes, the AI is right" is `agreed=True` (the AI's own label is saved); "No, it's wrong" is `agreed=False`
+  with the label you pick.
 - `examples_for`: labeled examples the AI sees with each new property (no model training: Claude just
   reads your past answers). Most recent first, mixed across labels, capped.
-- `scorecard`: how often the AI agreed with you: confusion matrix, accuracy per color, and the
-  acceptance check (green >= 90% truly target, red >= 90% truly not).
+- `scorecard`: how often the AI is right: overall, per label, a trend over time (your latest 50 reviews vs the
+  earlier ones), confusion matrix, accuracy per color, and the acceptance check (green >= 90% truly target,
+  red >= 90% truly not).
 - `calibrate`: re-run the AI on everything you reviewed (without touching your answers) and score it.
 
 `labels/` is private (git-ignored): it holds photos of real properties.
@@ -50,7 +55,7 @@ class ReviewConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
     green_min: float = 80.0                # scoring.visual_green_min
     red_max: float = 20.0                  # scoring.visual_red_max
-    spot_check_fraction: float = Field(0.05, ge=0, le=1)
+    spot_check_fraction: float = Field(0.0, ge=0, le=1)     # random share of the AI's calls in 'Unsure only'
     acceptance_min: float = Field(0.90, gt=0, le=1)
     acceptance_min_reviews: int = Field(10, ge=1)
     reviewed_p_target: float = Field(100.0, ge=0, le=100)
@@ -58,6 +63,8 @@ class ReviewConfig(BaseModel):
     reviewed_p_other: float = Field(0.0, ge=0, le=100)
     mixed_labels: list[str] = Field(default_factory=lambda: ["MIXED"])
     include_unchecked: bool = False        # also list properties whose photos the AI hasn't looked at yet
+    default_scope: str = "everything"      # everything | unsure: what the review list starts as
+    learning_window: int = Field(50, ge=5)  # Scorecard "learning": your latest this-many reviews vs earlier ones
 
 
 def review_config(settings: Settings | None = None) -> ReviewConfig:
@@ -150,6 +157,7 @@ SELECT p.id, p.address, p.city, p.state, p.zip, p.county, p.lat, p.lng, p.units,
        p.building_sqft, p.lot_acres, p.name, p.crexi_url,
        v.status, v.pano_id, v.pano_date, v.heading, v.images_json, v.ai_label, v.ai_p, v.image_quality,
        v.property_visible, v.cues_json, v.reasons, v.prior, v.final_p, v.model, v.error, v.checked_at,
+       v.ai_style, v.ai_stories, v.ai_buildings, v.ai_condition,
        s.in_buybox, s.score, s.rank
 FROM visual_checks v
 JOIN properties p ON p.id = v.property_id
@@ -157,14 +165,17 @@ LEFT JOIN scores s ON s.property_id = p.id
 WHERE p.market_id = ? AND v.reviewed_label IS NULL
 """
 
-GROUP_ORDER = {"needs_review": 0, "unsure": 1, "not_checked": 2, "no_photos": 3, "spot_check": 4}
+GROUP_ORDER = {"needs_review": 0, "unsure": 1, "not_checked": 2, "no_photos": 3, "confirm": 4, "spot_check": 4}
 GROUP_WHY = {
     "needs_review": "The AI couldn't judge these photos (poor photos, or the building isn't visible).",
     "unsure": "The AI is unsure.",
     "not_checked": "Photos are saved but the AI hasn't looked yet.",
     "no_photos": "No usable photos. Use the Google Maps links to look.",
+    "confirm": "The AI made a call. Is it right?",
     "spot_check": "Spot check: the AI was confident. Is it right?",
 }
+SCOPES = ("everything", "unsure")
+AI_CALLED = ("confirm", "spot_check")     # groups where the AI made a call and you confirm or correct it
 
 
 def spot_check_pick(property_id: int, salt: str, fraction: float) -> bool:
@@ -175,7 +186,18 @@ def spot_check_pick(property_id: int, salt: str, fraction: float) -> bool:
     return (h % 10_000) < fraction * 10_000
 
 
-def _group(r: Mapping[str, Any], has_images: bool, cfg: ReviewConfig, salt: str) -> str | None:
+def normalize_scope(scope: str | None, cfg: ReviewConfig) -> str:
+    """'everything' (the AI's unsure ones first, then every call to confirm) or 'unsure' (only the unsure ones,
+    plus the small random spot check)."""
+    text = str(scope or cfg.default_scope or "everything").strip().lower()
+    if text in ("all", "everything"):
+        return "everything"
+    if text in ("unsure", "unsure_only"):
+        return "unsure"
+    raise ValueError(f"'{scope}' isn't a review list. Choose: everything or unsure.")
+
+
+def _group(r: Mapping[str, Any], has_images: bool, cfg: ReviewConfig, salt: str, scope: str = "everything") -> str | None:
     p = r.get("final_p")
     classified = r.get("ai_label") is not None and r.get("checked_at") is not None
     if p is None:
@@ -187,13 +209,18 @@ def _group(r: Mapping[str, Any], has_images: bool, cfg: ReviewConfig, salt: str)
     color = visual_color(p, cfg)
     if color == "yellow":
         return "unsure"
-    return "spot_check" if spot_check_pick(r["id"], salt, cfg.spot_check_fraction) else None
+    if scope == "unsure":
+        return "spot_check" if spot_check_pick(r["id"], salt, cfg.spot_check_fraction) else None
+    return "confirm"
 
 
-def _sort_key(group: str, r: Mapping[str, Any]) -> tuple:
+def _sort_key(group: str, r: Mapping[str, Any], targets: frozenset[str] = frozenset()) -> tuple:
+    """Unsure first. Among the AI's calls, the most valuable first: places in the buy box, the ones the AI says
+    are targets (walk-ups), then the best Blue Moon rank."""
     in_box = r.get("in_buybox")
     rank = r.get("rank")
-    return (GROUP_ORDER[group], in_box == 0, rank is None, rank or 0, -(r.get("score") or 0.0), r["id"])
+    not_target_call = group in AI_CALLED and str(r.get("ai_label") or "") not in targets
+    return (GROUP_ORDER[group], in_box == 0, not_target_call, rank is None, rank or 0, -(r.get("score") or 0.0), r["id"])
 
 
 def _label_choices(ac: AssetClass) -> list[dict]:
@@ -203,26 +230,49 @@ def _label_choices(ac: AssetClass) -> list[dict]:
             for i, lab in enumerate(labels_of(ac))]
 
 
+def _target_name(ac: AssetClass) -> str:
+    return str(ac.visual_check.get("target_name") or "target")
+
+
+def _why(group: str, r: Mapping[str, Any], ac: AssetClass) -> str:
+    p = r.get("final_p")
+    if group == "unsure" and p is not None:
+        return f"The AI is unsure ({p:.0f}% likely a {_target_name(ac).lower()})."
+    if group in AI_CALLED and r.get("ai_label"):
+        is_target = str(r["ai_label"]) in target_labels_of(ac)
+        name = _target_name(ac).lower()
+        verdict = f"a {name}" if is_target else f"not a {name}"
+        sure = ""
+        if r.get("ai_p") is not None:
+            sure = f" ({float(r['ai_p']) if is_target else 100 - float(r['ai_p']):.0f}% sure)"
+        return f"The AI says: {readable_label(r['ai_label'], ac)}, so {verdict}{sure}. Is it right?"
+    return GROUP_WHY[group]
+
+
 def queue_item(r: Mapping[str, Any], ac: AssetClass, settings: Settings, group: str,
                cfg: ReviewConfig) -> dict:
     """One review card."""
     p = r.get("final_p")
-    why = GROUP_WHY[group]
-    if group == "unsure" and p is not None:
-        why = f"The AI is unsure ({p:.0f}% likely a target)."
+    ai_called = group in AI_CALLED
+    ai_label = r.get("ai_label")
     return {
         "id": r["id"], "property_id": r["id"],
         "address": r.get("address"), "city": r.get("city"), "state": r.get("state"), "zip": r.get("zip"),
         "county": r.get("county"), "name": r.get("name"), "lat": r.get("lat"), "lng": r.get("lng"),
         "units": r.get("units"), "stories": r.get("stories"), "year_built": r.get("year_built"),
         "crexi_url": r.get("crexi_url"),
-        "group": group, "why": why,
+        "group": group, "why": _why(group, r, ac),
+        "ai_called": ai_called,
+        "ai_is_target": bool(ai_label) and str(ai_label) in target_labels_of(ac),
+        "ai_label_name": readable_label(ai_label, ac) if ai_label else None,
+        "target_name": _target_name(ac),
         "status": r.get("status"),
-        "ai_label": r.get("ai_label"), "ai_p": r.get("ai_p"), "final_p": p, "prior": r.get("prior"),
+        "ai_label": ai_label, "ai_p": r.get("ai_p"), "final_p": p, "prior": r.get("prior"),
         "color": visual_color(p, cfg), "needs_review": p is None,
         "image_quality": r.get("image_quality"),
         "property_visible": None if r.get("property_visible") is None else bool(r.get("property_visible")),
         "cues": loads(r.get("cues_json"), []) or [], "reasons": r.get("reasons"), "model": r.get("model"),
+        "details": details_of(r),
         "pano_date": r.get("pano_date"),
         "images": streetview.images_for(r["id"], settings),
         "links": streetview.map_links(r.get("lat"), r.get("lng"), r.get("heading")),
@@ -232,45 +282,91 @@ def queue_item(r: Mapping[str, Any], ac: AssetClass, settings: Settings, group: 
     }
 
 
+STYLE_NAMES = {"garden": "Garden style", "townhome-row": "Townhome row", "mid-rise": "Mid-rise",
+               "high-rise": "High-rise", "converted": "Converted building", "other": "Other style"}
+CONDITION_NAMES = {"good": "Good condition", "fair": "Fair condition", "poor": "Poor condition",
+                   "unknown": "Condition unclear"}
+
+
+def details_of(r: Mapping[str, Any]) -> dict | None:
+    """The AI's first-pass building details from a visual_checks row, or None when it gave none."""
+    style, stories = r.get("ai_style"), r.get("ai_stories")
+    buildings, condition = r.get("ai_buildings"), r.get("ai_condition")
+    if style is None and stories is None and buildings is None and condition is None:
+        return None
+    return {"style": style, "style_name": STYLE_NAMES.get(str(style), style),
+            "stories": stories, "buildings": buildings,
+            "condition": condition, "condition_name": CONDITION_NAMES.get(str(condition), condition)}
+
+
+def details_text(r: Mapping[str, Any]) -> str | None:
+    """'Garden style, about 3 stories, 4 buildings, fair condition' for lists and exports."""
+    d = details_of(r)
+    if not d:
+        return None
+    parts = [d["style_name"],
+             f"about {d['stories']} {'story' if d['stories'] == 1 else 'stories'}" if d["stories"] else None,
+             f"{d['buildings']} building{'' if d['buildings'] == 1 else 's'}" if d["buildings"] else None,
+             (d["condition_name"] or "").lower() or None]
+    return ", ".join(p for p in parts if p) or None
+
+
+def _picked(conn: sqlite3.Connection, market: dict, ac: AssetClass, settings: Settings, cfg: ReviewConfig,
+            slug: str, scope: str, include_excluded: bool) -> list[tuple[tuple, str, dict]]:
+    targets = frozenset(target_labels_of(ac))
+    picked: list[tuple[tuple, str, dict]] = []
+    for r in rows(conn, _QUEUE_SQL, (market["id"],)):
+        if r.get("in_buybox") == 0 and not include_excluded:
+            continue
+        has_images = bool(streetview.existing_images(settings, r["id"]))
+        group = _group(r, has_images, cfg, slug, scope)
+        if group is not None:
+            picked.append((_sort_key(group, r, targets), group, r))
+    picked.sort(key=lambda t: t[0])
+    return picked
+
+
 def review_queue(conn: sqlite3.Connection, market_slug: str, limit: int = 50, offset: int = 0, *,
-                 include_excluded: bool = False) -> list[dict]:
-    """Properties to review, most useful first (see the module docstring for the order)."""
+                 include_excluded: bool = False, scope: str | None = None) -> list[dict]:
+    """Properties to review, most useful first (see the module docstring for the order).
+    scope: 'everything' (default: unsure first, then every call the AI made) or 'unsure' (only the unsure ones)."""
     settings = get_settings()
     cfg = review_config(settings)
     market = market_by_slug(conn, market_slug)
     ac = settings.asset_class(market["asset_class"])
     if not ac.visual_enabled:
         return []
-    picked: list[tuple[tuple, str, dict]] = []
-    for r in rows(conn, _QUEUE_SQL, (market["id"],)):
-        if r.get("in_buybox") == 0 and not include_excluded:
-            continue
-        has_images = bool(streetview.existing_images(settings, r["id"]))
-        group = _group(r, has_images, cfg, market_slug)
-        if group is not None:
-            picked.append((_sort_key(group, r), group, r))
-    picked.sort(key=lambda t: t[0])
+    picked = _picked(conn, market, ac, settings, cfg, market_slug, normalize_scope(scope, cfg), include_excluded)
     window = picked[max(0, int(offset)): max(0, int(offset)) + max(0, int(limit))]
     return [queue_item(r, ac, settings, group, cfg) for _, group, r in window]
 
 
-def queue_counts(conn: sqlite3.Connection, market_slug: str, *, include_excluded: bool = False) -> dict:
-    """How many cards wait in each part of the queue, plus how many you've reviewed."""
+def queue_counts(conn: sqlite3.Connection, market_slug: str, *, include_excluded: bool = False,
+                 scope: str | None = None) -> dict:
+    """How many cards wait in each part of the queue, plus how many you've reviewed.
+    `scopes` has the size of each list (everything / unsure) so the screen can offer both."""
     settings = get_settings()
     cfg = review_config(settings)
     market = market_by_slug(conn, market_slug)
     ac = settings.asset_class(market["asset_class"])
+    chosen = normalize_scope(scope, cfg)
     counts: Counter = Counter()
+    sizes = {"everything": 0, "unsure": 0}
     if ac.visual_enabled:
         for r in rows(conn, _QUEUE_SQL, (market["id"],)):
             if r.get("in_buybox") == 0 and not include_excluded:
                 continue
-            group = _group(r, bool(streetview.existing_images(settings, r["id"])), cfg, market_slug)
-            if group:
-                counts[group] += 1
+            has_images = bool(streetview.existing_images(settings, r["id"]))
+            for name in SCOPES:
+                group = _group(r, has_images, cfg, market_slug, name)
+                if group:
+                    sizes[name] += 1
+                    if name == chosen:
+                        counts[group] += 1
     reviewed = one(conn, "SELECT COUNT(*) AS n FROM visual_checks v JOIN properties p ON p.id = v.property_id "
                          "WHERE p.market_id = ? AND v.reviewed_label IS NOT NULL", (market["id"],))
-    return {"total": sum(counts.values()), **{g: counts.get(g, 0) for g in GROUP_ORDER},
+    return {"total": sum(counts.values()), "scope": chosen, "scopes": sizes,
+            **{g: counts.get(g, 0) for g in GROUP_ORDER},
             "reviewed": int((reviewed or {}).get("n") or 0)}
 
 
@@ -287,6 +383,7 @@ class ExampleRecord(BaseModel):
     images: list[str] = Field(default_factory=list)   # relative to labels/
     ai_label: str | None = None
     ai_p: float | None = None
+    agreed: bool | None = None            # True: you confirmed the AI's call; False: you corrected it
     reviewed_at: str
 
 
@@ -329,17 +426,37 @@ def _property_context(conn: sqlite3.Connection, property_id: int) -> dict:
     return prop
 
 
-def save_review(conn: sqlite3.Connection, property_id: int, label: str, note: str | None = None) -> dict:
-    """Save your answer for one property. Your answer always wins over the AI."""
+def save_review(conn: sqlite3.Connection, property_id: int, label: str | int | None = None,
+                note: str | None = None, agreed: bool | None = None) -> dict:
+    """Save your answer for one property. Your answer always wins over the AI.
+
+    agreed=True ("Yes, the AI is right"): the AI's own label is your answer.
+    agreed=False ("No, it's wrong"): you must pick the right label, and it must differ from the AI's.
+    agreed=None: just your label, as before (agreed is then worked out from what the AI said).
+    """
     settings = get_settings()
     cfg = review_config(settings)
     prop = _property_context(conn, property_id)
     ac = settings.asset_class(prop["asset_class"])
     _visual_or_raise(ac)
+    existing = one(conn, "SELECT ai_label, ai_p FROM visual_checks WHERE property_id = ?", (prop["id"],)) or {}
+    ai_label = existing.get("ai_label")
+    if agreed is True and (label is None or str(label).strip() == ""):
+        if not ai_label or ai_label == UNKNOWN:
+            raise ValueError("The AI didn't make a call here, so there is nothing to confirm. Pick the answer yourself.")
+        label = ai_label
+    if label is None or str(label).strip() == "":
+        raise ValueError("Pick an answer first.")
     lab = normalize_label(label, ac)
+    if agreed is True and ai_label and lab != ai_label:
+        raise ValueError(f"The AI said {readable_label(ai_label, ac)}, not {readable_label(lab, ac)}. "
+                         "Use 'No, it's wrong' to give your answer.")
+    if agreed is False and ai_label and lab == ai_label:
+        raise ValueError(f"That is what the AI said ({readable_label(lab, ac)}). "
+                         "Pick a different answer, or use 'Yes, the AI is right'.")
+    did_agree = None if not ai_label else bool(ai_label == lab)
     note = (note or "").strip() or None
     final_p = reviewed_final_p(lab, ac, cfg)
-    existing = one(conn, "SELECT ai_label, ai_p FROM visual_checks WHERE property_id = ?", (prop["id"],)) or {}
     when = now_iso()
     with conn:
         streetview.update_visual(conn, prop["id"], {"reviewed_label": lab, "reviewed_note": note,
@@ -347,16 +464,22 @@ def save_review(conn: sqlite3.Connection, property_id: int, label: str, note: st
     images = _copy_examples(settings, prop["id"])
     _append_example(settings, ExampleRecord(
         property_id=prop["id"], market=prop["market_slug"], asset_class=ac.key, label=lab, note=note,
-        images=images, ai_label=existing.get("ai_label"), ai_p=existing.get("ai_p"), reviewed_at=when))
+        images=images, ai_label=ai_label, ai_p=existing.get("ai_p"), agreed=did_agree, reviewed_at=when))
     card = scorecard(conn, prop["market_slug"])
     write_scorecard(card, settings)
+    saved = readable_label(lab, ac)
+    if did_agree is True:
+        message = f"Saved: {saved}. The AI was right; this is now a good example for it."
+    elif did_agree is False:
+        message = f"Saved: {saved}. The AI had guessed {readable_label(ai_label, ac)}; your answer teaches it."
+    else:
+        message = f"Saved: {saved}."
     return {"property_id": prop["id"], "label": lab, "note": note, "final_p": final_p,
             "color": visual_color(final_p, cfg), "examples_saved": len(images),
-            "agreed_with_ai": None if not existing.get("ai_label") else existing.get("ai_label") == lab,
+            "agreed_with_ai": did_agree, "agreed": did_agree,
             "scorecard": _scorecard_brief(card),
-            "label_name": readable_label(lab, ac),
-            "message": f"Saved: {readable_label(lab, ac)}." + ("" if images else
-                                                               " (No photos to add to the example library.)")}
+            "label_name": saved,
+            "message": message + ("" if images else " (No photos to add to the example library.)")}
 
 
 # --- the example library ----------------------------------------------------------------------
@@ -418,14 +541,15 @@ def examples_for(asset_class: str | AssetClass, k: int, *, exclude_property_ids:
         if paths:
             usable.append(rec.model_copy(update={"images": [str(p) for p in paths]}))
     return [{"property_id": r.property_id, "label": r.label, "note": r.note, "images": [Path(p) for p in r.images],
-             "reviewed_at": r.reviewed_at, "asset_class": r.asset_class} for r in _round_robin(usable, k)]
+             "reviewed_at": r.reviewed_at, "asset_class": r.asset_class, "ai_label": r.ai_label,
+             "agreed": r.agreed} for r in _round_robin(usable, k)]
 
 
 # --- the scorecard ----------------------------------------------------------------------------
 
 _REVIEWED_SQL = """
 SELECT v.property_id, v.reviewed_label, v.ai_label, v.ai_p, v.prior, v.image_quality, v.property_visible,
-       v.checked_at
+       v.checked_at, v.reviewed_at
 FROM visual_checks v JOIN properties p ON p.id = v.property_id
 WHERE p.market_id = ? AND v.reviewed_label IS NOT NULL
 """
@@ -494,8 +618,11 @@ def scorecard(conn: sqlite3.Connection, market_slug: str) -> dict:
     passed = None if green["passed"] is None or red["passed"] is None else bool(green["passed"] and red["passed"])
     card = {
         "market": market_slug, "asset_class": ac.key, "labels": labels, "target_labels": target_labels_of(ac),
-        "reviewed": len(reviewed), "with_ai": len(with_ai),
+        "target_name": _target_name(ac),
+        "reviewed": len(reviewed), "with_ai": len(with_ai), "ai_right": agree,
         "label_accuracy": _pct(agree, len(with_ai)),
+        "by_label": _by_label(with_ai, labels, ac),
+        "learning": _learning(with_ai, cfg.learning_window),
         "target_accuracy": _pct(binary_right, binary_n),
         "confusion": {"labels": labels, "rows": confusion,
                       "matrix": [[confusion[t][a] for a in labels] for t in labels]},
@@ -505,6 +632,57 @@ def scorecard(conn: sqlite3.Connection, market_slug: str) -> dict:
     }
     card["message"] = _scorecard_message(card)
     return card
+
+
+def _by_label(with_ai: list[dict], labels: list[str], ac: AssetClass) -> list[dict]:
+    """For each label: how often the AI was right when it said it (`pct`), and how often it found the ones you
+    say are that label (`found_pct`)."""
+    targets = set(target_labels_of(ac))
+    out = []
+    for lab in labels:
+        said = [r for r in with_ai if r["ai_label"] == lab]
+        truly = [r for r in with_ai if r["reviewed_label"] == lab]
+        right = sum(1 for r in said if r["reviewed_label"] == lab)
+        out.append({"label": lab, "name": readable_label(lab, ac), "target": lab in targets,
+                    "ai_said": len(said), "right": right, "pct": _pct(right, len(said)),
+                    "you_said": len(truly), "found": right, "found_pct": _pct(right, len(truly))})
+    return out
+
+
+def _chrono(with_ai: list[dict]) -> list[dict]:
+    return sorted(with_ai, key=lambda r: (str(r.get("reviewed_at") or ""), int(r["property_id"])))
+
+
+def _learning(with_ai: list[dict], window: int) -> dict:
+    """Is the AI getting better? Your latest `window` reviews against all the earlier ones, plus a short trend
+    (the share it got right in each run of window/2 reviews, oldest first)."""
+    ordered = _chrono(with_ai)
+    hits = [int(r["ai_label"] == r["reviewed_label"]) for r in ordered]
+    recent, earlier = hits[-window:], hits[:-window] if len(hits) > window else []
+    need = max(5, window // 5)
+
+    def part(h: list[int]) -> dict:
+        return {"n": len(h), "right": sum(h), "pct": _pct(sum(h), len(h))}
+    rec, ear = part(recent), part(earlier)
+    step = max(5, window // 2)
+    trend = [{"from": i + 1, "to": min(i + step, len(hits)), "n": len(hits[i:i + step]),
+              "right": sum(hits[i:i + step]), "pct": _pct(sum(hits[i:i + step]), len(hits[i:i + step])),
+              "date": str(ordered[min(i + step, len(hits)) - 1].get("reviewed_at") or "")[:10] or None}
+             for i in range(0, len(hits), step)]
+    delta = None
+    verdict = "not_enough"
+    if len(earlier) >= need and len(recent) >= need:
+        delta = round(rec["pct"] - ear["pct"], 1)
+        verdict = "better" if delta >= 3 else "worse" if delta <= -3 else "steady"
+    if verdict == "not_enough":
+        text = (f"Not enough yet to say. Once you have more than {window} reviews, this compares your latest "
+                f"{window} with the earlier ones.")
+    else:
+        word = {"better": "better", "worse": "worse", "steady": "about the same"}[verdict]
+        text = (f"Your latest {rec['n']} reviews: the AI was right {rec['pct']:.0f}% of the time. Earlier: "
+                f"{ear['pct']:.0f}% ({ear['n']} reviews). It is doing {word}.")
+    return {"window": window, "recent": rec, "earlier": ear, "delta": delta, "verdict": verdict, "message": text,
+            "trend": trend}
 
 
 def _scorecard_message(card: dict) -> str:
@@ -573,6 +751,6 @@ def calibrate(conn: sqlite3.Connection, market_slug: str, backend: Any = None, *
     return {**run, "scorecard": card, "message": msg}
 
 
-__all__ = ["ExampleRecord", "ReviewConfig", "calibrate", "examples_for", "labels_of", "normalize_label",
-           "queue_counts", "read_examples", "review_config", "review_queue", "reviewed_final_p", "save_review",
+__all__ = ["ExampleRecord", "ReviewConfig", "calibrate", "details_of", "details_text", "examples_for", "labels_of",
+           "normalize_label", "normalize_scope", "queue_counts", "read_examples", "review_config", "review_queue", "reviewed_final_p", "save_review",
            "scorecard", "target_labels_of", "visual_color", "write_scorecard"]
