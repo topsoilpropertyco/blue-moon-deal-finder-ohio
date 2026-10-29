@@ -149,15 +149,7 @@ def import_reply(request: Request, conn: Conn, file: Annotated[UploadFile, File(
 
 def _rank_after(conn: sqlite3.Connection, result: dict) -> dict | None:
     """The free steps after an import (owners, score, DRILL) for the markets whose facts changed."""
-    slugs = list((result.get("merge") or {}).get("markets") or {})
-    if not result.get("changed") or not slugs:
-        return None
-    try:
-        from .. import pipeline
-        return {slug: pipeline.after_import(conn, slug).get("message") for slug in slugs}
-    except Exception:
-        log.exception("Ranking after a Crexi reply failed")
-        return {"error": "Imported, but ranking it failed. Run Owners, Score and DRILL from the Run screen."}
+    return R.rank_after(conn, result)
 
 
 @router.get("/api/crexi/imports/{import_id}/files/{kind}")

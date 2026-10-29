@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import logging
 import re
 import shutil
 import sqlite3
@@ -65,6 +66,9 @@ WHY = {
                  "a new one.",
     "not_matched": "Crexi could not match this one (no credit is spent on it).",
 }
+
+
+log = logging.getLogger("bluemoon.crexi.reply")
 
 
 class ReplyError(ValueError):
@@ -195,8 +199,10 @@ class Row:
 def _parse_rows(table: ing.Table, column_map: dict[str, str], cols: dict) -> list[Row]:
     out = []
     g = lambda r, f: r.get(column_map[f]) if f in column_map else None  # noqa: E731
+    lines = table.row_numbers
     for i, raw in enumerate(table.rows, start=1):
-        row = Row(i=i, raw=raw)
+        # the row's own line in Crexi's file (what Seth sees in Excel), so 'File row' in the lists points at it
+        row = Row(i=lines[i - 1] if len(lines) == len(table.rows) else i, raw=raw)
         row.link_key = B.link_key(ing._text(g(raw, "crexi_url")))
         apn = re.sub(r"[^a-z0-9]", "", (ing._text(g(raw, "apn")) or "").lower())
         row.apn = apn or None
@@ -288,6 +294,8 @@ def _candidates(row: Row, ix: Index) -> tuple[str, list[int]]:
         if not found and not row.zip5 and row.city:
             found = [pid for (st, city, _z), pids in ix.addr.items() if st == row.street and city == row.city
                      for pid in pids]
+        if found and not B.has_house_number(row.street) and len(set(found)) > 1:
+            found = None      # a street with no house number is not one building: several properties share it
         if found:
             return "address", list(found)
     return "", []
@@ -315,6 +323,29 @@ def _load_items(conn: sqlite3.Connection) -> tuple[dict, dict]:
     return items, by_prop
 
 
+def _anchors(parsed: list[Row], found: dict, by_prop: dict) -> Counter:
+    """{batch id: rows of this file that can only belong to that batch} (their property was in one batch only)."""
+    out: Counter = Counter()
+    for row in parsed:
+        bids = {it["batch_id"] for pid in found[id(row)][1] for it in by_prop.get(pid, [])}
+        if len(bids) == 1:
+            out[bids.pop()] += 1
+    return out
+
+
+def _answering(items: list[dict], anchors: Counter) -> list[dict]:
+    """A property sent more than once (a second pass): the row belongs to the batch this file clearly answers,
+    the one with the most rows that can only be its own. An old reply opened and saved again (or downloaded
+    again) has hundreds of rows only the old batch had, so it answers the old batch and never charges or
+    finishes the second pass still waiting at Crexi. With no clear answer, the newest batch first (as before)."""
+    if len(items) < 2:
+        return items
+    best = max(items, key=lambda it: (anchors[it["batch_id"]], it["batch_id"]))
+    if anchors[best["batch_id"]] > max(anchors[it["batch_id"]] for it in items if it is not best):
+        return [best]
+    return items
+
+
 def first_imported(conn: sqlite3.Connection, path: Path) -> str | None:
     """When this exact file was first imported (None if never)."""
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -327,25 +358,28 @@ def analyze(conn: sqlite3.Connection, table: ing.Table, column_map: dict[str, st
     With adopt_hand, a row for one of our properties that is in no batch is counted as a hand batch (the
     apply step creates it). `first_seen`: when this same file was first imported; its rows never claim or flag a
     property sent after that (a second pass Crexi has not answered yet), so importing an old file again never
-    charges or finishes a newer batch."""
+    charges or finishes a newer batch. A property sent twice (a second pass) goes to the batch this file clearly
+    answers (_answering), so a re-saved copy of an old reply never finishes the second pass either."""
     parsed = _parse_rows(table, column_map, cols)
     items, by_prop = _load_items(conn)
     an = Analysis(parsed, items, by_prop, _build_index(conn))
     ix = an.ix
     adopted: set[int] = set()
     handled: set[int] = set()     # properties a row of this file already claimed or flagged: a second row is a duplicate
+    found = {id(row): _candidates(row, ix) for row in parsed}
+    anchors = _anchors(parsed, found, by_prop)
     for matched_pass in (True, False):
         for row in parsed:
             if row.not_matched == matched_pass:
                 continue
-            how, cands = _candidates(row, ix)
+            how, cands = found[id(row)]
             if how:
                 an.methods[how] += 1
             claim = None
             for pid in cands:
                 if pid in handled:
                     continue
-                for it in by_prop.get(pid, []):
+                for it in _answering(by_prop.get(pid, []), anchors):
                     key = (it["batch_id"], pid)
                     if it["status"] in ("sent", "not_returned") and key not in an.claimed and key not in an.flagged:
                         if first_seen and (it["sent_at"] or "") >= first_seen:
@@ -806,6 +840,21 @@ def _make_hand_batch(conn: sqlite3.Connection, an: Analysis, actor: str, setting
                      "VALUES(?,?,?,?, 'sent')", [(bid, p, i, stamp) for i, p in enumerate(pids, start=1)])
     conn.commit()
     return bid
+
+
+def rank_after(conn: sqlite3.Connection, result: dict) -> dict | None:
+    """The free steps after an import (owners, score, DRILL) for the markets whose facts the reply changed, so an
+    owner Crexi filled in gets its owner type, portfolio and score at once. Used by the web route and the CLI.
+    A ranking failure never undoes the import: it says what to run instead."""
+    slugs = list((result.get("merge") or {}).get("markets") or {})
+    if not result.get("changed") or not slugs:
+        return None
+    try:
+        from .. import pipeline
+        return {slug: pipeline.after_import(conn, slug).get("message") for slug in slugs}
+    except Exception:
+        log.exception("Ranking after a Crexi reply failed")
+        return {"error": "Imported, but ranking it failed. Run Owners, Score and DRILL from the Run screen."}
 
 
 _import_lock = threading.Lock()   # one reply import at a time in this program (web requests run in threads)

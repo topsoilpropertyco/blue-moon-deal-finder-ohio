@@ -197,6 +197,7 @@ class Table:
     skipped_sheets: list[str] = field(default_factory=list)
     made_by_blue_moon: bool = False      # the workbook says this app wrote it (our own export)
     created: datetime | None = None      # our workbook's own time stamp (when it was exported; Excel keeps it)
+    row_numbers: list[int] = field(default_factory=list)   # each row's own line in the file (1 = the first line)
 
 
 # --- reading files ----------------------------------------------------------------------------
@@ -285,7 +286,7 @@ def _read_xlsx(path: Path) -> Table:
         if best is None:
             raise IngestError(f"{path.name} has no rows in any sheet.")
         ws = wb[best[1]]
-        grid = [[_xlsx_cell(c) for c in r] for r in ws.iter_rows(values_only=True)]
+        grid = [[_xlsx_cell(c) for c in r] for r in ws.iter_rows(min_row=1, values_only=True)]
         ours = _made_by_blue_moon(wb)
     finally:
         wb.close()
@@ -417,6 +418,7 @@ def _is_formula(v: Any) -> bool:
 def _grid_to_table(filename: str, grid: list[list[Any]], sheet: str | None, keep_formulas: bool = False) -> Table:
     """The header row and the rows under it. A formula cell reads as empty and a column of only formulas is
     skipped, unless keep_formulas (our own files: read_sheets), where a formula keeps its text."""
+    lines = [n for n, r in enumerate(grid, start=1) if any(c is not None for c in r)]
     grid = [r for r in grid if any(c is not None for c in r)]
     if not grid:
         raise IngestError(f"{filename} is empty.")
@@ -441,12 +443,14 @@ def _grid_to_table(filename: str, grid: list[list[Any]], sheet: str | None, keep
 
     headers = [names[i] for i in keep]
     out_rows = []
-    for r in body:
+    row_numbers = []
+    for k, r in enumerate(body):
         row = {names[i]: (None if i >= len(r) or (_is_formula(r[i]) and not keep_formulas) else r[i]) for i in keep}
         if any(v is not None for v in row.values()):
             out_rows.append(row)
+            row_numbers.append(lines[h_idx + 1 + k])
     return Table(filename=filename, headers=headers, rows=out_rows, sheet=sheet, header_row=h_idx + 1,
-                 skipped_columns=skipped)
+                 skipped_columns=skipped, row_numbers=row_numbers)
 
 
 def _header_names(cells: list[Any], width: int) -> list[str]:

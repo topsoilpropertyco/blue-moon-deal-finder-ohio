@@ -129,6 +129,10 @@ def _import(args: argparse.Namespace, conn: sqlite3.Connection, interactive, ask
         say(f"Note: {w}")
     if res.get("unmatched_file"):
         say(f"Rows that could not be matched: {B.output_dir() / res['unmatched_file']}")
+    ranked = R.rank_after(conn, res)            # owners, score and DRILL again, as the web import does
+    for slug, msg in (ranked or {}).items():
+        if msg:
+            say(msg if slug == "error" else f"{slug}: {msg}")
     return EXIT_OK
 
 

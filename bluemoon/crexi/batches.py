@@ -113,9 +113,16 @@ def apn_key(prop: dict) -> str | None:
     return f"{(prop.get('state') or '').upper()}|{(prop.get('county') or '').upper()}|{apn}"
 
 
+def has_house_number(street: str | None) -> bool:
+    """'123 MAIN ST' has one; 'CHANNINGWAY DR' does not (several properties can sit on that street)."""
+    return bool(street and re.match(r"\d", street))
+
+
 def address_key(prop: dict) -> str | None:
+    """Street + city + ZIP, only when the street has a house number: without one, different properties on the same
+    street (each with its own owner and parcel) would look like one building and never be sent."""
     street = normalize_address(prop.get("address"))
-    if not street:
+    if not has_house_number(street):
         return None
     return f"{street}|{(clean_str(prop.get('city')) or '').upper()}|{_zip5(prop.get('zip'))}"
 

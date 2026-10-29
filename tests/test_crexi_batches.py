@@ -1358,3 +1358,111 @@ def test_a_value_swapped_in_by_hand_before_oct_2026_is_not_kept_twice(conn, sett
     owners = M.extra_values(conn, pid)["owner_name"]
     assert [(x["header"], x["value"]) for x in owners] == [("Owner 2", old_owner)]
     assert "crexi_differs" not in one(conn, "SELECT flags_json FROM properties WHERE id=?", (pid,))["flags_json"]
+
+
+# --- final review fixes (crexiflow) ---------------------------------------------------------------------------
+
+def _resave(src: Path, dst: Path) -> Path:
+    """The same reply opened and saved again (Excel, or a second download): same rows, different bytes."""
+    wb = openpyxl.load_workbook(src)
+    wb.active["A1"] = "saved again"
+    wb.save(dst)
+    return dst
+
+
+def test_a_resaved_copy_of_an_old_reply_never_finishes_the_second_pass(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 6)
+    path = reply_file(tmp_path / "r.xlsx", data, not_matched={3, 4})
+    R.apply_reply(conn, path, "r.xlsx", settings=small)                    # 4 returned, 2 missing
+    seed(conn, 2, top=0.1)
+    retry = B.export_batch(conn, 4, today=TODAY, settings=small, retry=True)
+    assert scalar(conn, "SELECT COUNT(*) FROM crexi_batch_items WHERE batch_id=?", (retry["batch_id"],)) == 4
+    before = C.credit_status(conn, today=TODAY, settings=small)
+    copy = _resave(path, tmp_path / "r copy.xlsx")
+    assert R.first_imported(conn, copy) is None                              # the bytes differ
+    again = R.apply_reply(conn, copy, "r copy.xlsx", settings=small)
+    assert again["changed"] is False
+    items = rows(conn, "SELECT status, not_matched_at FROM crexi_batch_items WHERE batch_id=?", (retry["batch_id"],))
+    assert [(i["status"], i["not_matched_at"]) for i in items] == [("sent", None)] * 4
+    assert B.get_batch(conn, retry["batch_id"])["status"] != "closed"
+    after = C.credit_status(conn, today=TODAY, settings=small)
+    assert (after["in_flight"], after["left"]) == (before["in_flight"], before["left"]) == (4, 12)
+
+
+def test_a_late_row_from_the_old_reply_is_charged_to_the_old_batch_not_the_second_pass(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 6)
+    R.apply_reply(conn, reply_file(tmp_path / "r.xlsx", data, skip={3}), "r.xlsx", settings=small)
+    retry = B.export_batch(conn, 1, today=TODAY, settings=small, retry=True)
+    pid = int(data[2]["Property ID"])
+    late = reply_file(tmp_path / "late.xlsx", data)                          # Crexi's full file, row 3 matched now
+    out = R.apply_reply(conn, late, "late.xlsx", settings=small)
+    assert out["returned"] == 1 and out["batch_ids"] == [res["batch_id"]]
+    assert one(conn, "SELECT status FROM crexi_batch_items WHERE batch_id=? AND property_id=?",
+               (res["batch_id"], pid))["status"] == "returned"
+    assert one(conn, "SELECT status FROM crexi_batch_items WHERE batch_id=? AND property_id=?",
+               (retry["batch_id"], pid))["status"] == "sent"
+    assert B.get_batch(conn, retry["batch_id"])["status"] != "closed"
+
+
+def test_the_real_reply_to_a_second_pass_still_finishes_it(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 4)
+    R.apply_reply(conn, reply_file(tmp_path / "r.xlsx", data, not_matched={3, 4}), "r.xlsx", settings=small)
+    retry = B.export_batch(conn, 2, today=TODAY, settings=small, retry=True)
+    sent = read_export(small, retry["file"])
+    out = R.apply_reply(conn, reply_file(tmp_path / "r2.xlsx", sent, not_matched={2}), "r2.xlsx", settings=small)
+    assert out["batch_ids"] == [retry["batch_id"]] and out["headline"] == "Crexi returned 1 of 2. 1 missing."
+    assert B.get_batch(conn, retry["batch_id"])["status"] == "closed"
+
+
+def test_streets_with_no_house_number_are_not_duplicates(conn, small, tmp_path):
+    a = add_prop(conn, address="Channingway Dr", city="FAIRBORN", zip="45324", apn="CH-1")
+    b = add_prop(conn, address="Channingway Dr", city="FAIRBORN", zip="45324", apn="CH-2")
+    c = add_prop(conn, address="12 Main St", city="FAIRBORN", zip="45324", apn="M-1")
+    d = add_prop(conn, address="12 Main St.", city="FAIRBORN", zip="45324", apn="M-2", crexi_url=None)
+    for pid, v in ((a, 0.9), (b, 0.8), (c, 0.7), (d, 0.6)):
+        score(conn, pid, v)
+    assert B.address_key({"address": "Channingway Dr", "city": "Fairborn", "zip": "45324"}) is None
+    picked = B.pick(conn, 4, today=TODAY, settings=small)
+    assert {p["id"] for p in picked.items} == {a, b, c}                      # 12 Main St twice is still one
+    assert picked.duplicates_left_out == 1
+    res = B.export_batch(conn, 3, today=TODAY, settings=small)
+    data = read_export(small, res["file"])
+    for r in data:                                                            # Crexi answers by address only
+        r["Property Link"], r["APN"] = "", ""
+    out = R.apply_reply(conn, reply_file(tmp_path / "r.xlsx", data), "r.xlsx", settings=small)
+    assert out["returned"] == 1                                               # only 12 Main St matches one property
+    assert {r["property_id"] for r in rows(conn, "SELECT property_id FROM crexi_batch_items WHERE status='returned'")} \
+        == {c}
+
+
+def test_file_row_is_the_row_in_crexis_spreadsheet(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 3)
+    path = reply_file(tmp_path / "r.xlsx", data[:2])          # blank row 1, note row 2, headers row 3, data rows 4-5
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    ws.append([])                                                             # a blank row 6
+    ws.append(["https://www.crexi.com/property-records/x/nobody", "Retail", "1 STRANGER AVE", "OTHERTOWN", "OH",
+               "44444", "LUCAS", "X-1", "Stranger Co"] + [None] * 15)          # row 7
+    wb.save(path)
+    out = R.apply_reply(conn, path, "r.xlsx", settings=small)
+    with (small.path("output") / out["unmatched_file"]).open(encoding="utf-8-sig", newline="") as f:
+        got = list(csv.DictReader(f))
+    assert [r["File row"] for r in got] == ["7"]
+
+
+def test_cli_import_ranks_the_markets_the_reply_changed(conn, small, tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from bluemoon import pipeline
+    from bluemoon.crexi import cli
+    ids, res, data = _batch(conn, small, 2)
+    path = reply_file(tmp_path / "r.xlsx", data)
+    calls = []
+    monkeypatch.setattr(pipeline, "after_import", lambda c, slug: calls.append(slug) or {"message": "Ranked."})
+    monkeypatch.setattr(cli, "get_settings", lambda: small)
+    monkeypatch.setattr(R, "get_settings", lambda: small)
+    args = argparse.Namespace(action="import", target=str(path), count=None, retry=False, hand=False, yes=True,
+                              dry_run=False, phone_columns=None, email_columns=None, contact_column=None)
+    assert cli.run(args, conn) == cli.EXIT_OK
+    assert calls == [MARKET]
+    assert f"{MARKET}: Ranked." in capsys.readouterr().out
