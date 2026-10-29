@@ -94,6 +94,9 @@ def report_text(c: Mapping[str, int]) -> str:
     if "matched" in c:
         head.append(f"{g('matched'):,} matched")
     head.append(f"{g('duplicates'):,} duplicate{'s' if g('duplicates') != 1 else ''}")
+    if not g("properties") and not any(g(k) for k in ("new_phones", "new_emails", "new_names", "new_mailing",
+                                                        "blanks_filled", "alternates")):
+        return ", ".join(head) + ". Nothing new for properties you already have."
     new = (f"New data found: {g('new_phones'):,} new phone{'s' if g('new_phones') != 1 else ''}, "
            f"{g('new_emails'):,} new email{'s' if g('new_emails') != 1 else ''}, "
            f"{g('new_names'):,} new owner or contact name{'s' if g('new_names') != 1 else ''}, "

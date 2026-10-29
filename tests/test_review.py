@@ -135,17 +135,18 @@ def test_queue_order_and_card_contents(tmp_root, conn, settings):
     no_photos = add(conn, settings, photos=False, status="no_imagery")
     add(conn, settings, photos=False, status="pending")              # photos still coming: not shown
     add(conn, settings, **ai("INTERIOR_CORRIDOR", 5, 0), reviewed_label="INTERIOR_CORRIDOR")  # answered
-    add(conn, settings, in_buybox=0, **ai("MIXED", 50, 50))            # outside the buy box
+    outside = add(conn, settings, in_buybox=0, **ai("MIXED", 50, 50))  # outside the buy box: listed after the box
+    add(conn, settings, in_buybox=0)                                  # outside, the AI hasn't looked: not listed
     q = review_queue(conn, MARKET)          # photos the AI hasn't looked at yet wait for it: you see them after
-    assert [c["id"] for c in q] == [unsure, yellow_top, yellow_low, no_photos, green]
-    assert [c["group"] for c in q] == ["needs_review", "unsure", "unsure", "no_photos", "confirm"]
+    assert [c["id"] for c in q] == [unsure, yellow_top, yellow_low, outside, no_photos, green]
+    assert [c["group"] for c in q] == ["needs_review", "unsure", "unsure", "unsure", "no_photos", "confirm"]
     only = review_queue(conn, MARKET, scope="unsure")           # "Unsure only": the AI's calls are just spot checks
-    assert [c["group"] for c in only] == ["needs_review", "unsure", "unsure", "no_photos", "spot_check"]
+    assert [c["group"] for c in only] == ["needs_review", "unsure", "unsure", "unsure", "no_photos", "spot_check"]
     set_config(tmp_root, "review.include_unchecked", True)
     from bluemoon.config import reload_settings
     reload_settings()
     q = review_queue(conn, MARKET)
-    assert [c["group"] for c in q][3] == "not_checked" and not_checked in [c["id"] for c in q]
+    assert [c["group"] for c in q][4] == "not_checked" and not_checked in [c["id"] for c in q]
     set_config(tmp_root, "review.include_unchecked", False)
     reload_settings()
     q = review_queue(conn, MARKET)

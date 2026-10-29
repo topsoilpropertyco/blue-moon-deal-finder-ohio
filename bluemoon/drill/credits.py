@@ -339,7 +339,7 @@ def _reason(c: dict, min_tries: int) -> str:
         parts.append(f"Not tried yet for free: {', '.join(c['not_tried'])}. Try those first if you have time.")
     rate = c.get("rate_info")
     if rate and rate["tried"] >= min_tries:
-        parts.append(f"Crexi has turned up an owner name or contact for {rate['found'] / rate['tried']:.0%} of {rate['label']} "
+        parts.append(f"Crexi has turned up a phone or email for {rate['found'] / rate['tried']:.0%} of {rate['label']} "
                      f"so far ({rate['found']:,} of {rate['tried']:,}).")
     return " ".join(parts)
 

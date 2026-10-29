@@ -425,7 +425,9 @@ def plan_enrichment(conn: sqlite3.Connection, an: Analysis, table: ing.Table, co
     names, mailing addresses, blanks filled, differing values kept as alternates, properties gaining nothing."""
     rep = M.Report()
     rep.add("rows_read", len(an.rows))
-    rep.add("matched", sum(1 for r in an.rows if not r.not_matched and r.kind in ("new", "already", "duplicate", "hand")))
+    # 'matched' = the rows this import returns now (the same number as the headline's "returned"); rows already
+    # imported and duplicates are counted apart, so the two lines of the preview agree
+    rep.add("matched", sum(1 for r in an.rows if not r.not_matched and r.kind in ("new", "hand")))
     rep.add("duplicates", sum(1 for r in an.rows if r.kind == "duplicate"))
     groups: dict[int, list[Row]] = defaultdict(list)
     for r in an.rows:
@@ -643,7 +645,7 @@ def _write_unmatched(conn: sqlite3.Connection, an: Analysis, headers: list[str],
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding=B.CSV_ENCODING) as f:
         w = csv.writer(f)
-        w.writerow(["Why", "File row", *headers])
+        w.writerow(["Why", "File row", *[B.safe_cell(h) for h in headers]])
         for r in left:
             w.writerow([B.safe_cell(WHY[r.kind]), r.i + 0, *[B.safe_cell(r.raw.get(h)) for h in headers]])
     return rel
@@ -765,12 +767,14 @@ def _apply_item(conn: sqlite3.Connection, an: Analysis, key: tuple[int, int], ro
         conn.execute("UPDATE credit_ledger SET result=NULL WHERE id=?", (led["id"],))   # refilled just below
     conn.execute("UPDATE crexi_batch_items SET result=?, phones=?, emails=?, not_matched_at=NULL "
                  "WHERE batch_id=? AND property_id=?", (result, len(phones), len(emails), bid, pid))
-    outcome = "found" if result in ("found", "owner_only") else "nothing"
+    # The Crexi credit stage's goal is "reach" (a phone or email). A name-only row still spent the credit (the item
+    # is returned), but for the DRILL and the hit rate it found no way to reach the owner: 'nothing'.
+    outcome = "found" if result == "found" else "nothing"
     if result == "found":
         detail = (f"Crexi batch #{bid}: found {len(phones)} phone{'s' if len(phones) != 1 else ''} and "
                   f"{len(emails)} email{'s' if len(emails) != 1 else ''} (untested).")
     elif result == "owner_only":
-        detail = f"Crexi batch #{bid}: matched, owner or contact name only; no phone or email (no_contact)."
+        detail = f"Crexi batch #{bid}: matched, owner or contact name only; no phone or email."
     else:
         detail = f"Crexi batch #{bid}: matched, but Crexi had no owner or contact information."
     if E.CREDIT_STAGE in cfg.by_key:

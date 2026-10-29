@@ -311,12 +311,21 @@ def details_text(r: Mapping[str, Any]) -> str | None:
     return ", ".join(p for p in parts if p) or None
 
 
+def _set_aside(r: Mapping[str, Any], include_excluded: bool) -> bool:
+    """Leave a property outside the buy box off the list? Never once the AI has made its call: the photo button
+    runs the AI on every lead, so every call it made reaches the list (after the buy-box ones, see _sort_key).
+    Only outside-the-buy-box photos the AI hasn't judged yet wait for include_excluded."""
+    if r.get("in_buybox") != 0 or include_excluded:
+        return False
+    return r.get("ai_label") is None or r.get("checked_at") is None
+
+
 def _picked(conn: sqlite3.Connection, market: dict, ac: AssetClass, settings: Settings, cfg: ReviewConfig,
             slug: str, scope: str, include_excluded: bool) -> list[tuple[tuple, str, dict]]:
     targets = frozenset(target_labels_of(ac))
     picked: list[tuple[tuple, str, dict]] = []
     for r in rows(conn, _QUEUE_SQL, (market["id"],)):
-        if r.get("in_buybox") == 0 and not include_excluded:
+        if _set_aside(r, include_excluded):
             continue
         has_images = bool(streetview.existing_images(settings, r["id"]))
         group = _group(r, has_images, cfg, slug, scope)
@@ -354,7 +363,7 @@ def queue_counts(conn: sqlite3.Connection, market_slug: str, *, include_excluded
     sizes = {"everything": 0, "unsure": 0}
     if ac.visual_enabled:
         for r in rows(conn, _QUEUE_SQL, (market["id"],)):
-            if r.get("in_buybox") == 0 and not include_excluded:
+            if _set_aside(r, include_excluded):
                 continue
             has_images = bool(streetview.existing_images(settings, r["id"]))
             for name in SCOPES:

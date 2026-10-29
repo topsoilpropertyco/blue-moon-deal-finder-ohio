@@ -379,6 +379,24 @@ def test_unmatched_rows_are_listed_in_a_file_never_dropped(conn, small, tmp_path
     assert scalar(conn, "SELECT COUNT(*) FROM properties WHERE address LIKE '%STRANGER%'") == 0   # never added
 
 
+def test_unmatched_file_header_from_crexi_cannot_run_as_a_formula(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 2)
+    path = reply_file(tmp_path / "r.xlsx", data)
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    hdr = next(r for r in range(1, ws.max_row + 1) if ws.cell(r, 1).value == "Property Link")
+    ws.cell(hdr, len(HEADERS) + 1).value = '=HYPERLINK("http://evil.example","x")'
+    ws.cell(hdr, len(HEADERS) + 2).value = ' +cmd'
+    ws.append(["https://www.crexi.com/property-records/x/nobody", "Retail", "1 STRANGER AVE", "OTHERTOWN", "OH",
+               "44444"] + [None] * (len(HEADERS) - 6) + ["v", "w"])
+    wb.save(path)
+    out = R.apply_reply(conn, path, "r.xlsx", settings=small)
+    with (small.path("output") / out["unmatched_file"]).open(encoding="utf-8-sig", newline="") as f:
+        head = next(csv.reader(f))
+    assert "'=HYPERLINK(\"http://evil.example\",\"x\")" in head and "'+cmd" in head
+    assert not any(h.lstrip(" ").startswith(("=", "+", "-", "@")) for h in head)
+
+
 def test_reply_importing_twice_changes_nothing(conn, small, tmp_path):
     ids, res, data = _batch(conn, small, 6)
     path = reply_file(tmp_path / "r.xlsx", data, skip={6}, not_matched={5})
@@ -511,11 +529,26 @@ def test_matched_row_with_a_name_but_no_phone_or_email_is_owner_only(conn, small
     pid = int(data[0]["Property ID"])
     assert scalar(conn, "SELECT COUNT(*) FROM contact_points WHERE property_id=?", (pid,)) == 0   # no phones claimed
     att = one(conn, "SELECT * FROM drill_attempts WHERE property_id=? AND stage_key=?", (pid, E.CREDIT_STAGE))
-    assert att["outcome"] == "found" and "no_contact" in att["detail"]
+    # the credit stage's goal is a phone or email: a name only is 'nothing' for the DRILL and the hit rate
+    assert att["outcome"] == "nothing" and "name only" in att["detail"] and "no_contact" not in att["detail"]
     st = C.credit_status(conn, today=TODAY, settings=small)
     assert st["returned"] == 3                                                  # a matched row still costs a credit
+    assert (st["found"], st["nothing"], st["hit_rate"]) == (0, 3, 0.0)
+    assert scalar(conn, "SELECT COUNT(*) FROM people WHERE property_id=? AND source='crexi'", (pid,)) >= 1  # names kept
     hist = B.property_history(conn, pid)
     assert hist["state"] == "data" and "owner name but no phone or email" in hist["text"]
+
+
+def test_preview_report_matches_the_headline_and_a_reimport_says_nothing_new(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 4)
+    path = reply_file(tmp_path / "r.xlsx", data, not_matched={4})
+    pv = R.preview(conn, path, "r.xlsx", settings=small)
+    assert "Crexi returned 3 of 4" in pv["message"]
+    assert pv["enrichment"]["matched"] == 3 and "3 matched" in pv["enrichment_text"]
+    R.apply_reply(conn, path, "r.xlsx", settings=small)
+    again = R.preview(conn, path, "r.xlsx", settings=small)
+    assert again["enrichment"]["matched"] == 0
+    assert "Nothing new" in again["enrichment_text"] and "gained nothing" not in again["enrichment_text"]
 
 
 def test_matched_row_with_nothing_at_all_is_nothing(conn, small, tmp_path):
@@ -942,6 +975,8 @@ def test_screens_have_no_close_step_and_no_use_this_one():
     drill = (static / "drill.js").read_text(encoding="utf-8")
     assert "Close the batch" not in credits and "ask-close" not in credits and "/close" not in credits
     assert "files/missing" in credits and "Export the next" in credits and "r.headline" in credits
+    # after an import or a cancel frees credits, the export box starts again at every free credit (no stale N)
+    assert credits.count("S.count = '';") >= 3
     assert "Use this one" not in prop and "/alternates/" not in prop and "crexi_differs" not in prop
     assert "withExtras(d, 'units'" in prop and "withExtras(d, 'owner_name'" in prop
     assert "crexiBox(" in drill and "missing_working" in drill

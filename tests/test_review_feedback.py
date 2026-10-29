@@ -26,10 +26,11 @@ def test_calls_to_confirm_come_after_the_unsure_ones_most_valuable_first(tmp_roo
     unsure = add(conn, settings, rank=50, **ai("MIXED", 50, 50))
     needs = add(conn, settings, rank=60, **ai("UNKNOWN", 50, None, quality="poor"))
     q = review_queue(conn, MARKET)
-    # needs-a-look and unsure first; then the calls: walk-ups before not-walk-ups, best Blue Moon rank first
-    assert [c["id"] for c in q] == [needs, unsure, walk_top, walk_low, plain_red]
-    assert [c["ai_called"] for c in q] == [False, False, True, True, True]
-    assert outside_walk in [c["id"] for c in review_queue(conn, MARKET, include_excluded=True)]
+    # needs-a-look and unsure first; then the calls: walk-ups before not-walk-ups, best Blue Moon rank first;
+    # every call the AI made is listed, the ones outside the buy box after the buy box
+    assert [c["id"] for c in q] == [needs, unsure, walk_top, walk_low, plain_red, outside_walk]
+    assert [c["ai_called"] for c in q] == [False, False, True, True, True, True]
+    assert review.queue_counts(conn, MARKET)["scopes"]["everything"] == 6
     assert [c["id"] for c in review_queue(conn, MARKET, scope="unsure")][:2] == [needs, unsure]
     assert [c["id"] for c in review_queue(conn, MARKET, scope="unsure")] == [needs, unsure]   # no AI calls at all
 
@@ -150,6 +151,23 @@ def test_details_are_read_leniently():
     assert (old.building_style, old.estimated_stories, old.buildings_visible, old.condition) == (None,) * 4
     assert vision.normalize_style("Townhomes") == "townhome-row" and vision.normalize_style("mid rise") == "mid-rise"
     assert vision.normalize_style("High-rise tower") == "high-rise" and vision.normalize_style("") is None
+    assert vision.normalize_style("brownstone") == "other" and vision.normalize_style("row houses") == "townhome-row"
+
+
+def test_details_never_crash_on_an_infinite_number():
+    labels = ["EXTERIOR_CORRIDOR", "UNKNOWN"]
+    for bad in ("1e999", "inf", float("inf"), "nan"):
+        res = vision.parse_result(reply(estimated_stories=bad, buildings_visible=bad), labels)
+        assert (res.estimated_stories, res.buildings_visible) == (None, None)
+
+
+@pytest.mark.parametrize("text,want", [
+    ("Good condition", "good"), ("fair condition", "fair"), ("poorly maintained", "poor"),
+    ("broken windows", "poor"), ("not well kept", "poor"), ("looks ok", "fair"), ("run down", "poor"),
+    ("well maintained", "good"), ("good, but boarded windows", "poor"), ("hard to say", "unknown"),
+])
+def test_condition_free_text_is_read_by_whole_words(text, want):
+    assert vision.normalize_condition(text) == want
 
 
 def test_the_apartment_prompt_and_schema_ask_for_the_details(settings):

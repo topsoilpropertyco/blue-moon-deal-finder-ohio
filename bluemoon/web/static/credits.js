@@ -544,6 +544,7 @@
       const res = await BM.api('/api/crexi/import', { method: 'POST', form: importForm() });
       S.imp.result = res;
       S.imp.preview = null;
+      S.count = '';         // missing rows freed credits: "Export the next N" starts again at every free credit
       BM.toast(res.message);
     } catch (err) {
       S.imp.error = W.errText(err);
@@ -568,6 +569,7 @@
       BM.toast(res.message);
       S.confirm = null;
       S.preview = null;
+      S.count = '';         // the cancelled batch's credits are free again: N starts at every free credit
     } catch (err) {
       S.confirm = { id, kind, message: W.errText(err) };
     }

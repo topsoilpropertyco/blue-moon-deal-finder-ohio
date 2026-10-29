@@ -85,7 +85,7 @@ def safe_cell(value: Any) -> Any:
     if isinstance(value, (int, float)):
         return value
     text = str(value)
-    return "'" + text if text.startswith(FORMULA_START) else text
+    return "'" + text if text.lstrip(" ").startswith(FORMULA_START) else text
 
 
 def output_dir(settings: Settings | None = None) -> Path:

@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -164,8 +165,11 @@ def _small_int(v: Any, lo: int, hi: int) -> int | None:
     if v is None or isinstance(v, bool):
         return None
     try:
-        n = int(round(float(v)))
-    except (TypeError, ValueError):
+        f = float(v)
+        if not math.isfinite(f):        # 'inf', '1e999', NaN: not a count (int(inf) would crash the whole run)
+            return None
+        n = int(round(f))
+    except (TypeError, ValueError, OverflowError):
         m = re.search(r"\d+", str(v))
         if not m:
             return None
@@ -173,32 +177,64 @@ def _small_int(v: Any, lo: int, hi: int) -> int | None:
     return n if lo <= n <= hi else None
 
 
+_STYLE_WORDS = (("garden", "garden"), ("walk", "garden"), ("townhome", "townhome-row"),
+                ("townhouse", "townhome-row"), ("rowhouse", "townhome-row"), ("rowhome", "townhome-row"),
+                ("row", "townhome-row"), ("high", "high-rise"), ("tower", "high-rise"), ("mid", "mid-rise"),
+                ("convert", "converted"), ("adaptive", "converted"))
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z]+", text.lower())
+
+
 def normalize_style(v: Any) -> str | None:
-    """One of STYLES (None when nothing was said). Unfamiliar words become 'other'."""
+    """One of STYLES (None when nothing was said). Unfamiliar words become 'other'. Whole words are matched (by
+    their start), so 'brownstone' is not a 'row'."""
     text = str(v or "").strip().lower().replace("_", "-").replace(" ", "-")
     if not text or text in ("none", "null", "n/a", "unknown"):
         return None
     if text in STYLES:
         return text
-    for word, style in (("garden", "garden"), ("walk", "garden"), ("townhome", "townhome-row"),
-                        ("town-home", "townhome-row"), ("townhouse", "townhome-row"), ("row", "townhome-row"),
-                        ("high", "high-rise"), ("tower", "high-rise"), ("mid", "mid-rise"),
-                        ("convert", "converted"), ("adaptive", "converted")):
-        if word in text:
+    words = _words(text.replace("town-home", "townhome"))
+    for word, style in _STYLE_WORDS:
+        if any(w == word or (len(word) > 3 and w.startswith(word)) or (word == "row" and w.startswith("row") and
+               w[3:] in ("s", "house", "houses", "home", "homes")) or (word in ("mid", "high") and
+               w.startswith(word) and w[len(word):] in ("rise", "rises")) for w in words):
             return style
     return "other"
 
 
+_POOR = ("poor", "bad", "rough", "worn", "deteriorat", "dilapidat", "broken", "damage", "boarded", "neglect",
+         "disrepair", "rundown", "distress", "vacant", "crumbl")
+_FAIR = ("fair", "average", "ok", "okay", "moderate", "decent", "modest", "dated", "aging")
+_GOOD = ("good", "excellent", "great", "well", "nice", "clean", "maintained", "updated", "renovated", "kept")
+_NEGATIONS = ("not", "no", "never", "isn", "isnt", "lacks", "lacking", "without")
+
+
+def _is(word: str, stems: tuple[str, ...]) -> bool:
+    return any(word == s or (len(s) > 3 and word.startswith(s)) for s in stems)
+
+
 def normalize_condition(v: Any) -> str | None:
+    """good / fair / poor / unknown from what Claude wrote. Whole words only ('broken' has no 'ok' in it), the
+    worst word wins ('good, but broken windows' is poor), and a negated good word is poor ('not well kept')."""
     text = str(v or "").strip().lower()
     if not text:
         return None
     if text in CONDITIONS:
         return text
-    for word, cond in (("excellent", "good"), ("great", "good"), ("well", "good"), ("average", "fair"),
-                       ("ok", "fair"), ("moderate", "fair"), ("worn", "poor"), ("bad", "poor"),
-                       ("rough", "poor"), ("deteriorat", "poor"), ("dilapidat", "poor")):
-        if word in text:
+    words = _words(text)
+    found: set[str] = set()
+    for i, w in enumerate(words):
+        if _is(w, _POOR) or (w == "run" and i + 1 < len(words) and words[i + 1] == "down"):
+            found.add("poor")
+        elif _is(w, _GOOD):
+            negated = any(x in _NEGATIONS for x in words[max(0, i - 2):i])
+            found.add("poor" if negated else "good")
+        elif _is(w, _FAIR):
+            found.add("fair")
+    for cond in ("poor", "fair", "good"):
+        if cond in found:
             return cond
     return "unknown"
 
