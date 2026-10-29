@@ -964,7 +964,7 @@ def waiting_at_crexi(conn: sqlite3.Connection, property_id: int) -> int | None:
 
 def waiting_message(batch_id: int) -> str:
     return (f"This property is waiting at Crexi in batch #{batch_id}; its credit is counted there. Import Crexi's "
-            f"reply on the Credits screen instead (or close that batch first).")
+            f"reply on the Credits screen instead (or Cancel that batch if you never uploaded it).")
 
 
 def _sync_credit_ledger(conn: sqlite3.Connection, property_id: int, outcome: str) -> None:

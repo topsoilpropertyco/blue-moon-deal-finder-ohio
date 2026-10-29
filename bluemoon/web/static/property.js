@@ -33,7 +33,6 @@
     units_from_addresses: 'Units estimated from the number of addresses', shared_apn: 'Shares a parcel number with another row',
     no_owner_name: 'No owner name in the export', no_coordinates: 'No map location yet', no_address: 'No street address',
     county_owner_differs: 'The county tax record shows a different owner than the Crexi export',
-    crexi_differs: 'Crexi sent different data than we hold (see the Crexi section)',
   };
   const RENT_FIT = {in: ['g', 'Area rents match the scale'], near: ['y', 'Area rents are close to the scale'], out: ['r', 'Area rents are off the scale'], na: ['n', 'No HUD rent for this area']};
   const RENT_SOURCE = {hud_arcgis: 'HUD Fair Market Rents (HUD map service)', hud_file: 'HUD Fair Market Rents (downloaded file)', hud_api: 'HUD Fair Market Rents (HUD API)'};
@@ -318,33 +317,44 @@
       (dr.notes ? '<h3>Notes</h3><pre class="p-notes">' + esc(dr.notes) + '</pre>' : '') + '</section>';
   }
 
-  /* ---------- Crexi: batches and values that differ ---------- */
+  /* ---------- Crexi: batches and extra values (Units 2, Owner 2...) ---------- */
+
+  const MONEY_FIELDS = new Set(['sale_price', 'total_value', 'annual_tax', 'loan_amount', 'improvement_value', 'land_value']);
+
+  function extraText(field, v) {
+    if (v == null || v === '') return '';
+    if (MONEY_FIELDS.has(field) && Number.isFinite(Number(v))) return fmt.money(v);
+    if (typeof v === 'number') return fmt.num(v);
+    return String(v);
+  }
+
+  /** "Units 2: 26 (Crexi, Oct 29)" for each extra value Crexi sent for this field, or [] when none. */
+  function extrasFor(d, field) {
+    const ex = ((d.crexi || {}).extras || {})[field] || [];
+    return ex.map((x) => x.header + ': ' + extraText(field, x.value) +
+      ' (' + [x.source, x.day].filter(Boolean).join(', ') + ')');
+  }
+
+  /** A kv value with its extra values next to it: "24 · Units 2: 26 (Crexi, Oct 29)". */
+  function withExtras(d, field, main) {
+    const more = extrasFor(d, field);
+    if (!more.length) return main;
+    return [has(main) ? main : 'blank'].concat(more).join(' · ');
+  }
 
   function crexiHtml(d) {
     const cx = d.crexi || {};
     const events = cx.events || [];
-    const alts = (cx.alternates || []).filter((a) => a.status === 'open');
-    if (!events.length && !alts.length) return '';
-    const show = (v) => (v == null || v === '' ? 'blank' : String(v));
+    const extras = cx.extras || {};
+    const fields = Object.keys(extras);
+    if (!events.length && !fields.length) return '';
     const lines = events.map((e) => '<li>' + esc(e.text) + '</li>').join('');
-    const altHtml = alts.length
-      ? '<h3 style="margin-top:6px">Crexi sent different data (' + alts.length + ')</h3>' +
-        '<p class="note" style="margin:0">We kept what we already had. Choose “Use this one” to switch (the value it replaces is kept in the edit history), or Ignore.</p>' +
-        '<ul class="p-alts">' + alts.map((a) => '<li><div><b>' + esc(a.label) + '</b>: we have <span class="muted">' + esc(show(a.original)) +
-          '</span>, Crexi says <b>' + esc(show(a.value)) + '</b></div><div class="p-actions">' +
-          (a.usable ? '<button type="button" class="btn small" data-act="alt" data-id="' + Number(a.id) + '" data-do="use">Use this one</button>' : '') +
-          '<button type="button" class="btn small" data-act="alt" data-id="' + Number(a.id) + '" data-do="ignore">Ignore</button></div></li>').join('') + '</ul>'
+    const kept = fields.length
+      ? '<h3 style="margin-top:6px">Extra values Crexi sent</h3>' +
+        '<p class="note" style="margin:0">The first value stays; a different one is kept next to it, numbered. Nothing is overwritten.</p>' +
+        '<ul class="p-crexi">' + fields.map((f) => '<li>' + esc(extrasFor(d, f).join(' · ')) + '</li>').join('') + '</ul>'
       : '';
-    return '<section class="sec" data-part="crexi"><h2>Crexi</h2>' + (lines ? '<ul class="p-crexi">' + lines + '</ul>' : '') + altHtml + '</section>';
-  }
-
-  async function decideAlt(b) {
-    const c = cur;
-    const res = await write(BM.m('/properties/' + c.id + '/alternates/' + Number(b.getAttribute('data-id'))),
-      {action: b.getAttribute('data-do')});
-    if (!res || cur !== c) return;
-    await load(c, {keepScroll: true, quiet: true});
-    changed(c);
+    return '<section class="sec" data-part="crexi"><h2>Crexi</h2>' + (lines ? '<ul class="p-crexi">' + lines + '</ul>' : '') + kept + '</section>';
   }
 
   function bannerHtml(dr, status) {
@@ -363,11 +373,11 @@
     const type = [owner.owner_type_label || (d.owner_type ? labelText(d.owner_type) : ''),
       count > 1 ? 'owns ' + fmt.num(count) + ' properties' : ''].filter(Boolean).join(' · ');
     return kv([
-      ['Owner on record', d.owner_name || (level === 1 ? 'Not on record' : '')],
+      ['Owner on record', withExtras(d, 'owner_name', d.owner_name || (level === 1 ? 'Not on record' : ''))],
       ['Decision-maker', maker],
       ['Type', type],
       ['Channels', ui.channelBadges(dr.channels || d.channels).replace('class="chs"', 'class="chs" style="margin-left:0"'), true],
-      ['Mailing address', owner.mailing_text],
+      ['Mailing address', withExtras(d, 'mailing_address', owner.mailing_text)],
     ]);
   }
 
@@ -837,13 +847,13 @@
       ? [has(p.improvement_value) ? 'buildings ' + fmt.money(p.improvement_value) : '', has(p.land_value) ? 'land ' + fmt.money(p.land_value) : ''].filter(Boolean).join(' · ')
       : null;
     const rows = [
-      ['Units', n(p.units)],
-      ['Building size', n(p.building_sqft, ' sq ft')],
-      ['Lot', n(p.lot_acres, ' acres')],
-      ['Buildings', n(p.building_count)],
-      ['Stories', n(p.stories)],
-      ['Year built', has(p.year_built) ? String(p.year_built) : null],
-      ['Property type', p.property_type],
+      ['Units', withExtras(d, 'units', n(p.units))],
+      ['Building size', withExtras(d, 'building_sqft', n(p.building_sqft, ' sq ft'))],
+      ['Lot', withExtras(d, 'lot_acres', n(p.lot_acres, ' acres'))],
+      ['Buildings', withExtras(d, 'building_count', n(p.building_count))],
+      ['Stories', withExtras(d, 'stories', n(p.stories))],
+      ['Year built', withExtras(d, 'year_built', has(p.year_built) ? String(p.year_built) : null)],
+      ['Property type', withExtras(d, 'property_type', p.property_type)],
       ['Size for the buy box', bb.size_detail ? bb.size_detail + (bb.size_basis_label ? ' (' + bb.size_basis_label.toLowerCase() + ')' : '') : null],
       ['Parcel number', p.apn],
       ['County', p.county ? fmt.title(p.county) + (p.state ? ', ' + p.state : '') : null],
@@ -871,14 +881,14 @@
     const count = Number(o.portfolio_count || 0);
     const mail = o.mailing_text ? o.mailing_text + (o.mailing && o.mailing.care_of ? ' (c/o ' + o.mailing.care_of + ')' : '') : null;
     const rows = [
-      ['Owner of record', o.owner_name || d.owner_name || 'Not on record'],
+      ['Owner of record', withExtras(d, 'owner_name', o.owner_name || d.owner_name || 'Not on record')],
       ['Owner type', o.owner_type_label || (d.owner_type ? labelText(d.owner_type) : null)],
       ['Properties owned', count ? (count === 1 ? 'Just this one' : fmt.num(count) + ' (same name or mailing address)') : null],
       ['Years owned', years],
-      ['Last sale price', has(o.sale_price) ? fmt.money(o.sale_price) : null],
+      ['Last sale price', withExtras(d, 'sale_price', has(o.sale_price) ? fmt.money(o.sale_price) : null)],
       ['Mortgage', loan || null],
       ['Owner lives', ABSENTEE[o.absentee] || null],
-      ['Mailing address', mail],
+      ['Mailing address', withExtras(d, 'mailing_address', mail)],
     ];
     let body = kv(rows);
     const sib = Array.isArray(o.siblings) ? o.siblings : [];
@@ -1103,8 +1113,6 @@
       cur.open = 'attempt';
       cur.mode = {outcome: b.getAttribute('data-outcome') || 'found', stage: b.getAttribute('data-stage')};
       redrawContact(true);
-    } else if (act === 'alt') {
-      decideAlt(b);
     } else if (act === 'outreach') {
       outreach(b);
     } else if (act === 'cwrong') {

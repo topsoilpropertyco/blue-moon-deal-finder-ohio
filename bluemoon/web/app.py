@@ -713,7 +713,10 @@ DrillScope = Annotated[str, Query(pattern="^(buybox|all)$",
 
 @router.get("/api/m/{slug}/drill")
 def drill_overview(slug: str, conn: Conn, scope: DrillScope = "buybox") -> dict:
-    return engine.overview(conn, slug, scope=scope)
+    from ..crexi import batches as crexi_batches
+    out = engine.overview(conn, slug, scope=scope)
+    out["crexi"] = crexi_batches.drill_box(conn, slug)      # the DRILL screen's small Crexi box
+    return out
 
 
 @router.get("/api/m/{slug}/drill/stages")

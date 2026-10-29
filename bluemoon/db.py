@@ -28,6 +28,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("visual_checks", "ai_condition", "TEXT"),
     ("credit_ledger", "period", "TEXT"),     # Crexi credit periods (bluemoon/crexi/period.py)
     ("credit_ledger", "batch_id", "INTEGER"),
+    ("property_alternates", "batch_id", "INTEGER"),   # extra values: the Crexi batch they came back in
 )
 # meta key: markets whose scores were saved before version 2. The dashboard re-scores each one once, so the
 # set-aside groups (scores.aside_buckets) exist. JSON list of market ids.
@@ -384,9 +385,10 @@ CREATE TABLE IF NOT EXISTS property_edits (
 );
 CREATE INDEX IF NOT EXISTS ix_property_edits_property ON property_edits(property_id, field);
 
--- A later Crexi row (a second copy of a property, a reply file, a re-import) that disagrees with what a property
--- already holds. The original value is kept; the new one waits here until it is used or ignored
--- (bluemoon/crexi/merge.py). Append-only: a row is never deleted, only decided.
+-- Extra values: a later Crexi row (a second copy of a property, a reply file, a re-import) that says something
+-- else than the property already holds. The first value stays the main one; each different value is KEPT here
+-- automatically as "<Field> 2", "<Field> 3"... (bluemoon/crexi/merge.py), shown next to the main one and in the
+-- exports. Append-only. status: kept (the normal case), used / dismissed (decided by hand before Oct 2026).
 CREATE TABLE IF NOT EXISTS property_alternates (
   id INTEGER PRIMARY KEY,
   property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
@@ -395,8 +397,9 @@ CREATE TABLE IF NOT EXISTS property_alternates (
   original TEXT,                   -- JSON: the value held when it was sent
   source TEXT NOT NULL DEFAULT 'crexi',
   import_id INTEGER,               -- imports.id of the file that held it
+  batch_id INTEGER,                -- crexi_batches.id when it came in Crexi's reply to a batch
   seen_at TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'used', 'dismissed')),
+  status TEXT NOT NULL DEFAULT 'kept' CHECK (status IN ('kept', 'used', 'dismissed')),
   decided_by TEXT, decided_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_alternates_property ON property_alternates(property_id, status);
@@ -463,6 +466,7 @@ def init_db(conn: sqlite3.Connection, settings: Settings | None = None) -> None:
     with _lock:
         conn.executescript(SCHEMA)
         _migrate(conn)
+        _migrate_extra_values(conn)
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))
         conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
                      (str(SCHEMA_VERSION), SCHEMA_VERSION))
@@ -495,6 +499,31 @@ def _migrate(conn: sqlite3.Connection) -> None:
                                           "JOIN properties p ON p.id = s.property_id ORDER BY 1").fetchall()]
         if ids:
             conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (RESCORE_PENDING_KEY, dumps(ids)))
+
+
+def _migrate_extra_values(conn: sqlite3.Connection) -> None:
+    """Extra values (Oct 2026): a second value Crexi sends is kept automatically, no click needed. An older
+    database has property_alternates with status 'open' waiting for 'Use this one' / 'Ignore': rebuild the table
+    so 'open' rows become 'kept' (same ids, nothing lost), and drop the retired 'crexi_differs' warning flag."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='property_alternates'").fetchone()
+    if row and "'open'" in (row[0] or ""):
+        cols = ["id", "property_id", "field", "value", "original", "source", "import_id", "batch_id", "seen_at",
+                "status", "decided_by", "decided_at"]
+        have = _columns(conn, "property_alternates")
+        pick = ", ".join(("CASE status WHEN 'open' THEN 'kept' ELSE status END" if c == "status" else c)
+                         if c in have else "NULL" for c in cols)
+        conn.execute("DROP INDEX IF EXISTS ix_alternates_property")
+        conn.execute("ALTER TABLE property_alternates RENAME TO property_alternates_old")
+        start = SCHEMA.index("CREATE TABLE IF NOT EXISTS property_alternates")
+        end = SCHEMA.index("CREATE INDEX IF NOT EXISTS ix_alternates_property")
+        conn.execute(SCHEMA[start:end].strip().rstrip(";"))
+        conn.execute(f"INSERT INTO property_alternates({', '.join(cols)}) SELECT {pick} FROM property_alternates_old")
+        conn.execute("DROP TABLE property_alternates_old")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_alternates_property ON property_alternates(property_id, status)")
+    for pid, flags in conn.execute("SELECT id, flags_json FROM properties WHERE flags_json LIKE "
+                                   "'%crexi_differs%'").fetchall():
+        kept = [f for f in (loads(flags, []) or []) if f != "crexi_differs"]
+        conn.execute("UPDATE properties SET flags_json=? WHERE id=?", (dumps(sorted(kept)), pid))
 
 
 def pending_rescore(conn: sqlite3.Connection) -> set[int]:

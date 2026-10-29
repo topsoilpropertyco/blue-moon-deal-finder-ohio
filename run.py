@@ -131,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     sh.add_argument("--set", dest="set_password", metavar="PASSWORD",
                     help="with password: use this password instead of a made-up one (8+ characters)")
     from bluemoon.crexi import cli as crexi_cli
-    crexi_cli.add_arguments(add("crexi", "Crexi bulk batches: export the next N, import Crexi's reply, close, history "
+    crexi_cli.add_arguments(add("crexi", "Crexi bulk batches: export the next N, import Crexi's reply, cancel, history "
                                          "(see 'uv run run.py crexi status')."))
     au = add("autoupdate", "Update the app by itself every night at 3:17 AM (install), or see how it went (status).")
     au.add_argument("action", nargs="?", default="status", choices=["install", "uninstall", "status", "now"],

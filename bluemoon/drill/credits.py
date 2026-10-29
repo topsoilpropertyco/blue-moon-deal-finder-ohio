@@ -5,8 +5,8 @@ bluemoon/crexi/period.py. Bulk batches (bluemoon/crexi) spend them.
 Credits used = credits Crexi already spent (the ledger: rows Crexi matched and returned in a batch, or used by
 hand) + the properties sent to Crexi that are still waiting ("in flight"). Counting the waiting ones is what
 stops the 500 being overspent. Crexi charges a credit only for a row it MATCHES (a matched row costs one even
-with no phone or email; a 'Not Matched' row costs nothing), so a batch closed with rows that never came back
-frees those credits again.
+with no phone or email; a 'Not Matched' row costs nothing), so when Crexi's reply is imported the rows that
+did not come back (missing) free those credits again at once.
 
 Because unused credits are lost when the period ends, the plan spends them ALL, at a steady daily pace,
 on the best possible owners the free stages could not reach. Credits belong to the Crexi account, so there

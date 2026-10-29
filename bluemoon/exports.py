@@ -20,6 +20,13 @@ Every property list ends with 'Property ID' and 'Row as of', and workbooks name 
 an edited copy imported back is known as ours and only its editable columns are read (ingest/roundtrip.py).
 
 Our columns come first, then every original column from the import, under its original name.
+
+Numbered columns (Seth's duplicate rule: the first value is never overwritten, a second one is kept next to it):
+Owner, Owner 2, Owner 3...; Mailing address, Mailing address 2...; Phone 1..N and Email 1..N (one contact per
+column, working ones first, then not tested yet; wrong and do-not-contact ones are never in them); and
+"<Field> 2" right after any fact that has an extra value (Units 2, Year built 2...). Each file gets as many as
+the most any row has, capped at config.yaml exports.max_numbered. Bringing a file back in reads only the
+editable columns by their exact names, so the numbered ones are ignored (ingest/roundtrip.py).
 This module never reads API keys.
 """
 from __future__ import annotations
@@ -46,6 +53,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from . import pipeline
 from .config import AssetClass, Settings, get_settings
+from .crexi import merge as cmerge
 from .db import loads, market_by_slug, rows, this_month
 from .drill import credits as drill_credits
 from .drill import engine, links, stats
@@ -79,6 +87,7 @@ MAX_WIDTH, MIN_WIDTH, WIDTH_SAMPLE = 50, 8, 300
 _ILLEGAL_XLSX = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
 _PLAIN_NUMBER = re.compile(r"-?\d+(\.\d+)?")   # e.g. a raw Crexi Longitude "-83.93" from a CSV import
+_NUMBERED_HEADER = re.compile(r"^(phone|email|owner|mailing address) \d+$", re.IGNORECASE)
 _WEB_LINK = re.compile(r"^https?://", re.IGNORECASE)   # same rule as the dashboard's safeUrl
 ABSENTEE_LABELS = {"local": "Local", "instate": "In state, other city", "outofstate": "Out of state"}
 DEBT_LABELS = {"free_and_clear": "Likely free and clear", "maturing_soon": "Loan maturing soon",
@@ -158,7 +167,8 @@ def raw_columns(raw_headers: list[str], taken: Iterable[str]) -> list[Col]:
     used = set(taken)
     out = []
     for h in raw_headers:
-        name = h if h not in used else f"{h} (Crexi)"
+        ours = h in used or bool(_NUMBERED_HEADER.match(h))    # never mistaken for our Phone 1, Owner 2...
+        name = h if not ours else f"{h} (Crexi)"
         used.add(name)
         out.append(Col(name, lambda r, k=h: r["_raw"].get(k)))
     return out
@@ -188,6 +198,85 @@ MAILING_COLUMNS: list[Col] = [
 ]
 
 SUMMARY_COLUMNS: list[Col] = [_col("section", "Section"), _col("item", "Item"), _col("value", "Value")]
+
+# --- numbered columns (Owner 2, Units 2, Phone 1..N, Email 1..N) -----------------------------------------------
+
+# Our column header -> the property field whose extra values ("<header> 2", "<header> 3"...) follow it.
+NUMBERED_AFTER: dict[str, str] = {"Units": "units", "Building sq ft": "building_sqft", "Year built": "year_built",
+                                  "Lot acres": "lot_acres", "Property type": "property_type", "County": "county",
+                                  "Owner": "owner_name"}
+MAILING_HEADER = "Mailing address"
+DEFAULT_MAX_NUMBERED = 5
+
+
+def max_numbered(settings: Settings | None = None) -> int:
+    """config.yaml exports.max_numbered: the most numbered columns of one kind (Owner .. Owner 5, Phone 1..5)."""
+    try:
+        n = int((settings or get_settings()).section("exports").get("max_numbered", DEFAULT_MAX_NUMBERED))
+    except (TypeError, ValueError):
+        n = DEFAULT_MAX_NUMBERED
+    return max(1, min(n, 20))
+
+
+def callable_contacts(conn: sqlite3.Connection, market_id: int) -> dict[int, dict[str, list[str]]]:
+    """{property id: {'phone': [...], 'email': [...]}}: working ones first, then not tested yet, oldest first;
+    never a wrong or do-not-contact one, nothing for a do-not-contact owner, each number or address once."""
+    dnc = engine._dnc_keys(conn)
+    out: dict[int, dict[str, list[str]]] = {}
+    seen: dict[int, set[tuple[str, str]]] = {}
+    for r in rows(conn, """
+            SELECT cp.property_id, cp.channel, cp.value FROM contact_points cp
+            JOIN properties p ON p.id = cp.property_id LEFT JOIN drill_state d ON d.property_id = cp.property_id
+            WHERE p.market_id = ? AND cp.status IN ('verified', 'untested') AND COALESCE(d.status, 'active') != 'dnc'
+              AND cp.channel IN ('phone', 'text', 'vm', 'email')
+            ORDER BY cp.property_id, CASE cp.status WHEN 'verified' THEN 0 ELSE 1 END, cp.id""", (market_id,)):
+        fam = engine._contact_family(r["channel"])
+        key = (fam, engine._contact_key(r["channel"], r["value"]))
+        pid = int(r["property_id"])
+        if key in dnc or key in seen.setdefault(pid, set()):
+            continue
+        seen[pid].add(key)
+        out.setdefault(pid, {"phone": [], "email": []})[fam].append(r["value"])
+    return out
+
+
+def numbered_fields(row: dict, prop: dict, extras: dict[str, list[dict]], contacts: dict[str, list[str]] | None,
+                    cap: int) -> dict[str, int]:
+    """Put one row's numbered values in it (keys 'x_<field>_<n>', 'x_mailing_address_1', 'phone_<n>',
+    'email_<n>') and return how many of each it has ({field, 'phone' or 'email': highest number})."""
+    used: dict[str, int] = {}
+    for f, vals in extras.items():
+        for v in vals:
+            if v["n"] <= cap:
+                row[f"x_{f}_{v['n']}"] = v["value"]
+                used[f] = max(used.get(f, 1), v["n"])
+    row["x_mailing_address_1"] = cmerge.mailing_text(prop)
+    for kind in ("phone", "email"):
+        vals = (contacts or {}).get(kind) or []
+        for n, v in enumerate(vals[:cap], start=1):
+            row[f"{kind}_{n}"] = v
+        used[kind] = min(len(vals), cap)
+    return used
+
+
+def with_numbered(cols: list[Col], counts: dict[str, int], contacts_after: str) -> list[Col]:
+    """The columns with the numbered ones put in: '<Field> 2'... right after a fact that has extra values, the
+    mailing address(es) after the owner(s), and Phone 1..N, Email 1..N after `contacts_after`."""
+    out: list[Col] = []
+    for c in cols:
+        out.append(c)
+        f = NUMBERED_AFTER.get(c.header)
+        if f:
+            out += [_col(f"x_{f}_{n}", f"{c.header} {n}", c.kind) for n in range(2, counts.get(f, 1) + 1)]
+            if f == "owner_name":
+                out.append(_col("x_mailing_address_1", MAILING_HEADER))
+                out += [_col(f"x_mailing_address_{n}", f"{MAILING_HEADER} {n}")
+                        for n in range(2, counts.get("mailing_address", 1) + 1)]
+        if c.header == contacts_after:
+            out += [_col(f"phone_{n}", f"Phone {n}") for n in range(1, max(1, counts.get("phone", 0)) + 1)]
+            out += [_col(f"email_{n}", f"Email {n}") for n in range(1, max(1, counts.get("email", 0)) + 1)]
+    return out
+
 
 # --- the round trip: download, fix in Excel, import back (ingest/roundtrip.py) ---------------------------
 
@@ -222,14 +311,21 @@ class MarketData:
     raw_headers: list[str]
     summaries: dict[int, dict]
     handed_off: set[int] = field(default_factory=set)
+    numbered: dict[str, int] = field(default_factory=dict)    # how many numbered columns of each kind
 
     @property
     def slug(self) -> str:
         return self.market["slug"]
 
+    def our_columns(self) -> list[Col]:
+        return with_numbered(property_columns(self.asset), self.numbered, "Contact info")
+
     def columns(self) -> list[Col]:
-        ours = property_columns(self.asset)
+        ours = self.our_columns()
         return ours + raw_columns(self.raw_headers, (c.header for c in ours))
+
+    def worklist_columns(self) -> list[Col]:
+        return with_numbered(WORKLIST_COLUMNS, self.numbered, CHANNEL_HEADERS["vm"])
 
 
 def load_market(conn: sqlite3.Connection, market_slug: str) -> MarketData:
@@ -250,10 +346,18 @@ def load_market(conn: sqlite3.Connection, market_slug: str) -> MarketData:
         headers.update(dict.fromkeys(row["_raw"]))
         out.append(row)
     out.sort(key=_list_order)
+    extras = cmerge.extra_values_many(conn, {r["property_id"]: r["_prop"] for r in out})
+    contacts = callable_contacts(conn, market["id"])
+    cap = max_numbered(settings)
+    numbered: dict[str, int] = {}
+    for r in out:
+        for k, n in numbered_fields(r, r["_prop"], extras.get(r["property_id"], {}), contacts.get(r["property_id"]),
+                                    cap).items():
+            numbered[k] = max(numbered.get(k, 0), n)
     handed = {r["property_id"] for r in rows(conn, "SELECT d.property_id FROM drill_state d JOIN properties p ON "
                                                    "p.id = d.property_id WHERE p.market_id = ? AND d.handed_off_at "
                                                    "IS NOT NULL", (market["id"],))}
-    return MarketData(settings, market, ac, out, list(headers), summaries, handed)
+    return MarketData(settings, market, ac, out, list(headers), summaries, handed, numbered)
 
 
 def _last_decided(conn: sqlite3.Connection, market_id: int) -> dict[int, str]:
@@ -582,13 +686,37 @@ def write_crm_handoff(conn: sqlite3.Connection, data: MarketData, folder: Path, 
     """Confirmed owners for the CRM, then (with stamp) mark the new ones as handed off, only after the file
     is saved. A plain download (stamp=False) never changes anything."""
     found = stats.crm_handoff_rows(conn, data.slug)
+    by_id = {r["property_id"]: r for r in data.properties}
+    found = [crm_numbered(r, by_id.get(r["property_id"], {}), data.numbered) for r in found]
     for r in found:
         r["new_in_this_export"] = "No" if r.get("handed_off_at") else "Yes"
-    header = list(found[0]) if found else [*CRM_COLUMNS, "new_in_this_export"]
+    header = list(found[0]) if found else [*crm_numbered(dict.fromkeys(CRM_COLUMNS), {}, data.numbered),
+                                           "new_in_this_export"]
     path = write_dict_csv(folder / "crm_handoff.csv", header, found)
     if stamp:
         engine.mark_handed_off(conn, [r["property_id"] for r in found if not r.get("handed_off_at")])
     return path
+
+
+CRM_NUMBERED_AFTER = {"owner_name": "owner_name", "mailing_address": "mailing_address", "units": "units",
+                      "building_sqft": "building_sqft", "year_built": "year_built"}
+
+
+def crm_numbered(r: dict, src: dict, counts: dict[str, int]) -> dict:
+    """A CRM row with its numbered columns put in: phone_1..N and email_1..N after 'vm' (working ones first),
+    owner_name_2..., mailing_address_2..., units_2... right after the first value."""
+    out: dict = {}
+    for k, v in r.items():
+        out[k] = v
+        f = CRM_NUMBERED_AFTER.get(k)
+        if f:
+            for n in range(2, counts.get(f, 1) + 1):
+                out[f"{k}_{n}"] = src.get(f"x_{f}_{n}")
+        if k == "vm":
+            for kind in ("phone", "email"):
+                for n in range(1, max(1, counts.get(kind, 0)) + 1):
+                    out[f"{kind}_{n}"] = src.get(f"{kind}_{n}")
+    return out
 
 
 def mailing_rows(conn: sqlite3.Connection, data: MarketData) -> list[dict]:
@@ -896,7 +1024,8 @@ def export_market(conn: sqlite3.Connection, market_slug: str, out_dir: str | Pat
         if f"excluded_{reason}.csv" in wanted:
             files[f"excluded_{reason}.csv"] = write_excluded(data, folder, reason)
     if "drill_worklist.csv" in wanted:
-        files["drill_worklist.csv"] = write_csv(folder / "drill_worklist.csv", WORKLIST_COLUMNS, worklist_rows(data))
+        files["drill_worklist.csv"] = write_csv(folder / "drill_worklist.csv", data.worklist_columns(),
+                                                worklist_rows(data))
     if "mailing_list.csv" in wanted:
         files["mailing_list.csv"] = write_csv(folder / "mailing_list.csv", MAILING_COLUMNS, mailing_rows(conn, data))
     _tell(progress, 0.3, "Writing the summary")
@@ -910,8 +1039,8 @@ def export_market(conn: sqlite3.Connection, market_slug: str, out_dir: str | Pat
             Sheet("Ranked", columns, _ranked(data)), Sheet("All properties", columns, data.properties),
             # Our columns only: the same rows are on 'All properties' and in excluded_*.csv with every
             # original column, and leaving them out here keeps the workbook quick to write.
-            Sheet("Excluded", property_columns(data.asset), _excluded(data)),
-            Sheet("DRILL worklist", WORKLIST_COLUMNS, worklist_rows(data)),
+            Sheet("Excluded", data.our_columns(), _excluded(data)),
+            Sheet("DRILL worklist", data.worklist_columns(), worklist_rows(data)),
             Sheet("Summary", SUMMARY_COLUMNS, summary_rows(summary or {}))])
     if "crm_handoff.csv" in wanted:
         files["crm_handoff.csv"] = write_crm_handoff(conn, data, folder, stamp=stamp_handoffs)
