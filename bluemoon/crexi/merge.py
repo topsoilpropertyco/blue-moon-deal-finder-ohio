@@ -10,8 +10,8 @@ deleted:
 3. the same value changes nothing;
 4. a factual field that differs from the original (units, year built, sq ft, owner name, mailing address...)
    keeps the original, and the new value is stored as an ALTERNATE (table property_alternates). The property
-   gets the flag `crexi_differs`; the drawer shows each alternate with "Use this one" (applied through
-   property_edits, so it can be undone) and "Ignore". A different owner name is also added as another person,
+   gets the flag `crexi_differs`; the drawer shows each alternate with "Use this one" (recorded in
+   property_edits, with the value it replaced) and "Ignore". A different owner name is also added as another person,
    so the DRILL can use it.
 
 The same rule runs for the reply file of a batch, for duplicate rows inside any import file, and for a later
@@ -35,6 +35,7 @@ FLAG = "crexi_differs"
 # never an alternate: Crexi writing "ST" for "STREET" is not a disagreement about the property.
 IDENTITY_FIELDS = frozenset({"source", "source_id", "crexi_url", "address", "unit", "city", "state", "zip", "apn",
                              "lat", "lng", "geocode_quality"})
+RAW_PREFIX = "raw:"     # an alternate for a column kept only with the original columns (raw_json), e.g. raw:Occupancy
 MAILING_FIELDS = ("mailing_address", "mailing_unit", "mailing_city", "mailing_state", "mailing_zip",
                   "mailing_care_of")
 
@@ -51,6 +52,8 @@ LABELS = {
 
 
 def label(field_name: str) -> str:
+    if field_name.startswith(RAW_PREFIX):
+        return field_name[len(RAW_PREFIX):]
     return LABELS.get(field_name) or field_name.replace("_", " ")
 
 
@@ -102,6 +105,8 @@ def report_text(c: Mapping[str, int]) -> str:
 
 def _same(field_name: str, a: Any, b: Any) -> bool:
     from ..ingest.edits import same_value       # imported here: bluemoon.ingest imports this module
+    if field_name.startswith(RAW_PREFIX):
+        return _raw_same(a, b)
     if field_name == "owner_name":
         return (normalize_owner(a) or "") == (normalize_owner(b) or "")
     if field_name == "county":
@@ -195,6 +200,25 @@ def plan_facts(existing: Mapping[str, Any], incoming: Mapping[str, Any], columns
     return plan
 
 
+def _raw_same(a: Any, b: Any) -> bool:
+    try:
+        return float(str(a).replace(",", "")) == float(str(b).replace(",", ""))
+    except (TypeError, ValueError):
+        return " ".join(str(a).split()).casefold() == " ".join(str(b).split()).casefold()
+
+
+def raw_alternates(stored: Mapping[str, Any], incoming: Mapping[str, Any], keys: Iterable[str]) -> dict:
+    """Columns kept only with the original columns (Days on Market, Occupancy, lease fields...): the stored value
+    stays, and a different non-blank value in the new file is returned as an alternate
+    {'raw:<column>': (new, original)} so it is not lost."""
+    out = {}
+    for k in keys:
+        old, new = clean_str(stored.get(k)), clean_str(incoming.get(k))
+        if old is not None and new is not None and not _raw_same(old, new):
+            out[RAW_PREFIX + k] = (incoming.get(k), stored.get(k))
+    return out
+
+
 def filled_count(plan: FactsPlan) -> int:
     """How many blanks the plan fills. A mailing address counts once, not once for each of its parts."""
     fills = {f for f in plan.fills if f not in MAILING_FIELDS}
@@ -213,9 +237,12 @@ def apply_alternates(conn: sqlite3.Connection, property_id: int, plan: FactsPlan
     stamp = now or now_iso()
     added = 0
     for f, (new, old) in plan.alternates.items():
-        have = rows(conn, "SELECT value FROM property_alternates WHERE property_id=? AND field=?", (property_id, f))
+        have = rows(conn, "SELECT value, original, status FROM property_alternates WHERE property_id=? AND field=?",
+                    (property_id, f))
         if any(_same(f, loads(r["value"]), new) for r in have):
             continue
+        if any(r["status"] == "used" and _same(f, loads(r["original"]), new) for r in have):
+            continue        # the value 'Use this one' replaced: that choice was already made
         conn.execute("INSERT INTO property_alternates(property_id, field, value, original, source, import_id, seen_at) "
                      "VALUES(?,?,?,?,?,?,?)", (property_id, f, dumps(new), dumps(old), source, import_id, stamp))
         added += 1
@@ -227,8 +254,8 @@ def apply_alternates(conn: sqlite3.Connection, property_id: int, plan: FactsPlan
 def sync_flag(conn: sqlite3.Connection, property_id: int) -> int:
     """Raise `crexi_differs` in the property's flags while it has open alternates and drop it when none are
     left. Returns the open count."""
-    n = int(conn.execute("SELECT COUNT(*) FROM property_alternates WHERE property_id=? AND status='open'",
-                         (property_id,)).fetchone()[0])
+    n = int(conn.execute("SELECT COUNT(*) FROM property_alternates WHERE property_id=? AND status='open' "
+                         "AND field NOT LIKE ?", (property_id, RAW_PREFIX + "%")).fetchone()[0])
     row = conn.execute("SELECT flags_json FROM properties WHERE id=?", (property_id,)).fetchone()
     if row is None:
         return n
@@ -272,12 +299,13 @@ def open_alternates(conn: sqlite3.Connection, property_id: int) -> list[dict]:
         out.append({"id": r["id"], "field": r["field"], "label": label(r["field"]), "value": loads(r["value"]),
                     "original": loads(r["original"]), "source": r["source"], "seen_at": r["seen_at"],
                     "status": r["status"], "decided_by": r["decided_by"], "decided_at": r["decided_at"],
-                    "usable": r["field"] != "mailing_address"})
+                    "usable": r["field"] != "mailing_address" and not r["field"].startswith(RAW_PREFIX)})
     return out
 
 
 def decide_alternate(conn: sqlite3.Connection, property_id: int, alternate_id: int, action: str, actor: str) -> dict:
-    """'use' (swap it in through property_edits, so it can be undone) or 'ignore'. ValueError says why not."""
+    """'use' (swap it in, recorded in property_edits with the value it replaced) or 'ignore'. ValueError says why
+    not."""
     from ..ingest.edits import EDITABLE_BY_FIELD, record_edit
     alt = conn.execute("SELECT * FROM property_alternates WHERE id=? AND property_id=?",
                        (alternate_id, property_id)).fetchone()
@@ -294,6 +322,9 @@ def decide_alternate(conn: sqlite3.Connection, property_id: int, alternate_id: i
     elif action == "use":
         from ..ingest.crexi import RECORD_COLUMNS
         f = alt["field"]
+        if f.startswith(RAW_PREFIX):
+            raise ValueError("This column is only kept with the original columns, so it can't be swapped in. "
+                             "Both values stay listed here; choose Ignore when you have seen it.")
         if f not in RECORD_COLUMNS or f == "mailing_address":
             raise ValueError(USABLE_FIELDS_NOTE)
         value = loads(alt["value"])

@@ -329,7 +329,7 @@
     const lines = events.map((e) => '<li>' + esc(e.text) + '</li>').join('');
     const altHtml = alts.length
       ? '<h3 style="margin-top:6px">Crexi sent different data (' + alts.length + ')</h3>' +
-        '<p class="note" style="margin:0">We kept what we already had. Choose “Use this one” to switch (you can undo it from the edit history), or Ignore.</p>' +
+        '<p class="note" style="margin:0">We kept what we already had. Choose “Use this one” to switch (the value it replaces is kept in the edit history), or Ignore.</p>' +
         '<ul class="p-alts">' + alts.map((a) => '<li><div><b>' + esc(a.label) + '</b>: we have <span class="muted">' + esc(show(a.original)) +
           '</span>, Crexi says <b>' + esc(show(a.value)) + '</b></div><div class="p-actions">' +
           (a.usable ? '<button type="button" class="btn small" data-act="alt" data-id="' + Number(a.id) + '" data-do="use">Use this one</button>' : '') +

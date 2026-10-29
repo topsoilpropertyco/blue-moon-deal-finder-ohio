@@ -15,8 +15,8 @@ nothing. 'Not Matched' rows are only flagged; the properties are marked not foun
 Each matched row ends in one of three results: found (a phone or email), owner_only (an owner or contact name
 but no phone or email) or nothing. Contacts (up to 5 phones, 5 emails and the Contact Name, the phones and
 emails belong to that person) are added as untested, source 'crexi', respecting do-not-contact. Property facts
-(owner, mailing address, sizes...) go through the normal Crexi import and the keep-the-original rule in
-crexi/merge.py. Importing the same rows again changes nothing.
+(owner, mailing address, sizes...) are merged into the property the row matched, with the keep-the-original rule
+in crexi/merge.py (never a new property). Importing the same rows again changes nothing.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ import re
 import shutil
 import sqlite3
 import threading
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -268,6 +268,12 @@ def _candidates(row: Row, ix: Index) -> tuple[str, list[int]]:
             if row.county and p["county"] and row.county != normalize_county(p["county"]):
                 continue
             keep.append(pid)
+        if len(keep) > 1 and row.street:
+            # one parcel number, several of our properties: the row's own street (and ZIP) picks the right one
+            same = [pid for pid in keep if normalize_address(ix.props[pid]["address"]) == row.street
+                    and (not row.zip5 or not ix.props[pid]["zip"] or B._zip5(ix.props[pid]["zip"]) == row.zip5)]
+            if len(same) == 1:
+                keep = same
         if keep:
             return "apn", keep
     if row.street:
@@ -321,6 +327,7 @@ def analyze(conn: sqlite3.Connection, table: ing.Table, column_map: dict[str, st
     an = Analysis(parsed, items, by_prop, _build_index(conn))
     ix = an.ix
     adopted: set[int] = set()
+    handled: set[int] = set()     # properties a row of this file already claimed or flagged: a second row is a duplicate
     for matched_pass in (True, False):
         for row in parsed:
             if row.not_matched == matched_pass:
@@ -330,6 +337,8 @@ def analyze(conn: sqlite3.Connection, table: ing.Table, column_map: dict[str, st
                 an.methods[how] += 1
             claim = None
             for pid in cands:
+                if pid in handled:
+                    continue
                 for it in by_prop.get(pid, []):
                     key = (it["batch_id"], pid)
                     if it["status"] in ("sent", "not_returned") and key not in an.claimed and key not in an.flagged:
@@ -344,6 +353,7 @@ def analyze(conn: sqlite3.Connection, table: ing.Table, column_map: dict[str, st
                 pid, it = claim
                 key = (it["batch_id"], pid)
                 row.pid, row.batch_id = pid, it["batch_id"]
+                handled.add(pid)
                 if row.not_matched:
                     row.kind = "not_matched"
                     an.flagged[key] = row
@@ -631,36 +641,46 @@ def _write_unreadable(an: Analysis, import_id: int, settings: Settings) -> str |
     return rel
 
 
-def _merge_facts(conn: sqlite3.Connection, an: Analysis, table: ing.Table, actor: str, warnings: list[str]) -> dict:
-    """Property facts (owner, mailing address, sizes...) through the normal Crexi import, one market at a time,
-    for the rows that matched. Never adds a property: a row that would create one is only reported."""
+def _merge_facts(conn: sqlite3.Connection, an: Analysis, table: ing.Table, column_map: dict[str, str],
+                 file_hash: str, warnings: list[str], settings: Settings) -> dict:
+    """Property facts (owner, mailing address, sizes...) of every matched row, merged straight into the property
+    the row was matched to (by link, parcel number or address), with the keep-the-original rule of the normal
+    Crexi import (fill blanks, keep differing values as alternates). One import record per market. Never adds a
+    property and never matches the row a second time."""
     by_market: dict[int, list[Row]] = defaultdict(list)
     for r in an.rows:
-        if r.kind in ("new", "duplicate", "hand") and not r.not_matched and r.pid is not None and r.link_key:
+        if r.kind in ("new", "duplicate", "hand") and not r.not_matched and r.pid is not None:
             by_market[an.ix.props[r.pid]["market_id"]].append(r)
-    slugs = {m["id"]: m["slug"] for m in rows(conn, "SELECT id, slug FROM markets")}
-    out = {"markets": {}, "new_rows": 0}
-    tmp_dir = get_settings().path("db").parent / "tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    markets = {m["id"]: m for m in rows(conn, "SELECT id, slug, asset_class FROM markets")}
+    out: dict[str, Any] = {"markets": {}, "new_rows": 0}
     for mid, rs in by_market.items():
-        tmp = tmp_dir / f"crexi_reply_{mid}_{now_iso().replace(':', '')}.csv"
-        try:
-            with tmp.open("w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(table.headers)
-                for r in sorted(rs, key=lambda x: (x.kind == "duplicate", x.i)):
-                    w.writerow([("" if r.raw.get(h) is None else r.raw.get(h)) for h in table.headers])
-            res = ing.import_file(conn, slugs[mid], tmp, actor=actor)
-            out["markets"][slugs[mid]] = {"import_id": res["import_id"], "rows_new": res["rows_new"],
-                                          "rows_updated": res["rows_updated"], "enrichment": res.get("enrichment")}
-            out["new_rows"] += int(res["rows_new"])
-            if res["rows_new"]:
-                warnings.append(f"{res['rows_new']:,} row(s) did not match a stored property when their facts were "
-                                f"merged and were added as new properties in {slugs[mid]}. Check them in Deals.")
-        except ing.IngestError as exc:
-            warnings.append(f"Property facts were not merged for {slugs[mid]}: {exc}")
-        finally:
-            tmp.unlink(missing_ok=True)
+        m = markets[mid]
+        opts = ing._options(settings, m["asset_class"], "crexi")
+        edits = latest_edits(conn, mid, sorted({r.pid for r in rs if r.pid is not None}))
+        report, kept = M.Report(), Counter()
+        updated: set[int] = set()
+        bad = 0
+        now = now_iso()
+        with conn:
+            import_id = ing._start_import(conn, mid, f"Crexi reply: {table.filename}", file_hash, column_map)
+            for r in sorted(rs, key=lambda x: (x.kind == "duplicate", x.i)):
+                existing = one(conn, "SELECT * FROM properties WHERE id=?", (r.pid,))
+                if existing is None:
+                    continue
+                try:
+                    p = ing.parse_row(r.raw, column_map, opts)
+                except ValueError:
+                    bad += 1
+                    continue
+                ing._update(conn, existing, p, import_id, now, opts, edits.get(r.pid), kept, report)
+                updated.add(int(r.pid))
+            conn.execute("UPDATE imports SET rows_total=?, rows_new=0, rows_updated=?, rows_skipped=? WHERE id=?",
+                         (len(rs), len(updated), bad, import_id))
+        out["markets"][m["slug"]] = {"import_id": import_id, "rows_new": 0, "rows_updated": len(updated),
+                                     "enrichment": report.to_dict()}
+        if bad:
+            warnings.append(f"{bad:,} row(s) in {m['slug']} could not be read, so their property facts were not "
+                            f"merged. Their contacts were still added.")
     return out
 
 
@@ -807,7 +827,7 @@ def _apply_reply(conn: sqlite3.Connection, path: Path, filename: str | None, *, 
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(path, dest)
 
-    merged = _merge_facts(conn, an, table, actor, warnings)
+    merged = _merge_facts(conn, an, table, column_map, digest, warnings, s)
     cfg = E.drill_config(s)
     dnc = E._dnc_keys(conn)
     totals: dict[str, int] = defaultdict(int)

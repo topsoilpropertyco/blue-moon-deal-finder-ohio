@@ -1007,3 +1007,123 @@ def test_reimporting_an_old_reply_does_not_flag_a_second_pass(conn, small, tmp_p
     items = rows(conn, "SELECT status, not_matched_at FROM crexi_batch_items WHERE batch_id=?", (retry["batch_id"],))
     assert [(i["status"], i["not_matched_at"]) for i in items] == [("sent", None), ("sent", None)]
     assert scalar(conn, "SELECT COUNT(*) FROM crexi_batch_imports") == 1
+
+
+# --- matching review fixes ------------------------------------------------------------------------------------
+
+def test_a_second_row_for_a_retried_property_is_a_duplicate_not_a_second_credit(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 2)
+    B.close_batch(conn, res["batch_id"], confirm=True, settings=small)          # nothing came back: not_returned
+    retry = B.export_batch(conn, 1, today=TODAY, settings=small, retry=True)
+    sent = read_export(small, retry["file"])
+    pid = int(sent[0]["Property ID"])
+    path = reply_file(tmp_path / "r.xlsx", sent + [dict(sent[0], Row="2")])  # Crexi lists the row twice
+    out = R.apply_reply(conn, path, "r.xlsx", settings=small)
+    assert out["returned"] == 1 and out["duplicates"] == 1
+    assert [(r["batch_id"]) for r in rows(conn, "SELECT batch_id FROM credit_ledger WHERE property_id=?", (pid,))] \
+        == [retry["batch_id"]]                                                  # one credit, on the retry batch
+    old = one(conn, "SELECT status FROM crexi_batch_items WHERE batch_id=? AND property_id=?", (res["batch_id"], pid))
+    assert old["status"] == "not_returned"
+    assert not any("already closed" in w for w in out["warnings"])
+
+
+def test_two_properties_on_one_parcel_each_get_their_own_row(conn, small, tmp_path):
+    a = add_prop(conn, crexi_url=None, apn="P-77")
+    b = add_prop(conn, crexi_url=None, apn="TEMP-1")                # a different parcel while it is exported
+    score(conn, a, 0.9)
+    one_ = B.export_batch(conn, 1, today=TODAY, settings=small)
+    score(conn, b, 0.8)
+    two = B.export_batch(conn, 1, today=TODAY, settings=small)
+    conn.execute("UPDATE properties SET apn='P-77' WHERE id=?", (b,))
+    conn.commit()
+    ra, rb = read_export(small, one_["file"])[0], read_export(small, two["file"])[0]
+    rows_ = [dict(rb, Row="2", APN="P-77"), dict(ra, Row="1", APN="P-77")]     # B's row comes first
+    out = R.apply_reply(conn, reply_file(tmp_path / "r.xlsx", rows_), "r.xlsx", settings=small)
+    assert out["returned"] == 2
+
+    def phones(pid):
+        return {r["value"] for r in rows(conn, "SELECT value FROM contact_points WHERE property_id=? AND channel='phone'",
+                                         (pid,))}
+    assert phones(a) == {"(937) 555-1001"} and phones(b) == {"(937) 555-1002"}
+
+
+def test_reply_facts_merge_into_the_matched_property_and_never_add_one(conn, small, tmp_path):
+    pid = add_prop(conn, address="300 Oak St", unit="A", apn=None, crexi_url=None, source="list", owner_name=None)
+    score(conn, pid, 0.9)
+    res = B.export_batch(conn, 1, today=TODAY, settings=small)
+    data = read_export(small, res["file"])
+
+    def extra(n, row):
+        row[0] = "https://www.crexi.com/property-records/oak/abcd1234"          # a link we have not stored
+        row[7] = "P-300"
+        return row
+
+    before = scalar(conn, "SELECT COUNT(*) FROM properties")
+    out = R.apply_reply(conn, reply_file(tmp_path / "r.xlsx", data, extra=extra), "r.xlsx", settings=small)
+    assert out["returned"] == 1 and out["merge"]["new_rows"] == 0
+    assert scalar(conn, "SELECT COUNT(*) FROM properties") == before                  # never a second '300 OAK ST'
+    p = one(conn, "SELECT * FROM properties WHERE id=?", (pid,))
+    assert p["owner_name"] == "Test Owner 1" and p["mailing_address"] == "1 Mail St"  # blanks filled
+    assert p["unit"] == "A" and p["source"] == "list" and p["crexi_url"].endswith("abcd1234")
+
+
+def test_owner_and_mailing_address_are_kept_for_a_matched_row_with_no_link(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 2)
+    pid = int(data[0]["Property ID"])
+    conn.execute("UPDATE properties SET owner_name=NULL WHERE id=?", (pid,))
+    conn.commit()
+
+    def extra(n, row):
+        if n == 1:
+            row[0] = None                                                            # matched by APN
+            row[13:24] = [None] * 11                                                 # no contact, phones, emails
+        return row
+
+    path = reply_file(tmp_path / "r.xlsx", data, extra=extra)
+    pv = R.preview(conn, path, "r.xlsx", settings=small)
+    out = R.apply_reply(conn, path, "r.xlsx", settings=small)
+    assert out["owner_only"] == 1
+    p = one(conn, "SELECT owner_name, mailing_address FROM properties WHERE id=?", (pid,))
+    assert p["owner_name"] == "Test Owner 1" and p["mailing_address"] == "1 Mail St"
+    assert out["enrichment"]["blanks_filled"] == pv["enrichment"]["blanks_filled"]
+
+
+def test_a_newer_value_of_a_column_kept_only_with_the_originals_is_an_alternate(conn, settings, sample_csv, tmp_path):
+    from bluemoon.ingest import import_file
+    from tests.test_round_trip import by_address, read_csv, write_csv
+    header, data = read_csv(sample_csv)
+    row = by_address(data, "455 EXAMPLE AVE")
+    row["Days on Market"], row["Occupancy"] = "10", "80"
+    import_file(conn, MARKET, write_csv(tmp_path / "first.csv", header, data))
+    pid = one(conn, "SELECT id FROM properties WHERE address = '455 EXAMPLE AVE'")["id"]
+    row["Days on Market"], row["Occupancy"] = "95", "60"
+    newer = write_csv(tmp_path / "newer.csv", header, data)
+    res = import_file(conn, MARKET, newer)
+    p = one(conn, "SELECT raw_json, flags_json FROM properties WHERE id=?", (pid,))
+    raw = __import__("json").loads(p["raw_json"])
+    assert (raw["Days on Market"], raw["Occupancy"]) == ("10", "80")                 # the original is kept
+    alts = {a["field"]: a for a in M.open_alternates(conn, pid)}
+    assert alts["raw:Days on Market"]["value"] == "95" and alts["raw:Occupancy"]["original"] == "80"
+    assert alts["raw:Occupancy"]["label"] == "Occupancy" and not alts["raw:Occupancy"]["usable"]
+    assert "crexi_differs" not in p["flags_json"]                                     # informational only
+    assert res["enrichment"]["alternates"] >= 2
+    count = scalar(conn, "SELECT COUNT(*) FROM property_alternates")
+    import_file(conn, MARKET, newer)
+    assert scalar(conn, "SELECT COUNT(*) FROM property_alternates") == count         # idempotent
+    with pytest.raises(ValueError, match="can't be swapped in"):
+        M.decide_alternate(conn, pid, alts["raw:Occupancy"]["id"], "use", "seth")
+
+
+def test_a_used_alternate_is_not_reopened_by_the_next_import(conn, settings, sample_csv, tmp_path):
+    from bluemoon.ingest import import_file
+    from tests.test_round_trip import by_address, read_csv, write_csv
+    import_file(conn, MARKET, sample_csv)
+    header, data = read_csv(sample_csv)
+    by_address(data, "455 EXAMPLE AVE")["Owner Name"] = "A Brand New Buyer LLC"
+    import_file(conn, MARKET, write_csv(tmp_path / "newer.csv", header, data))
+    pid = one(conn, "SELECT id FROM properties WHERE address = '455 EXAMPLE AVE'")["id"]
+    alt = next(a for a in M.open_alternates(conn, pid) if a["field"] == "owner_name")
+    M.decide_alternate(conn, pid, alt["id"], "use", "seth")
+    import_file(conn, MARKET, sample_csv)                                             # the old listing file again
+    assert not [a for a in M.open_alternates(conn, pid) if a["status"] == "open" and a["field"] == "owner_name"]
+    assert "crexi_differs" not in one(conn, "SELECT flags_json FROM properties WHERE id=?", (pid,))["flags_json"]

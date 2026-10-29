@@ -39,6 +39,7 @@ from ..db import dumps, loads, market_by_slug, now_iso, one, rows
 from ..util import clean_str, normalize_address, normalize_county, normalize_zip, parse_date, to_float, yes_no
 from .columns import (
     DEFAULT_FUZZY_MIN_SCORE,
+    INFO_FIELDS,
     KEY_FIELDS,
     OWNER_FIELDS,
     PROVIDER_LABELS,
@@ -71,6 +72,9 @@ ROW_NOTES = frozenset({"year_invalid", "units_from_addresses", "shared_apn"})
 INGEST_FLAGS = ROW_NOTES | frozenset({"year_unknown", "units_unknown", "no_owner_name", "no_coordinates",
                                       "no_address"})
 STICKY_FLAGS = frozenset({"shared_apn"})
+# Known columns kept only with the original columns (raw_json). A newer file's different value for one of these is
+# kept as an alternate ('raw:<column>'), never dropped. The file name column always differs, so it is left out.
+RAW_ONLY_FIELDS = (INFO_FIELDS | {"pfc_recording_date"}) - {"source_file"}
 FLAG_HELP = {
     "year_unknown": "no year built",
     "year_invalid": "impossible year built (like 0 or 9999), left blank",
@@ -179,6 +183,7 @@ class ParsedRow:
     key: str | None = None
     dups: list["ParsedRow"] = field(default_factory=list)   # later rows of the same file that were this property
     fills: int = 0                                          # blanks of this row filled from those rows
+    info_keys: frozenset[str] = frozenset()                 # headers of the columns kept only in raw_json
 
 
 @dataclass
@@ -667,7 +672,8 @@ def parse_row(row: Mapping[str, Any], column_map: Mapping[str, str], opts: Impor
         notes.add("shared_apn")
 
     record = PropertyRecord(**data)
-    parsed = ParsedRow(record=record, raw=dict(row), notes=notes, units_source=units_source)
+    parsed = ParsedRow(record=record, raw=dict(row), notes=notes, units_source=units_source,
+                       info_keys=frozenset(h for f, h in column_map.items() if f in RAW_ONLY_FIELDS and h))
     _key_parts(parsed)
     return parsed
 
@@ -1404,6 +1410,7 @@ def _update(conn: sqlite3.Connection, existing: dict, p: ParsedRow, import_id: i
     flags = sorted(set(final_flags(rec, notes, opts.units_metric, opts.year_in_buybox)) | (old_flags - INGEST_FLAGS))
 
     raw = dict(loads(existing.get("raw_json"), {}) or {})
+    raw_plan = cmerge.FactsPlan(alternates=cmerge.raw_alternates(raw, p.raw, p.info_keys))
     for k, v in p.raw.items():
         if k not in raw or (raw[k] is None and v is not None):   # the original columns are kept; blanks are filled
             raw[k] = v
@@ -1417,6 +1424,10 @@ def _update(conn: sqlite3.Connection, existing: dict, p: ParsedRow, import_id: i
     conn.execute(f"UPDATE properties SET {sets} WHERE id=?", (*data.values(), existing["id"]))
     existing.update(data)
     _save_enrichment(conn, existing["id"], plan, import_id, now, report, p.fills)
+    if raw_plan.alternates:
+        added = cmerge.apply_alternates(conn, existing["id"], raw_plan, import_id=import_id, now=now)
+        if report is not None:
+            report.add("alternates", added)
     return flags
 
 
@@ -1446,6 +1457,7 @@ def _record_duplicates(conn: sqlite3.Connection, row: dict, p: ParsedRow, import
         report.add("duplicates")
         plan = cmerge.plan_facts(row, dup.record.model_dump(), RECORD_COLUMNS, skip=set(edits or {}) | {"units"}
                                 if dup.units_source == "addresses" else set(edits or {}))
+        plan.alternates.update(cmerge.raw_alternates(loads(row.get("raw_json"), {}) or {}, dup.raw, dup.info_keys))
         alternates = cmerge.apply_alternates(conn, row["id"], plan, import_id=import_id, now=now)
         gained = cmerge.add_new_knowledge(conn, row["id"], plan, notes=f"Crexi import #{import_id}")
         report.add("alternates", alternates)
