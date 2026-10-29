@@ -967,12 +967,35 @@ def waiting_message(batch_id: int) -> str:
             f"reply on the Credits screen instead (or Cancel that batch if you never uploaded it).")
 
 
+def credit_used_this_period(conn: sqlite3.Connection, property_id: int, today: Any = None,
+                            settings: Settings | None = None) -> dict | None:
+    """The credit already spent on this property this credit period, with its result (a row Crexi returned in a
+    batch, or a credit used by hand): {id, batch_id, day, result}, or None. One property never gets two."""
+    from ..crexi.period import describe   # the credit period (config.yaml crexi.reset_day)
+    info = describe(today, settings)
+    return one(conn, "SELECT id, batch_id, result, date(created_at, 'localtime') AS day FROM credit_ledger "
+                     "WHERE property_id=? AND result IS NOT NULL AND (period=? OR (period IS NULL AND "
+                     "date(created_at, 'localtime') BETWEEN ? AND ?)) ORDER BY id DESC LIMIT 1",
+               (property_id, info["key"], info["start"], info["end"]))
+
+
+def used_this_period_message(used: Mapping[str, Any]) -> str:
+    when = f" on {used['day']}" if used.get("day") else ""
+    if used.get("batch_id"):
+        return (f"Crexi already returned this property{when} (batch #{used['batch_id']}); "
+                f"no second credit this period.")
+    return f"A Crexi credit was already used on this property{when}; no second credit this period."
+
+
 def _sync_credit_ledger(conn: sqlite3.Connection, property_id: int, outcome: str) -> None:
     """A found/nothing check-off on the Crexi credit stage means a credit was spent: keep the ledger in step."""
     pending = one(conn, "SELECT id FROM credit_ledger WHERE property_id=? AND result IS NULL ORDER BY id DESC LIMIT 1",
                   (property_id,))
     if pending:
         conn.execute("UPDATE credit_ledger SET result=? WHERE id=?", (outcome, pending["id"]))
+    elif (used := credit_used_this_period(conn, property_id)) is not None:
+        # re-checking the stage corrects this period's credit; it never counts a second one
+        conn.execute("UPDATE credit_ledger SET result=? WHERE id=?", (outcome, used["id"]))
     else:
         waiting = waiting_at_crexi(conn, property_id)
         if waiting is not None:          # a second credit for one lookup: refuse (the whole check-off rolls back)
@@ -1808,6 +1831,8 @@ def property_drill(conn: sqlite3.Connection, property_id: int, *, settings: Sett
     view = _drill_view(ctx, ev, cfg, settings, with_links)
     from . import research   # research imports this module, so import it here
     view["research"] = research.property_research(conn, property_id)
+    used = credit_used_this_period(conn, property_id, settings=settings)
+    view["credit_this_period"] = ({**used, "message": used_this_period_message(used)} if used else None)
     if with_links:   # the owner's other properties, which do-not-contact would also cover
         sibs = owner_sibling_ids(conn, property_id)
         view["siblings"] = len(sibs)

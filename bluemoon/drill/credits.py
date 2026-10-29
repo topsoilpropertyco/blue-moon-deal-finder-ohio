@@ -107,6 +107,8 @@ def credit_status(conn: sqlite3.Connection, *, today: date | None = None, settin
     days = P.days_left(d, settings)
     left_this_morning = max(0, per - max(0, used - used_today))
     pace = math.ceil(left_this_morning / days) if left else 0
+    if left and used_today >= pace:   # today's share is already used (a batch sent today): spread what is left
+        pace = math.ceil(left / max(1, days - 1))          # over the days after today
     status = {"month": info["key"][:7], "period": info["key"], "period_label": P.label(info["key"], settings),
               "period_end": info["end"],
               "next_reset": info["next_reset"], "reset_day": info["reset_day"],
@@ -158,7 +160,9 @@ def use_credit(conn: sqlite3.Connection, property_id: int, result: str | None = 
     month = period[:7]
     pending = one(conn, "SELECT id FROM credit_ledger WHERE property_id=? AND result IS NULL ORDER BY id DESC LIMIT 1",
                   (property_id,))
-    warn = "" if before["left"] or pending else " Your credits for this month look used up; Crexi may not allow it."
+    if pending is None and (used := E.credit_used_this_period(conn, property_id, _today(today), settings)):
+        raise ValueError(E.used_this_period_message(used))
+    warn = "" if before["left"] or pending else " Your credits for this period look used up; Crexi may not allow it."
     if pending is None:
         with E._tx(conn):
             conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at, period) VALUES(?,?,?,?,?)",
@@ -185,7 +189,7 @@ def _done(conn: sqlite3.Connection, property_id: int, message: str, result: str 
     status = credit_status(conn, today=today, settings=settings)
     drill = E.property_drill(conn, property_id, settings=settings)
     return {"ok": True, "property_id": property_id, "result": result, "credits": status,
-            "message": f"{message} {status['left']:,} left this month.", "level": drill["level"],
+            "message": f"{message} {status['left']:,} left this period (until {status['period_end']}).", "level": drill["level"],
             "status": drill["status"], "next_step": drill["next_step"], "drill": drill}
 
 

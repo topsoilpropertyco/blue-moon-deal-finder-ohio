@@ -1558,3 +1558,51 @@ def test_the_same_owner_written_another_way_is_not_owner_2():
         assert not plan.alternates and plan.new_owner is None, (a, b)
     assert M.plan_facts({"owner_name": "ACME HOLDINGS LLC"}, {"owner_name": "ACME HOMES LLC"},
                         ["owner_name"]).alternates
+
+
+# --- final ux review ---------------------------------------------------------------------------------------
+
+def test_a_property_crexi_returned_this_period_never_takes_a_second_credit(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 3)
+    R.apply_reply(conn, reply_file(tmp_path / "r.xlsx", data, phones=False), "r.xlsx", settings=small)
+    pid = int(data[0]["Property ID"])
+    before = C.credit_status(conn, today=TODAY, settings=small)["left"]
+    with pytest.raises(ValueError, match=r"Crexi already returned this property .*batch #%d.*no second credit"
+                                         % res["batch_id"]):
+        C.use_credit(conn, pid, "nothing", today=TODAY, settings=small)
+    # re-checking the Crexi stage corrects this period's credit instead of counting another
+    E.record_attempt(conn, pid, E.CREDIT_STAGE, "nothing", settings=small)
+    assert scalar(conn, "SELECT COUNT(*) FROM credit_ledger WHERE property_id=?", (pid,)) == 1
+    assert C.credit_status(conn, today=TODAY, settings=small)["left"] == before
+    dr = E.property_drill(conn, pid, settings=small)
+    assert dr["credit_this_period"]["batch_id"] == res["batch_id"] and "no second credit" in \
+        dr["credit_this_period"]["message"]
+    # a hand credit is also once per period, and the message names the period, not the month
+    other = seed(conn, 1, top=0.1)[0]
+    out = C.use_credit(conn, other, "found", today=TODAY, settings=small)
+    assert "left this period (until 2026-11-28)" in out["message"] and "this month" not in out["message"]
+    with pytest.raises(ValueError, match="already used on this property"):
+        C.use_credit(conn, other, None, today=TODAY, settings=small)
+    prop = (Path(__file__).resolve().parent.parent / "bluemoon" / "web" / "static" / "property.js").read_text()
+    assert "dr.credit_this_period" in prop and "credits left this month" not in prop
+
+
+def test_next_batch_preview_counts_returned_and_missing_apart_and_says_duplicates_once(conn, small, tmp_path):
+    ids, res, data = _batch(conn, small, 5)
+    R.apply_reply(conn, reply_file(tmp_path / "r.xlsx", data, skip={5}, not_matched={4}), "r.xlsx", settings=small)
+    seed(conn, 3, top=0.2)
+    pv = B.preview_export(conn, 2, today=TODAY, settings=small)
+    assert "3 Crexi already returned (or is still looking up) this period" in pv["left_out_text"]
+    assert "2 Crexi didn't have this period (tick second pass to send them again)" in pv["left_out_text"]
+    retry = B.preview_export(conn, 2, today=TODAY, settings=small, retry=True)
+    assert "didn't have" not in retry["left_out_text"]      # both are in the second pass
+    credits = (Path(__file__).resolve().parent.parent / "bluemoon" / "web" / "static" / "credits.js").read_text()
+    assert "p.duplicates_left_out ?" not in credits          # left_out_text already says the duplicates
+    assert "open: 'You'" in credits and "team: 'Team password'" in credits     # History 'Who' in words
+    assert "Every row not added, with why" in credits and "Rows that could not be matched" not in credits
+
+
+def test_run_screen_has_one_photo_item_and_its_own_jump_key():
+    run = (Path(__file__).resolve().parent.parent / "bluemoon" / "web" / "static" / "run.js").read_text()
+    assert "OLD_PHOTO_KEYS = new Set(['photos', 'classify'])" in run and "OLD_PHOTO_KEYS.has(step.key)" in run
+    assert "jump: PHOTO_STEP.key" in run and "key === 'photos' ?" not in run

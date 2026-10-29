@@ -360,6 +360,11 @@ def pick(conn: sqlite3.Connection, n: int, *, today: date | None = None, setting
             break                      # enough, or the plan has nobody else
         asked = asked + (n - len(picked)) * 2 + 10
     out = Pick(items=picked[:n], wanted=n, duplicates_left_out=len(dup_ids), left_out=base)
+    # the rest of this period's sent rows: the ones Crexi didn't have (left out unless second pass is ticked)
+    missing = {int(r["property_id"]) for r in rows(
+        conn, "SELECT DISTINCT i.property_id FROM crexi_batch_items i JOIN crexi_batches b ON b.id = i.batch_id "
+              "WHERE b.period = ? AND i.status = 'not_returned'", (st["period"],))}
+    out.left_out["missing_this_period"] = len(missing - sent_ids - {int(it["id"]) for it in out.items})
     out.short = max(0, n - len(out.items))
     out.left_out.update(_other_left_out(conn))
     return out
@@ -415,7 +420,11 @@ def preview_export(conn: sqlite3.Connection, n: int | None = None, *, today: dat
         parts.append(f"{pk.duplicates_left_out:,} duplicate{'s' if pk.duplicates_left_out != 1 else ''} left out "
                      f"(same Crexi link, parcel number or address as one already in the list or already sent to Crexi)")
     if left_out.get("already_sent_this_period"):
-        parts.append(f"{left_out['already_sent_this_period']:,} already sent this period")
+        parts.append(f"{left_out['already_sent_this_period']:,} Crexi already returned (or is still looking up) "
+                     f"this period")
+    if left_out.get("missing_this_period"):
+        parts.append(f"{left_out['missing_this_period']:,} Crexi didn't have this period"
+                     + ("" if retry else " (tick second pass to send them again)"))
     if left_out.get("do_not_contact"):
         parts.append(f"{left_out['do_not_contact']:,} do-not-contact owners")
     if left_out.get("confirmed_owner"):

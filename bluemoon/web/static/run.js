@@ -66,6 +66,7 @@
   /* The one photo button: photos for every lead with none, then the AI's call on each, as one job (imagery/photos_all.py). */
   const PHOTO_STEP = {key: 'photos_all', title: 'Photos and the AI\'s call for every lead', photo: true};
   const isPhotoKey = (key) => key === PHOTO_STEP.key;
+  const OLD_PHOTO_KEYS = new Set(['photos', 'classify']);   // the separate steps the one button replaced
 
   const S = {
     root: null, market: null, ctx: null,
@@ -262,7 +263,8 @@
           '(some set-aside properties may come back). Google gives free calls each month.', go: 'settings', label: 'How to add it'});
       } else if (st.state === 'blocked') {
         out.push({key: step.key, html: '<b>' + esc(step.title) + ':</b> ' + esc(st.text) + '.', jump: step.key, label: 'Show'});
-      } else if (st.state === 'next') {
+      } else if (st.state === 'next' && !(S.ph && S.ph.enabled && OLD_PHOTO_KEYS.has(step.key))) {
+        // the one photo button below covers the old Photos and Photo check steps
         const how = step.go ? '' : step.limit ? ' Try <b>Test on ' + TEST_N + '</b> first.' : '';
         out.push({key: step.key, html: '<b>' + esc(step.title) + ':</b> ' + esc(st.text) + '.' + how,
           go: step.go, jump: step.go ? null : step.key, label: step.go ? step.goLabel : 'Go to step'});
@@ -271,7 +273,7 @@
     const p = S.ph;
     if (p && p.enabled && (c.google ? (p.photos_left || {}).total || p.ai_left : p.ai_left)) {
       out.unshift({key: 'photos', html: '<b>Photos and the AI\'s ' + esc(String(p.target_name || 'photo').toLowerCase()) + ' call:</b> ' +
-        num(p.done) + ' of ' + num(p.total) + ' done. One button below does the rest.', jump: 'photos', label: 'Show'});
+        num(p.done) + ' of ' + num(p.total) + ' done. One button below does the rest.', jump: PHOTO_STEP.key, label: 'Show'});
     }
     return out.slice(0, 3);
   }
@@ -759,7 +761,7 @@
     else if (act === 'cancel') cancel(b.getAttribute('data-id'));
     else if (act === 'go') BM.go(b.getAttribute('data-go'));
     else if (act === 'jump') {
-      const row = key === 'photos' ? (S.root && S.root.querySelector('[data-ru-photos]')) : cardEl(key);
+      const row = isPhotoKey(key) ? (S.root && S.root.querySelector('[data-ru-photos]')) : cardEl(key);
       if (row && row.scrollIntoView) row.scrollIntoView({behavior: 'smooth', block: 'center'});
     }
     else if (act === 'dismiss') {

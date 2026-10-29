@@ -611,13 +611,15 @@
     if (status !== 'dnc') parts.push(btn('contact', 'Add contact'));
     if (open && level === 1) parts.push(btn('owner_found', 'Owner name found'));
     if (open) parts.push(btn('confirm', 'Confirm owner'));
-    if (open && level < 3) parts.push(btn('credit', pendingCredit ? 'Record what Crexi showed' : 'Use a Crexi credit', pendingCredit));
+    const usedNow = !pendingCredit && dr.credit_this_period;   // never a second credit on one property this period
+    if (open && level < 3 && !usedNow) parts.push(btn('credit', pendingCredit ? 'Record what Crexi showed' : 'Use a Crexi credit', pendingCredit));
     parts.push(btn('note', 'Add a note'));
     if (status === 'active') parts.push('<button type="button" class="btn small" data-act="level" data-action="exhausted">Mark exhausted</button>');
     if (status === 'exhausted' || status === 'confirmed') parts.push('<button type="button" class="btn small" data-act="level" data-action="reopen">Reopen</button>');
     if (status === 'dnc') parts.push('<button type="button" class="btn small" data-act="level" data-action="undnc">Allow contact again</button>');
     else parts.push('<button type="button" class="btn small danger" data-act="level" data-action="dnc">Do not contact</button>');
-    return '<h3 style="margin-top:6px">Actions</h3><div class="p-actions">' + parts.join('') + '</div>' + openFormHtml(d, dr, credits, pendingCredit);
+    const usedNote = (open && level < 3 && usedNow) ? '<p class="note">' + esc(usedNow.message) + '</p>' : '';
+    return '<h3 style="margin-top:6px">Actions</h3><div class="p-actions">' + parts.join('') + '</div>' + usedNote + openFormHtml(d, dr, credits, pendingCredit);
   }
 
   function openFormHtml(d, dr, credits, pendingCredit) {
@@ -658,7 +660,7 @@
 
   function creditForm(d, dr, credits, pendingCredit, cancel) {
     const result = cur.mode.result || (pendingCredit ? 'found' : 'later');
-    const left = has(credits.left) ? fmt.num(credits.left) + ' of ' + fmt.num(credits.per_month) + ' credits left this month.' : '';
+    const left = has(credits.left) ? fmt.num(credits.left) + ' of ' + fmt.num(credits.per_month) + ' credits left this period.' : '';
     const choices = pendingCredit ? [['found', 'Found contact info'], ['nothing', 'Nothing new']]
       : [['found', 'Found contact info'], ['nothing', 'Nothing new'], ['later', 'Record it later']];
     return '<form class="p-form" data-form="credit" data-mode="' + esc(result) + '"><h3>' +

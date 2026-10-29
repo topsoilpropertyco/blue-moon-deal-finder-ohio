@@ -208,7 +208,6 @@
       <div class="cx-box" aria-label="Who would be in the batch">
         <p><b>${esc(p.message)}</b> Nothing was written yet.</p>
         <ul class="cx-nums cx-reasons">${reasons}</ul>${markets}
-        ${p.duplicates_left_out ? `<p class="note dr-tight"><b>${num(p.duplicates_left_out)}</b> duplicate${p.duplicates_left_out === 1 ? '' : 's'} left out (same Crexi link, parcel number or address as a property already in the list).</p>` : ''}
         ${p.left_out_text ? `<p class="note dr-tight">Left out: ${esc(p.left_out_text)}.</p>` : ''}
         ${sample ? `<details><summary>First ${num((p.sample || []).length)} addresses</summary><ul class="cx-sample">${sample}</ul></details>` : ''}
       </div>`;
@@ -297,7 +296,7 @@
 
   function resultHtml(r) {
     const links = [];
-    if (r.import_id && r.unmatched_file) links.push(`<a class="btn" href="/api/crexi/imports/${Number(r.import_id)}/files/unmatched" download>Rows that could not be matched</a>`);
+    if (r.import_id && r.unmatched_file) links.push(`<a class="btn" href="/api/crexi/imports/${Number(r.import_id)}/files/unmatched" download>Every row not added, with why</a>`);
     if (r.import_id && r.unreadable_file) links.push(`<a class="btn" href="/api/crexi/imports/${Number(r.import_id)}/files/unreadable" download>Phones and emails I could not read</a>`);
     const warns = (r.warnings || []).map((w) => `<li>${esc(w)}</li>`).join('');
     const left = Number(((S.status || {}).status || {}).left ?? (r.status || {}).left) || 0;
@@ -350,9 +349,11 @@
 
   // ---- history ----------------------------------------------------------------------------------
 
+  /* Who exported or imported, in words (the same names the drawer uses; 'open' means no password is set). */
+  const WHO = {cli: 'Command line', open: 'You', 'this Mac': 'You (on the Mac)', team: 'Team password', unknown: 'Unknown'};
   function who(v) {
-    if (!v || v === 'cli') return 'Command line';
-    return v;
+    if (!v) return 'Command line';
+    return WHO[v] || v;
   }
 
   function historyHtml() {
@@ -373,7 +374,7 @@
       (b.imports || []).forEach((i) => {
         const sm = i.summary || {};
         if (sm.saved_as) files.push(`<a href="/api/crexi/imports/${Number(i.id)}/files/reply" download>Crexi's reply</a>`);
-        if (sm.unmatched_file) files.push(`<a href="/api/crexi/imports/${Number(i.id)}/files/unmatched" download>Unmatched rows</a>`);
+        if (sm.unmatched_file) files.push(`<a href="/api/crexi/imports/${Number(i.id)}/files/unmatched" download>Rows not added (with why)</a>`);
       });
       return `<tr>
         <td><b>#${Number(b.id)}</b> <span class="note">${esc(b.kind_label || '')}</span></td>

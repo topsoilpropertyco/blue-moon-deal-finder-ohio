@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import itertools
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -444,7 +445,7 @@ def test_daily_pace_stays_the_same_while_credits_are_used_today(conn):
     assert [x["when"] for x in plan] == ["today"] * 36 + ["tomorrow"] * 4
     _ledger_today(conn, add_prop(conn), 40)                                     # 50 used today: past the pace
     s = C.credit_status(conn, today=TODAY)
-    assert (s["daily_pace"], s["today_left"]) == (46, 0)
+    assert (s["daily_pace"], s["today_left"]) == (45, 0)       # today's share used: ceil(450 / 10 days after today)
     plan = C.market_plan(conn, MARKET, limit=100, today=TODAY)["plan"]
     assert plan[0]["when"] == "tomorrow" and plan[0]["use_on"] == "2026-10-22"
     # credits used in another month never count toward today
@@ -591,3 +592,19 @@ def test_fast_plan_is_the_same_as_evaluating_every_owner(conn, settings, monkeyp
                 left = fast.status["left"]
                 cut_in_set_aside += len(got) == left and any(t == "set_aside" for _, t in got)
     assert checked > 500 and cut_in_set_aside >= 4   # real plans, some of them cut among the set-aside owners
+
+
+def test_a_big_batch_today_spreads_what_is_left_over_the_days_after_today(conn, settings):
+    """A 425-credit batch on the period's first day leaves 75: the pace is 75 over the days after today,
+    never 'about 17 a day' (which would be more than is free)."""
+    settings.raw["crexi"]["reset_day"] = 29
+    settings.raw["crexi"]["credits_per_month"] = 500
+    day = date(2026, 10, 29)
+    _ledger_today(conn, add_prop(conn), 425, month="2026-10", when="2026-10-29T15:00:00+00:00")
+    conn.execute("UPDATE credit_ledger SET period='2026-10-29'")
+    conn.commit()
+    s = C.credit_status(conn, today=day, settings=settings)
+    assert (s["left"], s["days_left"], s["today_left"]) == (75, 31, 0)
+    assert s["daily_pace"] == 3 and s["daily_pace"] * (s["days_left"] - 1) >= s["left"]
+    drill = (Path(__file__).resolve().parent.parent / "bluemoon" / "web" / "static" / "drill.js").read_text()
+    assert "Export the next ${num(left)}" in drill        # the DRILL panel says what the Credits screen says

@@ -444,7 +444,9 @@
     const per = Number(c.per_month) || 0;
     const left = Number(c.left) || 0;
     const line = per
-      ? (left ? `Use about <b>${num(c.daily_pace)} a day</b> for the next ${num(c.days_left)} ${c.days_left === 1 ? 'day' : 'days'} to spend them all. They don't roll over.`
+      ? (left && Number(c.used_today) && !Number(c.today_left)
+          ? `You have <b>${num(left)}</b> left until ${esc(BM.fmt.date(c.period_end))}. Export the next ${num(left)} on the Credits screen when you are ready. They don't roll over.`
+        : left ? `Use about <b>${num(c.daily_pace)} a day</b> for the next ${num(c.days_left)} ${c.days_left === 1 ? 'day' : 'days'} to spend them all. They don't roll over.`
               : 'All used or waiting at Crexi. New ones arrive when the next credit period starts.')
       : esc(c.message || 'No Crexi credits are set up.');
     return `
