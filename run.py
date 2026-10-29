@@ -119,6 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "password (making one if there is none)")
     sh.add_argument("emails", nargs="*", help="email addresses for add/remove (*@company.com = everyone there)")
     sh.add_argument("--new", action="store_true", help="with password: replace it (signs everyone out)")
+    sh.add_argument("--set", dest="set_password", metavar="PASSWORD",
+                    help="with password: use this password instead of a made-up one (8+ characters)")
     ky = add("key", "Save a key into .env without opening the file (you paste it hidden; it is never shown).")
     ky.add_argument("which", choices=sorted(KEY_ENV), help="which key: google (Maps), anthropic or census")
     return parser
@@ -495,6 +497,16 @@ def cmd_share(args: argparse.Namespace, settings: Settings) -> int:
         return EXIT_OK
     if args.action == "password":
         current = secret("APP_PASSWORD")
+        if args.set_password is not None:
+            chosen = args.set_password.strip()
+            if len(chosen) < 8 or " " in chosen and len(chosen) < 12:
+                say("That password is too short. Use at least 8 characters with no spaces (for example "
+                    "three words joined with dashes: maple-river-blue7), or 12 with spaces.")
+                return EXIT_USAGE
+            sharing.save_password(chosen, settings)
+            say("Team password changed. Everyone who was signed in has to sign in again with the new one.")
+            say("Restart the dashboard so it takes effect: launchctl kickstart -k gui/$(id -u)/com.bluemoon.dealfinder")
+            return EXIT_OK
         if current and not args.new:
             say(f"Team password: {current}")
             say("Send it to your team with the link. To replace it (signs everyone out): "

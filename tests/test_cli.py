@@ -367,3 +367,14 @@ def test_key_command_saves_hidden_and_never_prints(cli, settings, monkeypatch):
     code, text = cli("key", "google")
     assert code != 0 and "Nothing saved" in text
     assert f"GOOGLE_MAPS_API_KEY={fake}\n" in share.env_file().read_text()     # the good key is kept
+
+
+def test_share_password_can_be_chosen_but_not_too_short(cli, settings, monkeypatch):
+    from bluemoon import share
+    monkeypatch.setenv("APP_PASSWORD", "")
+    share.env_file().write_text("APP_PASSWORD=\n")
+    code, text = cli("share", "password", "--set", "abc")
+    assert code != 0 and "too short" in text
+    code, text = cli("share", "password", "--set", "maple-river-blue7")
+    assert code == 0 and "changed" in text
+    assert "APP_PASSWORD=maple-river-blue7" in share.env_file().read_text()
