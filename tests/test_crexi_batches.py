@@ -1466,3 +1466,95 @@ def test_cli_import_ranks_the_markets_the_reply_changed(conn, small, tmp_path, m
     assert cli.run(args, conn) == cli.EXIT_OK
     assert calls == [MARKET]
     assert f"{MARKET}: Ranked." in capsys.readouterr().out
+
+
+# --- final review fixes (data) ---------------------------------------------------------------------------------
+
+def test_a_mailing_address_with_no_street_is_never_joined_to_another_rows_street():
+    """data-1: stored city/state/ZIP but no street, and a new row in another city: the new street is not put in
+    front of the old city; the whole new address is kept as Mailing address 2 and a new address to try."""
+    old = {"mailing_address": None, "mailing_city": "SPRINGFIELD", "mailing_state": "OH", "mailing_zip": "45504"}
+    new = {"mailing_address": "9 ELM ST", "mailing_city": "COLUMBUS", "mailing_state": "OH", "mailing_zip": "43215"}
+    plan = M.plan_facts(old, new, M.MAILING_FIELDS)
+    assert plan.merged["mailing_address"] is None and plan.merged["mailing_city"] == "SPRINGFIELD"
+    assert "mailing_address" not in plan.fills
+    assert plan.alternates["mailing_address"][0] == "9 ELM ST, COLUMBUS, OH 43215"
+    assert plan.new_mailing == "9 ELM ST, COLUMBUS, OH 43215"
+    # the same city and ZIP (or a blank one): the street simply fills the blank
+    same = M.plan_facts(old, {**new, "mailing_city": "Springfield", "mailing_zip": "45504-1234"}, M.MAILING_FIELDS)
+    assert same.fills["mailing_address"] == "9 ELM ST" and not same.alternates
+    assert M.mailing_text(same.merged) == "9 ELM ST, SPRINGFIELD, OH 45504"
+
+
+def test_the_same_mailing_address_spelled_another_way_is_not_kept_twice(conn, small):
+    """data-2: '9 Elm Street ... 45402' and '9 ELM ST ... 45402-1234' are one place: one Mailing address 2 and
+    one mail contact."""
+    pid = add_prop(conn, mailing_address="1 OAK ST", mailing_city="DAYTON", mailing_state="OH", mailing_zip="45402")
+    prop = one(conn, "SELECT * FROM properties WHERE id=?", (pid,))
+    for street, zip_ in (("9 Elm Street", "45402"), ("9 ELM ST", "45402-1234")):
+        plan = M.plan_facts(prop, {"mailing_address": street, "mailing_city": "Dayton", "mailing_state": "OH",
+                                   "mailing_zip": zip_}, M.MAILING_FIELDS)
+        M.apply_alternates(conn, pid, plan, import_id=None)
+        M.add_new_knowledge(conn, pid, plan, notes="test")
+    conn.commit()
+    assert [x["header"] for x in M.extra_values(conn, pid)["mailing_address"]] == ["Mailing address 2"]
+    assert scalar(conn, "SELECT COUNT(*) FROM property_alternates WHERE property_id=?", (pid,)) == 1
+    assert scalar(conn, "SELECT COUNT(*) FROM contact_points WHERE property_id=? AND channel='mail'", (pid,)) == 1
+
+
+def test_every_kept_second_value_reaches_the_exports(conn, small, tmp_path, sample_csv):
+    """data-3: Last sale price 2, Stories 2, Property name 2 and a Crexi column ('Occupancy 2') are columns
+    too, not only Units/Owner/County."""
+    from bluemoon.exports import export_market
+    from bluemoon.ingest import import_file
+    from tests.test_round_trip import by_address, read_csv, write_csv
+    header, data = read_csv(sample_csv)
+    row = by_address(data, "455 EXAMPLE AVE")
+    row["Occupancy"] = "80"
+    import_file(conn, MARKET, write_csv(tmp_path / "first.csv", header, data))
+    pid = one(conn, "SELECT id FROM properties WHERE address = '455 EXAMPLE AVE'")["id"]
+    row["Occupancy"], row["Sold Price"], row["Number of Stories"] = "60", "2600000", "4"
+    import_file(conn, MARKET, write_csv(tmp_path / "newer.csv", header, data))
+    files = export_market(conn, MARKET, tmp_path / "out", stamp_handoffs=False)
+    cols, out = _csv(files["ranked_list.csv"])
+    assert {"Last sale price 2", "Stories 2", "Occupancy 2"} <= set(cols)
+    assert cols[cols.index("Occupancy") + 1] == "Occupancy 2"
+    r = next(x for x in out if x["Property ID"] == str(pid))
+    assert (r["Occupancy"], r["Occupancy 2"], r["Stories 2"]) == ("80", "60", "4")
+    assert float(r["Last sale price 2"]) == 2600000
+    crm, _ = _csv(files["crm_handoff.csv"])
+    assert {"sale_price_2", "stories_2", "Occupancy 2"} <= set(crm)
+
+
+def test_a_new_crexi_value_for_a_field_corrected_by_hand_is_kept_as_a_second_value(conn, settings, sample_csv,
+                                                                                    tmp_path):
+    """data-4: the correction stays the main value; a third value from Crexi is kept as Year built 2; the value
+    that was corrected (or the correction itself) coming back adds nothing."""
+    from bluemoon.db import dumps
+    from bluemoon.ingest import import_file
+    from tests.test_round_trip import by_address, read_csv, write_csv
+    import_file(conn, MARKET, sample_csv)
+    pid = one(conn, "SELECT id FROM properties WHERE address = '455 EXAMPLE AVE'")["id"]
+    conn.execute("INSERT INTO property_edits(property_id, field, old_value, new_value, via, actor, created_at) "
+                 "VALUES(?, 'year_built', ?, ?, 'test', 'cli', ?)", (pid, dumps(1985), dumps(1999), now_iso()))
+    conn.execute("UPDATE properties SET year_built=1999 WHERE id=?", (pid,))
+    conn.commit()
+    import_file(conn, MARKET, sample_csv)                                  # Crexi still says 1985: nothing new
+    assert "year_built" not in M.extra_values(conn, pid)
+    header, data = read_csv(sample_csv)
+    by_address(data, "455 EXAMPLE AVE")["Year Built"] = "1976"
+    import_file(conn, MARKET, write_csv(tmp_path / "newer.csv", header, data))
+    assert one(conn, "SELECT year_built FROM properties WHERE id=?", (pid,))["year_built"] == 1999
+    assert [(x["header"], x["value"]) for x in M.extra_values(conn, pid)["year_built"]] == [("Year built 2", 1976)]
+    plan = M.plan_facts({"units": 30}, {"units": 30}, ["units"], edits={"units": {"value": 30, "old_value": 24}})
+    assert not plan.alternates
+
+
+def test_the_same_owner_written_another_way_is_not_owner_2():
+    """data-5: '&' is 'AND', 'L L C' is 'LLC', INCORPORATED is INC."""
+    for a, b in (("BETA & SONS INC", "Beta and Sons, Incorporated"), ("ACME HOLDINGS LLC", "Acme Holdings L L C"),
+                 ("Acme Holdings LLC", "ACME HOLDINGS LIMITED LIABILITY COMPANY")):
+        plan = M.plan_facts({"owner_name": a}, {"owner_name": b}, ["owner_name"])
+        assert not plan.alternates and plan.new_owner is None, (a, b)
+    assert M.plan_facts({"owner_name": "ACME HOLDINGS LLC"}, {"owner_name": "ACME HOMES LLC"},
+                        ["owner_name"]).alternates

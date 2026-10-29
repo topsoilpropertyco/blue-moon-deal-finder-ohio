@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from ..config import Settings, get_settings
 from ..db import market_by_slug, now_iso, one, rows, scalar, this_month
 from ..enrich.owners import classify_owner
-from ..util import clean_str, normalize_address, normalize_county, normalize_owner
+from ..util import clean_str, mail_line_key, normalize_address, normalize_county, normalize_owner
 from . import links as L
 
 log = logging.getLogger(__name__)
@@ -307,7 +307,7 @@ def normalize_contact(channel: str, value: Any) -> tuple[str, str]:
         key = re.sub(r"^(www\.|m\.)", "", key).rstrip("/")
         return v.strip(), key
     if channel == "mail":
-        return v.strip(), normalize_address(v) or v.strip().upper()
+        return v.strip(), mail_line_key(v) or v.strip().upper()     # ST = STREET, ZIP+4 = its 5-digit ZIP
     return v.strip(), v.strip().lower()
 
 

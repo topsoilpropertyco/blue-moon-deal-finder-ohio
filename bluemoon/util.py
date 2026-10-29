@@ -64,6 +64,41 @@ def normalize_owner(name: str | None) -> str | None:
     return s
 
 
+_OWNER_WORDS = {"INCORPORATED": "INC", "CORPORATION": "CORP", "COMPANY": "CO", "LIMITED": "LTD"}
+
+
+def owner_match_key(name: str | None) -> str | None:
+    """A looser owner key, only for 'is this the same owner written another way?': '&' is 'AND', 'L L C' is
+    'LLC', INCORPORATED is INC, LIMITED LIABILITY COMPANY is LLC. Grouping keeps using normalize_owner."""
+    s = clean_str(name)
+    if not s:
+        return None
+    s = s.upper().replace("&", " AND ")
+    s = re.sub(r"[^A-Z0-9 ]+", " ", re.sub(r"[.']", "", s))
+    out: list[str] = []
+    joining = False                                   # join runs of single letters: L L C -> LLC
+    for w in s.split():
+        single = len(w) == 1 and w.isalpha()
+        if single and joining:
+            out[-1] += w
+        else:
+            out.append(w)
+        joining = single
+    s = " ".join(out)
+    s = re.sub(r"\bLIMITED LIABILITY (?:COMPANY|CO)\b", "LLC", s)
+    return " ".join(_OWNER_WORDS.get(w, w) for w in s.split())
+
+
+def mail_line_key(line: str | None) -> str | None:
+    """A one-line mailing address ('9 Elm Street, Dayton, OH 45402-1234') as a comparison key: suffixes made
+    standard (STREET is ST) and a ZIP+4 cut to its 5-digit ZIP."""
+    s = clean_str(line)
+    if not s:
+        return None
+    s = re.sub(r"\b(\d{5})-\d{4}\b", r"\1", s)
+    return normalize_address(s)
+
+
 def normalize_zip(z: Any) -> str | None:
     s = clean_str(z)
     if not s:

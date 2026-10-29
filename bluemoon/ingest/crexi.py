@@ -1140,8 +1140,8 @@ def _kept_edits_warnings(kept: int, fields: Mapping[str, int], crexi_new: int) -
     if not kept:
         return []
     out = [f"Kept {_plural(kept, 'value', 'values')} you corrected by hand ({edits_count_text(fields)}) instead "
-           f"of this file's {'value' if kept == 1 else 'values'}. The file's values are still saved with the "
-           f"original columns."]
+           f"of this file's {'value' if kept == 1 else 'values'}. A different value from the file is kept next to "
+           f"yours as '<Field> 2'."]
     if crexi_new:
         out.append(f"For {_plural(crexi_new, 'of them', 'of them')} Crexi now shows a different value than when you "
                    f"corrected it. Your correction still counts; look at those properties if you like.")
@@ -1374,11 +1374,14 @@ def plan_update(existing: Mapping[str, Any], p: ParsedRow,
     if p.units_source == "addresses" and existing.get("units") is not None and "units_from_addresses" not in old_flags:
         new_values["units"] = None  # an address count never replaces a real unit count
         notes.discard("units_from_addresses")
-    skip = set(edits or {})
+    skip: set[str] = set()
     if p.units_source == "addresses":
         skip.add("units")            # an estimate that differs from an estimate is not a disagreement
     estimate = ("units",) if ("units_from_addresses" in old_flags and p.units_source == "units") else ()
-    return cmerge.plan_facts(existing, new_values, RECORD_COLUMNS, skip=skip, replace_blank_like=estimate), \
+    # A correction made by hand stays the main value; a new value that is neither it nor the value it corrected
+    # is kept as '<Field> 2' like any other different value (crexi/merge.py plan_facts `edits`).
+    return cmerge.plan_facts(existing, new_values, RECORD_COLUMNS, skip=skip, replace_blank_like=estimate,
+                             edits=edits), \
         new_values, notes
 
 
@@ -1459,8 +1462,8 @@ def _record_duplicates(conn: sqlite3.Connection, row: dict, p: ParsedRow, import
     disagree about becomes alternates (and a different owner or mailing address something to try)."""
     for dup in p.dups:
         report.add("duplicates")
-        plan = cmerge.plan_facts(row, dup.record.model_dump(), RECORD_COLUMNS, skip=set(edits or {}) | {"units"}
-                                if dup.units_source == "addresses" else set(edits or {}))
+        plan = cmerge.plan_facts(row, dup.record.model_dump(), RECORD_COLUMNS,
+                                 skip={"units"} if dup.units_source == "addresses" else (), edits=edits)
         plan.alternates.update(cmerge.raw_alternates(loads(row.get("raw_json"), {}) or {}, dup.raw, dup.info_keys))
         alternates = cmerge.apply_alternates(conn, row["id"], plan, import_id=import_id, now=now)
         gained = cmerge.add_new_knowledge(conn, row["id"], plan, notes=f"Crexi import #{import_id}")

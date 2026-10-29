@@ -259,14 +259,31 @@ def numbered_fields(row: dict, prop: dict, extras: dict[str, list[dict]], contac
     return used
 
 
-def with_numbered(cols: list[Col], counts: dict[str, int], contacts_after: str) -> list[Col]:
+# Kinds for numbered columns of facts that have no column of their own (the others copy their column's kind).
+NUMBERED_KINDS = {"building_count": "int", "stories": "int", "tax_year": "int", "sale_price": "num",
+                  "loan_amount": "num", "interest_rate": "num", "improvement_value": "num", "land_value": "num",
+                  "total_value": "num", "annual_tax": "num"}
+_NOT_FACTS = frozenset({"phone", "email", "mailing_address"})
+
+
+def _extra_fields(counts: dict[str, int]) -> list[str]:
+    """Facts with extra values ('<Field> 2'...), in a steady order."""
+    return sorted(f for f, n in counts.items() if f not in _NOT_FACTS and n >= 2)
+
+
+def with_numbered(cols: list[Col], counts: dict[str, int], contacts_after: str, *,
+                  rest_at_end: bool = False) -> list[Col]:
     """The columns with the numbered ones put in: '<Field> 2'... right after a fact that has extra values, the
-    mailing address(es) after the owner(s), and Phone 1..N, Email 1..N after `contacts_after`."""
+    mailing address(es) after the owner(s), and Phone 1..N, Email 1..N after `contacts_after`. With rest_at_end,
+    every other fact with extra values (Last sale price 2, Lender 2, Stories 2...) is added after our columns,
+    so no kept value is left out; a Crexi-only column ('raw:Occupancy') is placed by `numbered_raw`."""
     out: list[Col] = []
+    placed: set[str] = set()
     for c in cols:
         out.append(c)
         f = NUMBERED_AFTER.get(c.header)
         if f:
+            placed.add(f)
             out += [_col(f"x_{f}_{n}", f"{c.header} {n}", c.kind) for n in range(2, counts.get(f, 1) + 1)]
             if f == "owner_name":
                 out.append(_col("x_mailing_address_1", MAILING_HEADER))
@@ -275,6 +292,27 @@ def with_numbered(cols: list[Col], counts: dict[str, int], contacts_after: str) 
         if c.header == contacts_after:
             out += [_col(f"phone_{n}", f"Phone {n}") for n in range(1, max(1, counts.get("phone", 0)) + 1)]
             out += [_col(f"email_{n}", f"Email {n}") for n in range(1, max(1, counts.get("email", 0)) + 1)]
+    if rest_at_end:
+        for f in _extra_fields(counts):
+            if f in placed or f.startswith(cmerge.RAW_PREFIX):
+                continue
+            out += [_col(f"x_{f}_{n}", f"{cmerge.header(f)} {n}", NUMBERED_KINDS.get(f, "text"))
+                    for n in range(2, counts[f] + 1)]
+    return out
+
+
+def numbered_raw(raw_headers: list[str], raw_cols: list[Col], counts: dict[str, int]) -> list[Col]:
+    """The original import columns with each one's extra values ('Occupancy 2'...) right after it. raw_cols are
+    raw_columns(raw_headers, ...): one column for each header, in the same order."""
+    out: list[Col] = []
+    for h, c in zip(raw_headers, raw_cols):
+        out.append(c)
+        f = cmerge.RAW_PREFIX + h
+        out += [_col(f"x_{f}_{n}", f"{c.header} {n}") for n in range(2, counts.get(f, 1) + 1)]
+    known = {cmerge.RAW_PREFIX + h for h in raw_headers}
+    for f in _extra_fields(counts):                  # a column this market's rows no longer have
+        if f.startswith(cmerge.RAW_PREFIX) and f not in known:
+            out += [_col(f"x_{f}_{n}", f"{cmerge.header(f)} {n}") for n in range(2, counts[f] + 1)]
     return out
 
 
@@ -318,11 +356,12 @@ class MarketData:
         return self.market["slug"]
 
     def our_columns(self) -> list[Col]:
-        return with_numbered(property_columns(self.asset), self.numbered, "Contact info")
+        return with_numbered(property_columns(self.asset), self.numbered, "Contact info", rest_at_end=True)
 
     def columns(self) -> list[Col]:
         ours = self.our_columns()
-        return ours + raw_columns(self.raw_headers, (c.header for c in ours))
+        return ours + numbered_raw(self.raw_headers, raw_columns(self.raw_headers, (c.header for c in ours)),
+                                   self.numbered)
 
     def worklist_columns(self) -> list[Col]:
         return with_numbered(WORKLIST_COLUMNS, self.numbered, CHANNEL_HEADERS["vm"])
@@ -704,18 +743,27 @@ CRM_NUMBERED_AFTER = {"owner_name": "owner_name", "mailing_address": "mailing_ad
 
 def crm_numbered(r: dict, src: dict, counts: dict[str, int]) -> dict:
     """A CRM row with its numbered columns put in: phone_1..N and email_1..N after 'vm' (working ones first),
-    owner_name_2..., mailing_address_2..., units_2... right after the first value."""
+    owner_name_2..., mailing_address_2..., units_2... right after the first value, and every other fact with
+    extra values at the end (sale_price_2, lender_2..., a Crexi column as 'Occupancy 2')."""
     out: dict = {}
+    placed: set[str] = set()
     for k, v in r.items():
         out[k] = v
         f = CRM_NUMBERED_AFTER.get(k)
         if f:
+            placed.add(f)
             for n in range(2, counts.get(f, 1) + 1):
                 out[f"{k}_{n}"] = src.get(f"x_{f}_{n}")
         if k == "vm":
             for kind in ("phone", "email"):
                 for n in range(1, max(1, counts.get(kind, 0)) + 1):
                     out[f"{kind}_{n}"] = src.get(f"{kind}_{n}")
+    for f in _extra_fields(counts):
+        if f in placed:
+            continue
+        for n in range(2, counts[f] + 1):
+            name = f"{cmerge.header(f)} {n}" if f.startswith(cmerge.RAW_PREFIX) else f"{f}_{n}"
+            out[name] = src.get(f"x_{f}_{n}")
     return out
 
 

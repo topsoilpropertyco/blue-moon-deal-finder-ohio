@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..db import dumps, loads, now_iso, rows
-from ..util import clean_str, normalize_address, normalize_owner
+from ..util import clean_str, mail_line_key, normalize_address, normalize_zip, owner_match_key
 
 RETIRED_FLAG = "crexi_differs"     # the old "Crexi sent different data" warning; db.py removes it on start
 
@@ -115,7 +115,9 @@ def _same(field_name: str, a: Any, b: Any) -> bool:
     if field_name.startswith(RAW_PREFIX):
         return _raw_same(a, b)
     if field_name == "owner_name":
-        return (normalize_owner(a) or "") == (normalize_owner(b) or "")
+        return (owner_match_key(a) or "") == (owner_match_key(b) or "")
+    if field_name == "mailing_address":     # one-line text: '9 Elm Street ... 45402' is '9 ELM ST ... 45402-1234'
+        return (mail_line_key(a) or "") == (mail_line_key(b) or "")
     if field_name == "county":
         return (clean_str(a) or "").upper() == (clean_str(b) or "").upper()
     try:
@@ -160,16 +162,29 @@ class FactsPlan:
     new_mailing: str | None = None
 
 
+def _place_conflicts(existing: Mapping[str, Any], incoming: Mapping[str, Any]) -> bool:
+    """True when a stored mailing city, state or ZIP disagrees with the new row's (blank parts never do)."""
+    for f, norm in (("mailing_city", lambda v: " ".join(str(v).split()).upper()),
+                    ("mailing_state", lambda v: str(v).strip().upper()),
+                    ("mailing_zip", normalize_zip)):
+        a, b = clean_str(existing.get(f)), clean_str(incoming.get(f))
+        if a and b and norm(a) != norm(b):
+            return True
+    return False
+
+
 def plan_facts(existing: Mapping[str, Any], incoming: Mapping[str, Any], columns: Iterable[str], *,
-               skip: Iterable[str] = (), replace_blank_like: Iterable[str] = ()) -> FactsPlan:
+               skip: Iterable[str] = (), replace_blank_like: Iterable[str] = (),
+               edits: Mapping[str, Mapping[str, Any]] | None = None) -> FactsPlan:
     """Apply the merge rule to one property. `existing` is the stored row, `incoming` the new values (None =
-    blank in the new row), `columns` the fields to look at. `skip`: fields a correction made by hand already
-    settled (never an alternate). `replace_blank_like`: stored values that are only an estimate (the unit count
-    taken from the address count): a real value replaces them like a blank."""
+    blank in the new row), `columns` the fields to look at. `skip`: fields never kept as an alternate.
+    `replace_blank_like`: stored values that are only an estimate (the unit count taken from the address count):
+    a real value replaces them like a blank. `edits`: corrections made by hand ({field: {value, old_value}}):
+    the correction stays the main value, an incoming value equal to it or to the value it corrected changes
+    nothing, and any other incoming value is kept as an alternate like any different value."""
     plan = FactsPlan()
     cols = list(columns)
     skip_set, soft = set(skip), set(replace_blank_like)
-    mailing_differs = False
     for f in cols:
         old, new = existing.get(f), incoming.get(f)
         if f in MAILING_FIELDS:
@@ -186,24 +201,41 @@ def plan_facts(existing: Mapping[str, Any], incoming: Mapping[str, Any], columns
                 if f == "owner_name":
                     plan.new_owner = clean_str(new)
     # Mailing address: one group. A blank original is filled (all its parts); a different address is an alternate
-    # and also a new mailing address to try; the same address just gets its blank parts filled.
+    # and also a new mailing address to try; the same address just gets its blank parts filled. A stored address
+    # with no street but a city, state or ZIP that disagrees with the new row is a different address too: the
+    # new street is never joined to the old city.
     old_addr, new_addr = clean_str(existing.get("mailing_address")), clean_str(incoming.get("mailing_address"))
+    if new_addr and old_addr:
+        mailing_differs = mailing_key(existing) != mailing_key(incoming)
+    else:
+        mailing_differs = bool(new_addr) and _place_conflicts(existing, incoming)
     for f in MAILING_FIELDS:
         old, new = existing.get(f), incoming.get(f)
         if f not in cols:
             continue
-        if new is None or (new_addr and old_addr and mailing_key(existing) != mailing_key(incoming)):
+        if new is None or mailing_differs:
             plan.merged[f] = old
         elif old is None:
             plan.merged[f] = new
             plan.fills[f] = new
         else:
             plan.merged[f] = old
-    if new_addr and old_addr and mailing_key(existing) != mailing_key(incoming):
-        mailing_differs = True
     if mailing_differs and "mailing_address" not in skip_set:
         plan.alternates["mailing_address"] = (mailing_text(incoming), mailing_text(existing))
         plan.new_mailing = mailing_text(incoming)
+    for f, edit in (edits or {}).items():
+        if f not in plan.alternates:
+            continue
+        new = incoming.get(f)
+        if new is None or _same(f, new, edit.get("value")) or (edit.get("old_value") is not None
+                                                               and _same(f, new, edit.get("old_value"))):
+            del plan.alternates[f]
+            if f == "owner_name":
+                plan.new_owner = None
+            elif f == "mailing_address":
+                plan.new_mailing = None
+        elif f not in MAILING_FIELDS:
+            plan.alternates[f] = (new, edit.get("value"))
     return plan
 
 
@@ -264,7 +296,8 @@ def add_new_knowledge(conn: sqlite3.Connection, property_id: int, plan: FactsPla
     {'new_names': n, 'new_mailing': n} for what was really new."""
     from ..drill import engine as E
     out = {"new_names": 0, "new_mailing": 0}
-    if plan.new_owner:
+    if plan.new_owner and not any(owner_match_key(p["name"]) == owner_match_key(plan.new_owner)
+                                  for p in rows(conn, "SELECT name FROM people WHERE property_id=?", (property_id,))):
         _, created = E._add_person(conn, property_id, plan.new_owner, role="other", source=source, notes=notes)
         out["new_names"] += int(created)
     if plan.new_mailing:
