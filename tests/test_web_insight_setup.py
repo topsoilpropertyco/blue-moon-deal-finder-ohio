@@ -406,7 +406,8 @@ def test_settings_shows_keys_as_yes_no_only(rendered):
     for text in ("Markets", "Buy box: Apartments", "20–50 units", "Studio $800", "GOOGLE_MAPS_API_KEY",
                  "Photo check", "Monthly photo goal", "600 a month, 100 at a time", "config.local.yaml",
                  "monthly_target: 800", "Google free usage this month", "Where the data lives", "data/bluemoon.sqlite",
-                 "How to change a setting", "open -e config.yaml", "launchctl kickstart"):
+                 "How to change a setting", "open -e config.yaml", "launchctl kickstart",
+                 "Updates", "Version: <b>", "Last update: ", "uv run run.py autoupdate now"):
         assert text in html, text
     assert FAKE_KEY not in html
     assert FAKE_KEY not in json.dumps(rendered)

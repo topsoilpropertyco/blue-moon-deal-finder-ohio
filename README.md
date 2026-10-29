@@ -227,7 +227,28 @@ All thresholds and weights live in YAML, never in code:
 
 Restart the dashboard after editing them.
 
-## Update the app
+## Updates
+
+**Turn on nightly updates (once):** the app then updates itself every night at 3:17 AM. It checks GitHub, takes the new version, runs a quick check, and restarts the dashboard and the team link. If the check fails, it goes back to the version before by itself, so the dashboard keeps working.
+
+```bash
+cd ~/blue-moon-deal-finder-ohio
+uv run run.py autoupdate install
+```
+
+**See how it went:** Settings shows a line like *Version: 3d75b81, 2026-10-29 · Updates itself nightly at 3:17 AM · Last update: Oct 29, 3:17 AM, ok*. Or in Terminal:
+
+```bash
+uv run run.py autoupdate status
+```
+
+**Update right now** (the same steps as the nightly one):
+
+```bash
+uv run run.py autoupdate now
+```
+
+Or the old way, by hand:
 
 ```bash
 cd ~/blue-moon-deal-finder-ohio
@@ -237,6 +258,14 @@ launchctl kickstart -k gui/$(id -u)/com.bluemoon.dealfinder
 launchctl kickstart -k gui/$(id -u)/com.bluemoon.share
 ```
 (The last two lines restart the dashboard and the team link; skip the last one if you don't share. If you run `uv run run.py serve` by hand instead, stop it with Control-C and start it again.)
+
+Updating by hand never hurts anything: your data, `.env` and `config.local.yaml` are never touched, and the nightly update then simply finds nothing new.
+
+Good to know:
+- The nightly update skips itself (and says why on Settings) if you edited a file that came with the app, such as `config.yaml`. It never overwrites your edits. Put your own settings in `config.local.yaml` instead (see Settings above).
+- The Mac must be on at 3:17 AM. If it was asleep, macOS runs the update when it wakes up.
+- Turn it off: `uv run run.py autoupdate uninstall`. Change the time: `updates:` in `config.yaml`, then run `autoupdate install` again.
+- The log is `logs/auto_update.log` (kept short).
 
 ## Back it up
 
@@ -248,7 +277,7 @@ Your data lives in the app folder: `data/` (the database and Crexi files), `imag
 |---|---|
 | Drive times show "~" and photos are off | No Google key yet: `uv run run.py key google`, then restart the dashboard. |
 | Google says "We couldn't verify it's you" when you copy the key | Sign in to console.cloud.google.com on a computer or phone you've used with that Google account before, finish any check Google asks for, then copy the key there. It can take a day after a new sign-in. |
-| The team link says "Can't reach the Blue Moon server" | Update the app (below) and restart both services; the link then asks for your email and the team password. If the Mac restarted sharing, the link changed: the new one is on Settings. |
+| The team link says "Can't reach the Blue Moon server" | Update the app (see Updates above) and restart both services; the link then asks for your email and the team password. If the Mac restarted sharing, the link changed: the new one is on Settings. |
 | The team link says "isn't on the team list" | Add that exact email: `uv run run.py share add name@example.com` (works right away). |
 | Google refuses the key | Turn on Routes, Geocoding, Street View Static and Maps Static APIs for that key in Google Cloud Console. |
 | Photo check says Claude Code isn't signed in | Run `claude` in Terminal once and sign in. |

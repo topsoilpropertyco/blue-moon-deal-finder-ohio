@@ -215,3 +215,8 @@ owners:
 share:
   provider: cloudflare           # cloudflare = a new temporary link each time | ngrok = your free permanent address
   ngrok_domain: ""               # for ngrok: the free address from dashboard.ngrok.com > Domains, e.g. something.ngrok-free.app
+
+updates:                         # nightly automatic update (turn on with: uv run run.py autoupdate install)
+  hour: 3                        # local time, 24-hour clock; run 'autoupdate install' again after changing it
+  minute: 17
+  keep_log_lines: 500            # logs/auto_update.log keeps this many lines
