@@ -13,7 +13,7 @@ import pytest
 STATIC = Path(__file__).resolve().parent.parent / "bluemoon" / "web" / "static"
 
 HARNESS = r"""
-const [coreJs, pricingJs, propertyJs] = process.argv.slice(2);
+const [coreJs, pricingJs, peopleJs, propertyJs] = process.argv.slice(2);
 const docListeners = {};
 class Element {}
 class Stub extends Element {
@@ -63,6 +63,7 @@ require(coreJs);
 const BM = window.BM;
 global.BM = BM;
 require(pricingJs);
+require(peopleJs);
 require(propertyJs);
 
 const calls = [];
@@ -183,7 +184,7 @@ def ran(tmp_path_factory) -> dict:
         pytest.skip("Node is not installed")
     script = tmp_path_factory.mktemp("js") / "harness.js"
     script.write_text(HARNESS, encoding="utf-8")
-    done = subprocess.run([node, str(script), str(STATIC / "core.js"), str(STATIC / "pricing.js"),
+    done = subprocess.run([node, str(script), str(STATIC / "core.js"), str(STATIC / "pricing.js"), str(STATIC / "people.js"),
                            str(STATIC / "property.js")], capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     return json.loads(done.stdout.strip().splitlines()[-1])

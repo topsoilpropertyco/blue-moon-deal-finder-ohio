@@ -76,7 +76,11 @@ PERSON_TIERS: tuple[tuple[str, ...], ...] = (
 CARRY_ROLES = ("member", "officer", "trustee", "deed_signer", "heir")
 # People who are never the owner: recording one does not make a property "Possible owner" (level 2).
 # 'rejected' is a person an AI research finding named who was then marked wrong.
-NOT_OWNER_ROLES = ("manager", "agent", "rejected")
+NOT_OWNER_ROLES = ("manager", "broker", "agent", "rejected")
+# Roles a person can be given by hand. 'other' reads as "unconfirmed association". Confirmed owner is left out
+# on purpose: only a conversation confirms (the level actions), never an edit.
+SETTABLE_ROLES = ("owner_of_record", "possible_owner", "member", "officer", "trustee", "deed_signer", "heir",
+                  "manager", "broker", "statutory_agent", "other")
 # Contacts and people the AI research step found. It writes them itself, but only to the buy-box properties of
 # the market it ran in, with the link where each was seen. So the portfolio match copies an AI contact to the
 # owner's other properties only once a reach-out shows it works (verified); AI people are never copied.
@@ -1058,17 +1062,43 @@ def record_attempt(conn: sqlite3.Connection, property_id: int, stage_key: str, o
 
 
 def add_person(conn: sqlite3.Connection, property_id: int, name: str, role: str | None = None,
-               source: str | None = None, notes: str | None = None, *, settings: Settings | None = None) -> dict:
-    """Record a person tied to the property (owner of record, member, agent, signer, manager, heir...)."""
+               source: str | None = None, notes: str | None = None, *, actor: str | None = None,
+               settings: Settings | None = None) -> dict:
+    """Record a person tied to the property (owner of record, member, agent, signer, manager, broker, heir...).
+    `actor` (who added them by hand) is kept with a new person."""
     cfg = drill_config(settings)
     with _tx(conn):
         _require_property(conn, property_id)
         _ensure_state_row(conn, property_id)
         pid, created = _add_person(conn, property_id, name, role=role, source=source, notes=notes)
+        if created and actor:
+            conn.execute("UPDATE people SET edited_by=?, edited_at=? WHERE id=?", (actor, now_iso(), pid))
         _refresh(conn, property_id, cfg, new_info=created)
     person = one(conn, "SELECT * FROM people WHERE id=?", (pid,))
     msg = f"Added {person['name']}." if created else f"{person['name']} was already on this property."
     return _result(conn, property_id, msg, settings, person=person, created=created)
+
+
+def set_person_role(conn: sqlite3.Connection, property_id: int, person_id: int, role: str | None, actor: str, *,
+                    settings: Settings | None = None) -> dict:
+    """Change what a person is on this property (manager, broker, registered contact...) and who said so.
+    A confirmed owner, a same-owner match, a previous owner or a rejected name keeps its role."""
+    role = clean_str(role)
+    if role not in SETTABLE_ROLES:
+        raise ValueError("Pick a role from the list: " + ", ".join(r.replace("_", " ") for r in SETTABLE_ROLES) + ".")
+    cfg = drill_config(settings)
+    with _tx(conn):
+        _require_property(conn, property_id)
+        person = one(conn, "SELECT * FROM people WHERE id=? AND property_id=?", (person_id, property_id))
+        if not person:
+            raise KeyError(f"Person {person_id} is not on property {property_id}.")
+        if person["role"] not in (None, *SETTABLE_ROLES):
+            raise ValueError(f"{person['name']} is recorded as {person['role'].replace('_', ' ')}, which is set by the "
+                             "owner-contact steps and can't be changed here.")
+        _ensure_state_row(conn, property_id)
+        conn.execute("UPDATE people SET role=?, edited_by=?, edited_at=? WHERE id=?", (role, actor, now_iso(), person_id))
+        _refresh(conn, property_id, cfg)
+    return _result(conn, property_id, f"{person['name']} is now recorded as {role.replace('_', ' ')}.", settings)
 
 
 def add_contact(conn: sqlite3.Connection, property_id: int, channel: str, value: str, source: str | None = None,

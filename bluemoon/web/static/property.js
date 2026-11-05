@@ -94,10 +94,11 @@
       c.outcomeEarly = Number((d.drill || {}).level || d.level || 1) === 3 || !!(d.outcome && d.outcome.value);
     }
     const early = c.outcomeEarly;
-    root.innerHTML = headerHtml(d) + scoreHtml(d) + buyboxHtml(d) + (early ? outcomeHtml(d) : '') + contactHtml(d) + crexiHtml(d) + whyHtml(d) + photoHtml(d) +
+    root.innerHTML = headerHtml(d) + BM.people.html(d) + scoreHtml(d) + buyboxHtml(d) + (early ? outcomeHtml(d) : '') + contactHtml(d) + crexiHtml(d) + whyHtml(d) + photoHtml(d) +
       BM.pricing.html(d) + rentHtml(d) + buildingHtml(d) + ownerHtml(d) + linksHtml(d) + (early ? '' : outcomeHtml(d)) + rawHtml(d);
     root.querySelectorAll('details[data-keep]').forEach((el) => { if (c.kept.has(el.getAttribute('data-keep'))) el.open = true; });
     BM.pricing.mount(root, d);
+    BM.people.mount(root, d, (res) => applyDrill(c, res));
     box.scrollTop = opts && opts.keepScroll ? top : 0;
   }
 

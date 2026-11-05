@@ -558,3 +558,19 @@ details.p-more[open] > summary{margin-bottom:8px}
 .pr-warn{color:var(--warn-ink)}
 .pr-form[data-rate="0"] .rate-only,.pr-form[data-sqft="0"] .sqft-only{display:none}
 @media (max-width:480px){.pr-napkin{padding:var(--s3)}.pr-table .shr{display:none}.pr-in{min-width:56px}.pr-price .big{font-size:32px}}
+
+/* drawer: who is behind this property (people.js) */
+.pe-who{margin:0}
+.pe-list,.pe-contacts{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s3)}
+.pe-contacts{gap:6px;font-size:13px}
+.pe-contacts li{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}
+.pe-val{overflow-wrap:anywhere}
+.pe-person{display:flex;flex-direction:column;gap:6px;border:1px solid var(--line);border-radius:12px;padding:var(--s3);min-width:0}
+.pe-top{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;overflow-wrap:anywhere}
+.pe-acts{display:flex;flex-wrap:wrap;gap:var(--s3);align-items:flex-end}
+.pe-role{flex:1 1 180px}
+.pe-recipient{display:flex;flex-direction:column;gap:6px;align-items:flex-start;margin:0}
+.pe-conflict ul{margin:6px 0 0;padding-left:18px}
+.pe-add{display:flex;flex-direction:column;gap:var(--s3);margin-top:var(--s3)}
+.pe-add .btn{align-self:flex-start}
+@media (max-width:480px){.pe-acts .btn,.pe-contacts .btn{min-height:40px}}

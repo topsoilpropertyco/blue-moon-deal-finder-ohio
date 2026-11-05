@@ -68,6 +68,10 @@ Crexi CSV/XLSX ─► ingest ─► properties (master list, every original colu
   a hash, for offers), `resolve_market()` + `prior_group_ids()` (every property at once: Deals chips, exports).
 - `bluemoon/history.py`: `age_info()`, `ownership_info()` (precision exact|year), builder evidence and
   sale/area facts (table property_history), `history_block()`.
+- `bluemoon/people.py`: the drawer's people block. `block()` (seller = owner of record, people with role and source,
+  confirmed names, loose contacts, recipient, owner-name conflicts, `role_choices`), `choose_recipient()` /
+  `clear_recipient()` (table property_recipients: who offers are addressed to, apart from the seller). Role changes
+  live in `drill/engine.py` (`set_person_role()`, `SETTABLE_ROLES`; `broker` is a role that never counts as owner).
 - `bluemoon/cache.py`: `make_key()`, `cached(conn, key, provider, fetch)`, `record_call()`, `month_usage()`,
   `estimate_cost(conn, sku, units)`.
 - `bluemoon/util.py`: `normalize_address/county/owner/zip`, `haversine_miles`, `bearing_deg`, `parse_date`,
@@ -495,6 +499,10 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | POST | `/api/m/{slug}/properties/{id}/contacts` | body `{channel, value, source?, person_name?, notes?}` |
 | PATCH | `/api/research/findings/{fid}` | body `{status: wrong\|kept}` -> mark an AI research finding wrong, or take that back (records who) |
 | PATCH | `/api/contacts/{cid}` | body `{status, allow_contact?}` (taking a contact off do-not-contact needs `allow_contact: true`) |
+| POST | `/api/m/{slug}/properties/{id}/people` | body `{name, role?, source?, notes?}`; role one of `SETTABLE_ROLES` (400 otherwise); keeps who added them; returns the engine result plus `people` |
+| PUT | `/api/m/{slug}/properties/{id}/people/{person_id}/role` | body `{role}`; confirmed owners and same-owner matches keep their role (400); returns the engine result plus `people` |
+| PUT | `/api/m/{slug}/properties/{id}/recipient` | body `{person_id, contact_id?, note?}`: who offers are addressed to (404 unknown person or contact, 400 contact of someone else or wrong / do-not-contact); the seller is not touched; returns `{people}` |
+| DELETE | `/api/m/{slug}/properties/{id}/recipient` | clears the recipient; returns `{people}` |
 | POST | `/api/m/{slug}/properties/{id}/outreach` | body `{channel, outcome, contact_point_id?, notes?}` |
 | POST | `/api/m/{slug}/properties/{id}/level` | body `{action, person?, note?}` |
 | POST | `/api/m/{slug}/properties/{id}/credit` | body `{result?}` |
@@ -570,6 +578,10 @@ Rent and price in the browser: `pricing.js` (loaded after `core.js`) draws the d
 and "Age and history" sections (`BM.pricing.html(detail)`, `BM.pricing.mount(root, detail)`, called by
 `property.js`). Money arrives as cents and is shown to the cent. Any rent figure toggles the napkin region; its
 forms PUT the assumptions, POST rent records and pin them, and each answer redraws the two sections.
+
+People block: `people` in the property detail (and in the answers above) feeds `BM.people.html(detail)` /
+`BM.people.mount(root, detail, onDrill)` in `people.js`, drawn under the property title. Table `property_recipients`
+(one row per property: person, optional contact, note, who and when); columns `people.edited_by`, `people.edited_at`.
 
 Tables added: `rent_records` (evidence, normalized yearly cents, state, pinned), `rent_assumptions` (typed units,
 mix, rents), `property_history` (builder evidence, bundled-sale flag, sale source). Columns added to `properties`:

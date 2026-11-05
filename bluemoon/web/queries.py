@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .. import history, napkin, pricing
+from .. import history, napkin, people, pricing
 from ..config import AssetClass, Settings, get_settings, has_secret
 from ..db import dumps, loads, market_by_slug, one, pending_rescore, rows, scalar, this_month
 from ..drill import engine
@@ -450,6 +450,7 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
         "pricing": napkin.block(conn, prop, mc.ac.key, pcfg, layers["rent_fits"]),
         "history": history.history_block(conn, prop, pcfg),
         "owner": _owner_detail(conn, prop, layers["owners"]),
+        "people": people.block(conn, prop, mc.settings),
         "drill": drill,
         "links": drill_links.links_for({**prop, "asset_class": mc.ac.key}, None, drill["best_guess_person"],
                                        settings=mc.settings, parse_owner=False),
@@ -469,6 +470,15 @@ def pricing_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Sett
     return {"pricing": napkin.block(conn, prop, mc.ac.key, pcfg, _one_by_property(conn, "rent_fits", pid)),
             "history": history.history_block(conn, prop, pcfg),
             "property": {k: prop.get(k) for k in ("building_sqft", "building_area_type", "sale_price", "sale_date")}}
+
+
+def people_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Settings | None = None) -> dict:
+    """Only the drawer's people block for one property (after a change)."""
+    mc = market_ctx(conn, slug, settings)
+    prop = one(conn, "SELECT * FROM properties WHERE id = ? AND market_id = ?", (pid, mc.id))
+    if not prop:
+        raise KeyError(f"Property {pid} is not in this market.")
+    return {"people": people.block(conn, prop, mc.settings)}
 
 
 def _crexi_block(conn: sqlite3.Connection, pid: int) -> dict:

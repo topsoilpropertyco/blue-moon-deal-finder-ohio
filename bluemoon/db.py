@@ -33,6 +33,9 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # building_sqft is net rentable or gross building area ('rentable' | 'gross' | NULL = not known)
     ("properties", "asking_price", "REAL"),
     ("properties", "building_area_type", "TEXT"),
+    # who last added a person or changed their role, and when
+    ("people", "edited_by", "TEXT"),
+    ("people", "edited_at", "TEXT"),
 )
 # meta key: markets whose scores were saved before version 2. The dashboard re-scores each one once, so the
 # set-aside groups (scores.aside_buckets) exist. JSON list of market ids.
@@ -185,10 +188,21 @@ CREATE TABLE IF NOT EXISTS people (
   id INTEGER PRIMARY KEY,
   property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
-  role TEXT,                       -- owner_of_record | statutory_agent | member | officer | trustee | deed_signer | manager | heir | other
+  role TEXT,                       -- owner_of_record | statutory_agent | member | officer | trustee | deed_signer | manager | broker | heir | other
   source TEXT,
   notes TEXT,
   created_at TEXT NOT NULL
+);
+
+-- Who an offer for this property is addressed to. Kept apart from the seller (the owner of record on the
+-- property), because the recipient can be someone else: a broker, a manager, a family member.
+CREATE TABLE IF NOT EXISTS property_recipients (
+  property_id INTEGER PRIMARY KEY REFERENCES properties(id) ON DELETE CASCADE,
+  person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  contact_point_id INTEGER REFERENCES contact_points(id) ON DELETE SET NULL,
+  note TEXT,
+  chosen_by TEXT NOT NULL,
+  chosen_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS contact_points (

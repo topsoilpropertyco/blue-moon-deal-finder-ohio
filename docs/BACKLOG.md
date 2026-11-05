@@ -29,8 +29,9 @@ Mark an item done (with the date) when it ships; never delete it.
 ## Rent, price and offers (requested 2026-11-05)
 
 15. **Rent and the Blue Moon price.** **Done 2026-11-05:** a layered rent estimate with a clickable napkin, rent records with a basis and a source, the Blue Moon price (4x rent, with 5x and 6x as comparisons), the last-sale-under-half check and Deals chips, age and years owned with their precision, builder evidence, asking price as its own field, net rentable versus gross area, and "Rent fit" renamed Area rent check. Settings in `config/pricing.yaml`.
-16. **Offers, the LOI from a Google Doc template, leads and batches, marking offers sent and recording replies.** Open (the next phases of this request).
-17. **Auto-send via Gmail, delivery confirmation and follow-up reminders.** Open (roadmap; this build never sends email).
+16. **People on the property.** **Done 2026-11-05:** the drawer's "Who is behind this property" block (seller, people with role and source, "No person confirmed yet", a broker role, the offer recipient kept apart from the seller, conflicting owner names). The offers themselves come next.
+17. **Offers, the LOI from a Google Doc template, leads and batches, marking offers sent and recording replies.** Open (the next phases of this request).
+18. **Auto-send via Gmail, delivery confirmation and follow-up reminders.** Open (roadmap; this build never sends email).
 
 ## Carried over
 

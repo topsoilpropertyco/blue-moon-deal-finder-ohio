@@ -18,7 +18,7 @@ STATIC = Path(__file__).resolve().parent.parent / "bluemoon" / "web" / "static"
 SHELL_JS = ("core.js", "deals.js", "property.js")
 
 CSS_ORDER = ["styles.css", "drill.css", "views.css"]
-JS_ORDER = ["core.js", "pricing.js", "property.js", "deals.js", "drill.js", "credits.js", "review.js", "funnel.js", "analytics.js",
+JS_ORDER = ["core.js", "pricing.js", "people.js", "property.js", "deals.js", "drill.js", "credits.js", "review.js", "funnel.js", "analytics.js",
             "score.js", "sources.js", "importer.js", "run.js", "exports.js", "settings.js"]
 TOKENS = ["--bg", "--surface", "--sunk", "--ink", "--muted", "--faint", "--line", "--accent", "--accent-ink",
           "--accent-soft", "--good", "--warn", "--bad", "--na", "--moon-dim", "--shadow", "--f-display", "--f-ui",

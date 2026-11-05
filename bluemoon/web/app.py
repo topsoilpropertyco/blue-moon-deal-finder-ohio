@@ -71,6 +71,7 @@ from ..ingest import IngestError, import_file, preview_file
 from ..scoring import overrides
 from ..scoring.learn import model_summary, set_outcome
 from .. import history, napkin
+from ..people import choose_recipient, clear_recipient
 from . import auth, crexi_api, queries
 
 log = logging.getLogger("bluemoon.web")
@@ -297,6 +298,16 @@ class PersonIn(BaseModel):
     role: Name = None
     source: Name = None
     notes: Text = None
+
+
+class PersonRoleIn(BaseModel):
+    role: str = Field(max_length=40)
+
+
+class RecipientIn(BaseModel):
+    person_id: int
+    contact_id: int | None = None
+    note: Text = None
 
 
 class CreditIn(BaseModel):
@@ -729,9 +740,35 @@ def add_contact(slug: str, pid: int, body: ContactIn, conn: Conn) -> dict:
 
 
 @router.post("/api/m/{slug}/properties/{pid}/people")
-def add_person(slug: str, pid: int, body: PersonIn, conn: Conn) -> dict:
+def add_person(slug: str, pid: int, body: PersonIn, request: Request, conn: Conn) -> dict:
     require_property(conn, slug, pid)
-    return engine.add_person(conn, pid, body.name, role=body.role, source=body.source, notes=body.notes)
+    if body.role is not None and body.role not in engine.SETTABLE_ROLES:
+        raise ValueError("Pick a role from the list: " + ", ".join(r.replace("_", " ") for r in engine.SETTABLE_ROLES) + ".")
+    res = engine.add_person(conn, pid, body.name, role=body.role, source=body.source, notes=body.notes,
+                            actor=_actor(request))
+    return {**res, **queries.people_detail(conn, slug, pid)}
+
+
+@router.put("/api/m/{slug}/properties/{pid}/people/{person_id}/role")
+def set_person_role(slug: str, pid: int, person_id: int, body: PersonRoleIn, request: Request, conn: Conn) -> dict:
+    require_property(conn, slug, pid)
+    res = engine.set_person_role(conn, pid, person_id, body.role, _actor(request))
+    return {**res, **queries.people_detail(conn, slug, pid)}
+
+
+@router.put("/api/m/{slug}/properties/{pid}/recipient")
+def set_recipient(slug: str, pid: int, body: RecipientIn, request: Request, conn: Conn) -> dict:
+    """Who offers for this property are addressed to. The seller (owner of record) stays as it is."""
+    require_property(conn, slug, pid)
+    choose_recipient(conn, pid, body.person_id, body.contact_id, body.note, _actor(request))
+    return {**queries.people_detail(conn, slug, pid), "message": "Offers for this property will be addressed to them."}
+
+
+@router.delete("/api/m/{slug}/properties/{pid}/recipient")
+def remove_recipient(slug: str, pid: int, conn: Conn) -> dict:
+    require_property(conn, slug, pid)
+    clear_recipient(conn, pid)
+    return {**queries.people_detail(conn, slug, pid), "message": "No recipient is chosen now."}
 
 
 @router.patch("/api/contacts/{cid}")
