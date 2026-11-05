@@ -70,6 +70,7 @@ from ..imagery import streetview
 from ..ingest import IngestError, import_file, preview_file
 from ..scoring import overrides
 from ..scoring.learn import model_summary, set_outcome
+from .. import history, napkin
 from . import auth, crexi_api, queries
 
 log = logging.getLogger("bluemoon.web")
@@ -328,6 +329,46 @@ class BuyboxIn(BaseModel):
     decision: str = Field(max_length=20)       # include | exclude | rules
     reason: str = Field(default="*", max_length=40)
     note: Text = None
+
+
+Amount = str | int | float | None
+
+
+class RentRecordIn(BaseModel):
+    """One piece of rent evidence (napkin.add_record works out the yearly figure and checks every choice)."""
+    source: str = Field(max_length=40)
+    basis: str = Field(max_length=40)
+    total: Amount = None
+    total_period: str | None = Field(default=None, max_length=20)
+    rate: Amount = None
+    rate_period: str | None = Field(default=None, max_length=20)
+    quantity: Amount = None
+    quantity_kind: str | None = Field(default=None, max_length=20)
+    area_type: str | None = Field(default=None, max_length=20)
+    authoritative: str | None = Field(default=None, max_length=20)
+    evidence_date: str | None = Field(default=None, max_length=30)
+    note: Text = None
+
+
+class RentPinIn(BaseModel):
+    pinned: bool = True
+
+
+class RentAssumptionsIn(BaseModel):
+    """The napkin's lines. Only the fields sent are changed; null clears one."""
+    units: int | None = None
+    mix: dict[str, int] | None = Field(default=None, max_length=12)
+    rents: dict[str, str | int | float] | None = Field(default=None, max_length=12)
+
+
+class HistoryIn(BaseModel):
+    """What was learned about a property's history. Only the fields sent are changed."""
+    builder_state: str | None = Field(default=None, max_length=20)
+    builder_source: Name = None
+    builder_note: Text = None
+    sale_bundled: bool | None = None
+    sale_source: Name = None
+    building_area_type: str | None = Field(default=None, max_length=20)
 
 
 class UndoIn(BaseModel):
@@ -636,6 +677,41 @@ def property_buybox(slug: str, pid: int, body: BuyboxIn, request: Request, conn:
 @router.get("/api/m/{slug}/properties/{pid}")
 def property_detail(slug: str, pid: int, conn: Conn) -> dict:
     return queries.property_detail(conn, slug, pid)
+
+
+# --- routes: rent, the Blue Moon price and property history -----------------------------------------------
+
+@router.get("/api/m/{slug}/properties/{pid}/pricing")
+def property_pricing(slug: str, pid: int, conn: Conn) -> dict:
+    return queries.pricing_detail(conn, slug, pid)
+
+
+@router.post("/api/m/{slug}/properties/{pid}/rent/records")
+def add_rent_record(slug: str, pid: int, body: RentRecordIn, request: Request, conn: Conn) -> dict:
+    require_property(conn, slug, pid)
+    napkin.add_record(conn, pid, actor=_actor(request), **body.model_dump())
+    return {**queries.pricing_detail(conn, slug, pid), "message": "Rent figure saved."}
+
+
+@router.post("/api/m/{slug}/properties/{pid}/rent/records/{rid}/pin")
+def pin_rent_record(slug: str, pid: int, rid: int, body: RentPinIn, conn: Conn) -> dict:
+    require_property(conn, slug, pid)
+    napkin.pin_record(conn, pid, rid, body.pinned)
+    return queries.pricing_detail(conn, slug, pid)
+
+
+@router.put("/api/m/{slug}/properties/{pid}/rent/assumptions")
+def set_rent_assumptions(slug: str, pid: int, body: RentAssumptionsIn, request: Request, conn: Conn) -> dict:
+    require_property(conn, slug, pid)
+    napkin.save_assumptions(conn, pid, body.model_dump(exclude_unset=True), _actor(request))
+    return queries.pricing_detail(conn, slug, pid)
+
+
+@router.put("/api/m/{slug}/properties/{pid}/history")
+def set_property_history(slug: str, pid: int, body: HistoryIn, request: Request, conn: Conn) -> dict:
+    require_property(conn, slug, pid)
+    history.save_history(conn, pid, body.model_dump(exclude_unset=True), _actor(request))
+    return queries.pricing_detail(conn, slug, pid)
 
 
 @router.post("/api/m/{slug}/properties/{pid}/attempt")

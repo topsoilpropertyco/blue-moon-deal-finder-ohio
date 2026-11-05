@@ -26,6 +26,12 @@ Mark an item done (with the date) when it ships; never delete it.
 7. **An export for Crexi.** A clear export meant for Crexi (ask Seth exactly what it should contain and how he'll use it, for example a list of properties to spend credits on). **Done 2026-10-29:** the Credits screen exports the next N for Crexi as a CSV, imports Crexi's reply in bulk, tracks every batch per credit period (`crexi: reset_day: 29`) and keeps a history; see README.
 8. **Built around the end goal.** The flow is: enrich and improve the data, then put it into the CRM. Make the app's structure follow that path. Seth is thinking more about what this means. (2026-10-22: buy-box decisions, AI research and the Excel round trip are steps toward this.)
 
+## Rent, price and offers (requested 2026-11-05)
+
+15. **Rent and the Blue Moon price.** **Done 2026-11-05:** a layered rent estimate with a clickable napkin, rent records with a basis and a source, the Blue Moon price (4x rent, with 5x and 6x as comparisons), the last-sale-under-half check and Deals chips, age and years owned with their precision, builder evidence, asking price as its own field, net rentable versus gross area, and "Rent fit" renamed Area rent check. Settings in `config/pricing.yaml`.
+16. **Offers, the LOI from a Google Doc template, leads and batches, marking offers sent and recording replies.** Open (the next phases of this request).
+17. **Auto-send via Gmail, delivery confirmation and follow-up reminders.** Open (roadmap; this build never sends email).
+
 ## Carried over
 
 9. **Owner profiles and archetypes** (ROADMAP phase 5).

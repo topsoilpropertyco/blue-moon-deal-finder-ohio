@@ -74,6 +74,7 @@ FIELD_ALIASES: dict[str, list[str]] = {
                   "Last Transfer Date", "Date Sold", "Sale Recording Date", "Last Sale Recording Date"],
     "sale_price": ["Sold Price", "Sale Price", "Last Sale Price", "Last Sale Amount", "Sale Amount",
                    "Last Sold Price", "Sales Price", "Transfer Price"],
+    "asking_price": ["Asking Price", "List Price", "Listing Price", "Ask Price", "Asking Price ($)"],
     "lender": ["Lender", "Lender Name", "Mortgage Lender", "Loan Lender", "Mortgage Lender Name",
                "First Mortgage Lender", "Lender 1"],
     "loan_amount": ["Loan Amount", "Mortgage Amount", "First Mortgage Amount", "Loan Amt",
@@ -163,7 +164,7 @@ FIELD_ALIASES: dict[str, list[str]] = {
 PROPERTY_FIELDS: frozenset[str] = frozenset({
     "source_id", "crexi_url", "name", "property_type", "apn", "address", "unit", "city", "state", "zip",
     "county", "lat", "lng", "units", "building_sqft", "lot_acres", "building_count", "stories", "year_built",
-    "sale_date", "sale_price", "lender", "loan_amount", "loan_type", "interest_rate", "loan_maturity",
+    "sale_date", "sale_price", "asking_price", "lender", "loan_amount", "loan_type", "interest_rate", "loan_maturity",
     "improvement_value", "land_value", "total_value", "value_type", "tax_year", "annual_tax", "usps_vacant",
     "opportunity_zone", "reo", "owner_name", "mailing_address", "mailing_unit", "mailing_city",
     "mailing_state", "mailing_zip", "mailing_care_of",
@@ -193,7 +194,7 @@ FIELD_LABELS: dict[str, str] = {
     "number_of_addresses": "Number of addresses", "building_sqft": "Building sq ft",
     "lot_acres": "Lot acres", "lot_sqft": "Lot sq ft", "building_count": "Number of buildings",
     "stories": "Stories", "year_built": "Year built", "sale_date": "Last sale date",
-    "sale_price": "Last sale price", "lender": "Lender", "loan_amount": "Loan amount",
+    "sale_price": "Last sale price", "asking_price": "Asking price", "lender": "Lender", "loan_amount": "Loan amount",
     "loan_type": "Loan type", "interest_rate": "Interest rate", "loan_maturity": "Loan maturity date",
     "improvement_value": "Building value", "land_value": "Land value", "total_value": "Total value",
     "value_type": "Value type", "tax_year": "Tax year", "annual_tax": "Annual tax bill",
@@ -216,6 +217,18 @@ def norm_header(header: object) -> str:
     s = s.replace("#", " number ").replace("%", " pct ").replace("&", " and ")
     s = re.sub(r"[^0-9a-z]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
+
+
+# building_sqft headers that say which area it is. Any other header (Crexi's own "Building SqFt") does not, so
+# the area type stays unknown rather than guessed.
+RENTABLE_AREA_HEADERS = frozenset(norm_header(h) for h in ("RBA", "Rentable Building Area"))
+GROSS_AREA_HEADERS = frozenset(norm_header(h) for h in ("GBA", "Gross Building Area", "Gross Sq Ft"))
+
+
+def area_type_of(header: object) -> str | None:
+    """'rentable' | 'gross' | None for the header that held the building size."""
+    n = norm_header(header)
+    return "rentable" if n in RENTABLE_AREA_HEADERS else "gross" if n in GROSS_AREA_HEADERS else None
 
 
 def _digits(s: str) -> list[str]:

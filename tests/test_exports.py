@@ -117,7 +117,7 @@ def test_ranked_csv_puts_the_buy_box_first(ranked, market_slug):
     assert all(r["In buy box"] == "No" and r["Why set aside"] for r in data[n:])
     assert [int(r["Property ID"]) for r in data[:n]] == ranked_ids(ranked)
     assert data[0]["Owner Name"] and data[0]["Crexi"].startswith("https://")
-    assert "Photo label" in data[0] and "Rent fit" in data[0]
+    assert "Photo label" in data[0] and "Area rent check" in data[0]
 
 
 def test_text_that_looks_like_a_formula_stays_text(ranked, market_slug):
@@ -137,7 +137,7 @@ def test_asset_class_without_photos_or_rent_has_no_such_columns(conn, sample_csv
     path = exports.export_market(conn, "land-springfield-oh", only=["ranked_list.csv"])["ranked_list.csv"]
     with path.open(encoding="utf-8-sig") as f:
         header = next(csv.reader(f))
-    assert "Photo label" not in header and "Rent fit" not in header
+    assert "Photo label" not in header and "Area rent check" not in header
 
 
 def test_empty_market_still_gets_header_only_files(conn):

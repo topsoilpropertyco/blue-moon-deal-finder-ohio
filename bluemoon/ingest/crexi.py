@@ -43,6 +43,7 @@ from .columns import (
     KEY_FIELDS,
     OWNER_FIELDS,
     PROVIDER_LABELS,
+    area_type_of,
     check_overrides,
     detect_provider,
     field_label,
@@ -128,12 +129,14 @@ class PropertyRecord(BaseModel):
     geocode_quality: str | None = None
     units: int | None = None
     building_sqft: float | None = None
+    building_area_type: str | None = None    # rentable | gross, when the column's name says which
     lot_acres: float | None = None
     building_count: int | None = None
     stories: int | None = None
     year_built: int | None = None
     sale_date: str | None = None
     sale_price: float | None = None
+    asking_price: float | None = None
     lender: str | None = None
     loan_amount: float | None = None
     loan_type: str | None = None
@@ -634,7 +637,7 @@ def source_id_from_link(url: str | None) -> str | None:
 
 _TEXT_FIELDS = ("name", "property_type", "address", "unit", "city", "lender", "loan_type", "owner_name",
                 "mailing_address", "mailing_unit", "mailing_city", "mailing_care_of")
-_POS_FLOAT_FIELDS = ("building_sqft", "sale_price", "loan_amount", "interest_rate", "improvement_value",
+_POS_FLOAT_FIELDS = ("building_sqft", "sale_price", "asking_price", "loan_amount", "interest_rate", "improvement_value",
                      "land_value", "total_value", "annual_tax")
 _POS_INT_FIELDS = ("building_count", "stories", "tax_year")
 _DATE_FIELDS = ("sale_date", "loan_maturity")
@@ -651,6 +654,7 @@ def parse_row(row: Mapping[str, Any], column_map: Mapping[str, str], opts: Impor
     data.update({f: _pos_int(get(f)) for f in _POS_INT_FIELDS})
     data.update({f: _date(get(f)) for f in _DATE_FIELDS})
     data.update(
+        building_area_type=area_type_of(column_map.get("building_sqft")) if data["building_sqft"] else None,
         state=_state(get("state")), mailing_state=_state(get("mailing_state")),
         zip=normalize_zip(_text(get("zip"))), mailing_zip=normalize_zip(_text(get("mailing_zip"))),
         county=normalize_county(_text(get("county"))), apn=_apn(get("apn")),

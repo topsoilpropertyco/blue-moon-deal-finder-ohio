@@ -57,6 +57,17 @@ Crexi CSV/XLSX ─► ingest ─► properties (master list, every original colu
   `.markets`, `.drill`, `.drill_stages`, `.sources`, `.section(name)`; `secret(name)`, `has_secret(name)`.
 - `bluemoon/db.py`: schema; `connect()`, `rows()`, `one()`, `scalar()`, `upsert(conn, table, key_col, data)`,
   `market_by_slug(conn, slug)`, `now_iso()`, `this_month()`, `dumps()`, `loads()`.
+- `bluemoon/pricing.py`: exact money math, pure (no database). Cents as ints, Decimal inside. `RentInput` ->
+  `normalize()` -> `NormalizedRent(state ok|projection|needs_review, annual_cents|None, reason, formula, used,
+  discrepancy_cents)`; `scenarios()` (4x reference, 5x/6x comparison), `implied_multiple()`, `price_per_sqft_cents()`,
+  `prior_purchase()` (below|at|above|unavailable by exact cents), `Money` (refuses mixed currencies),
+  `PricingConfig` (`config/pricing.yaml`; `Settings.pricing` is the raw dict).
+- `bluemoon/napkin.py`: the rent layers. `estimate()` (units x bedroom mix x HUD rent), `add_record()` /
+  `select()` / `pin_record()` (table rent_records), `save_assumptions()` (rent_assumptions), `resolve()` (the one
+  yearly rent and its confidence word), `block()` (the drawer's pricing block), `snapshot()` (frozen inputs plus
+  a hash, for offers), `resolve_market()` + `prior_group_ids()` (every property at once: Deals chips, exports).
+- `bluemoon/history.py`: `age_info()`, `ownership_info()` (precision exact|year), builder evidence and
+  sale/area facts (table property_history), `history_block()`.
 - `bluemoon/cache.py`: `make_key()`, `cached(conn, key, provider, fetch)`, `record_call()`, `month_usage()`,
   `estimate_cost(conn, sku, units)`.
 - `bluemoon/util.py`: `normalize_address/county/owner/zip`, `haversine_miles`, `bearing_deg`, `parse_date`,
@@ -506,6 +517,11 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | GET | `/api/crexi/imports/{id}/files/{unmatched\|unreadable\|missing\|reply}` | files an import wrote |
 | GET | `/api/m/{slug}/properties/{id}/crexi` | that property's Crexi history and `extras` (also `crexi` in the property detail) |
 | POST | `/api/m/{slug}/properties/{id}/alternates/{aid}` | body `{action: use\|ignore}` |
+| GET | `/api/m/{slug}/properties/{id}/pricing` | `{pricing, history, property}`: the rent and price block (`pricing.rent`, `scenarios`, `reference_cents`, `per_sqft`, `estimate`, `assumptions`, `hud`, `records`, `prior`, `defaults`, `asking_price`) and the age/ownership/builder block; also in the property detail |
+| POST | `/api/m/{slug}/properties/{id}/rent/records` | body `{source, basis, total?, total_period?, rate?, rate_period?, quantity?, quantity_kind?, area_type?, authoritative?, evidence_date?, note?}`; saves one rent figure (400 for a bad choice); returns the fresh block |
+| POST | `/api/m/{slug}/properties/{id}/rent/records/{rid}/pin` | body `{pinned}`: use this record for the price (400 if it needs review) |
+| PUT | `/api/m/{slug}/properties/{id}/rent/assumptions` | body `{units?, mix?: {bedrooms: units}, rents?: {bedrooms: monthly dollars}}`; only the fields sent change, null clears |
+| PUT | `/api/m/{slug}/properties/{id}/history` | body `{builder_state?, builder_source?, builder_note?, sale_bundled?, sale_source?, building_area_type?}` |
 | GET | `/api/m/{slug}/funnel` | `{find:[{label,count}], reach:[{label,count}]}` |
 | GET | `/api/m/{slug}/analytics` | `{imports:[...], filter_funnel:[...], coverage:[{field,pct}], counties:[...], size_dist:[...], score_dist:[...], owner_types:[...], levels:[{key,level,label,count,in_buybox}], api_usage:[...]}` |
 | GET | `/api/m/{slug}/model` | score model summary (weights, learned, outcomes count) |
@@ -522,12 +538,12 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | GET | `/api/settings` | readable settings (no secrets), `share`, and `updates` (version + last nightly update) |
 
 PropertyRow: `{id, address, city, state, zip, county, lat, lng, units, building_sqft, lot_acres, size_value,
-size_basis, size_color, drive_minutes, drive_method, visual:{label, p, color, needs_review}, rent_fit,
+size_basis, size_color, drive_minutes, drive_method, visual:{label, p, color, needs_review}, rent_fit, rent_detail,
 owner_name, owner_type, years_owned, score, coverage_have, coverage_total, rank, in_buybox, exclusion_reasons,
 rule_reasons, by_hand ('added'|'aside'|null), aside_buckets, level, drill_status, next_step_text, channels:{mail,phone,text,email,social,vm: none|untested|verified|wrong|dnc},
 crexi_url}`.
 
-PropertyDetail: PropertyRow + `{property:{all columns}, raw:{original columns}, signals:[...], visual_check:{...,
+PropertyDetail: PropertyRow + `{pricing, history, property:{all columns}, raw:{original columns}, signals:[...], visual_check:{...,
 images:[url]}, rent:{...}, owner:{...}, drill: property_drill(...), links:[...], outcome, buybox:{in_buybox,
 exclusion_reasons, exclusions, rule_reasons, rules, waived, kept, manual, decisions:[{reason, reason_label, decision,
 bucket, note, decided_by, decided_at, detail_at_decision, detail_now}], history, groups, size_detail, ...}}`.
@@ -549,6 +565,16 @@ window.BM = {
 Views: deals (list + drive-time rings), drill (overview + stage work queues with check-off), credits, funnel,
 review (photo review with keyboard 1-5), analytics, score (model), sources, import, run (pipeline jobs with
 estimates and confirm), exports, settings. Market switcher in the top bar. Hash routing `#view/param`.
+
+Rent and price in the browser: `pricing.js` (loaded after `core.js`) draws the drawer's "Rent and Blue Moon price"
+and "Age and history" sections (`BM.pricing.html(detail)`, `BM.pricing.mount(root, detail)`, called by
+`property.js`). Money arrives as cents and is shown to the cent. Any rent figure toggles the napkin region; its
+forms PUT the assumptions, POST rent records and pin them, and each answer redraws the two sections.
+
+Tables added: `rent_records` (evidence, normalized yearly cents, state, pinned), `rent_assumptions` (typed units,
+mix, rents), `property_history` (builder evidence, bundled-sale flag, sale source). Columns added to `properties`:
+`asking_price`, `building_area_type` (rentable | gross | NULL = not known). New Deals views: `prior_below`,
+`prior_at_above`, `prior_unknown`.
 
 Buy-box decisions in the browser: the Deals "Why?" panel lists `summary.set_aside.reasons[]` with their groups
 (`buckets[]`); each group has Review (`#deals/review/<group key>`, which lists `GET properties?bucket=<key>`

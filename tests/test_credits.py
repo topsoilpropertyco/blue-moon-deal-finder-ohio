@@ -87,7 +87,7 @@ def test_credit_status_uses_config_and_handles_used_up(conn, settings):
     pid = add_prop(conn)
     for _ in range(3):
         conn.execute("INSERT INTO credit_ledger(property_id, month, result, created_at) VALUES(?,?,?,?)",
-                     (pid, "2026-10", "found", now_iso()))
+                     (pid, "2026-10", "found", "2026-10-21T12:00:00+00:00"))   # inside TODAY's period, whenever the test runs
     conn.commit()
     s = C.credit_status(conn, today=TODAY, settings=settings)
     assert s["left"] == 0 and s["daily_pace"] == 0 and "used" in s["message"]

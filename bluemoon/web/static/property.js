@@ -95,8 +95,9 @@
     }
     const early = c.outcomeEarly;
     root.innerHTML = headerHtml(d) + scoreHtml(d) + buyboxHtml(d) + (early ? outcomeHtml(d) : '') + contactHtml(d) + crexiHtml(d) + whyHtml(d) + photoHtml(d) +
-      rentHtml(d) + buildingHtml(d) + ownerHtml(d) + linksHtml(d) + (early ? '' : outcomeHtml(d)) + rawHtml(d);
+      BM.pricing.html(d) + rentHtml(d) + buildingHtml(d) + ownerHtml(d) + linksHtml(d) + (early ? '' : outcomeHtml(d)) + rawHtml(d);
     root.querySelectorAll('details[data-keep]').forEach((el) => { if (c.kept.has(el.getAttribute('data-keep'))) el.open = true; });
+    BM.pricing.mount(root, d);
     box.scrollTop = opts && opts.keepScroll ? top : 0;
   }
 
@@ -802,7 +803,7 @@
     const scale = r.scale || {};
     const keys = Array.from(new Set(Object.keys(scale).concat(Object.keys(rents)))).sort((a, b) => Number(a) - Number(b));
     if (!r.fit && !Object.keys(rents).length) {
-      return section('Rent', '<p class="note" style="margin:0">No HUD rent yet. The Rent step (free, on the Run screen) fills this in.</p>' +
+      return section('Area rent check', '<p class="note" style="margin:0">No HUD rent yet. The Rent step (free, on the Run screen) fills this in.</p>' +
         (keys.length ? rentTable(keys, rents, scale, r.focus_bedrooms) : ''));
     }
     const fit = RENT_FIT[r.fit];
@@ -811,7 +812,7 @@
     body += rentTable(keys, rents, scale, r.focus_bedrooms);
     const src = [r.area_name, r.fiscal_year, RENT_SOURCE[r.source] || r.source].filter(Boolean).join(' · ');
     if (src) body += '<p class="note" style="margin:0">' + esc(src) + '</p>';
-    return section('Rent', body);
+    return section('Area rent check', body);
   }
 
   function rentTable(keys, rents, scale, focus) {

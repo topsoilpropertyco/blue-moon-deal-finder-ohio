@@ -32,7 +32,7 @@ SIGNAL_ORDER: tuple[str, ...] = ("size", "visual", "rent_fit", "drive", "owner_t
 SIGNAL_LABELS: dict[str, str] = {
     "size": "Size",
     "visual": "Photo check",
-    "rent_fit": "Rent fit",
+    "rent_fit": "Area rent check",
     "drive": "Drive time",
     "owner_type": "Owner type",
     "years_owned": "Years owned",

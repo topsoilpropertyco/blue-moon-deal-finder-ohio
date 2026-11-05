@@ -16,7 +16,7 @@
   const REASONS = {
     size: 'Fits the buy box. The sweet spot is the easiest to finance, manage and sell.',
     visual: 'The photo check: does it look like what the buyer wants (for apartments, outdoor entry)?',
-    rent_fit: 'HUD area rents compared with the buyer\'s rent scale.',
+    rent_fit: 'The area rent check: HUD area rents compared with the buyer\'s rent scale.',
     drive: 'Closer properties are easier to visit and manage.',
     owner_type: 'Individuals, trusts and heirs sell below market more often. Institutions rarely do.',
     years_owned: 'Long holds mean a low basis, more equity and less attachment to price.',

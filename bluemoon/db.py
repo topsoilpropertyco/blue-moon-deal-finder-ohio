@@ -29,6 +29,10 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("credit_ledger", "period", "TEXT"),     # Crexi credit periods (bluemoon/crexi/period.py)
     ("credit_ledger", "batch_id", "INTEGER"),
     ("property_alternates", "batch_id", "INTEGER"),   # extra values: the Crexi batch they came back in
+    # what the owner or a listing asks (never the same thing as the last sale price), and whether
+    # building_sqft is net rentable or gross building area ('rentable' | 'gross' | NULL = not known)
+    ("properties", "asking_price", "REAL"),
+    ("properties", "building_area_type", "TEXT"),
 )
 # meta key: markets whose scores were saved before version 2. The dashboard re-scores each one once, so the
 # set-aside groups (scores.aside_buckets) exist. JSON list of market ids.
@@ -323,6 +327,50 @@ CREATE TABLE IF NOT EXISTS crexi_batch_imports (
   contacts_added INTEGER NOT NULL DEFAULT 0, dnc_marked INTEGER NOT NULL DEFAULT 0, unreadable INTEGER NOT NULL DEFAULT 0,
   columns_json TEXT, summary_json TEXT,
   created_at TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT 'cli'
+);
+
+-- Rent evidence (bluemoon/napkin.py). Each row is one thing somebody told us about the rent: where it came
+-- from, what it means (basis) and the yearly figure it works out to. The best one is 'selected' (or the one
+-- pinned by hand); the rest stay here to look at. Money is whole cents; rates and counts keep their decimals as text.
+CREATE TABLE IF NOT EXISTS rent_records (
+  id INTEGER PRIMARY KEY,
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  source TEXT NOT NULL,            -- rent_roll | listing | owner | broker | manual | import
+  basis TEXT NOT NULL CHECK (basis IN ('actual', 'scheduled', 'estimated_full_occupancy', 'estimated_market', 'unconfirmed')),
+  total_cents INTEGER, total_period TEXT,            -- monthly | annual | t12 | single_month | partial
+  rate_text TEXT, rate_period TEXT,                  -- monthly | annual
+  quantity_text TEXT, quantity_kind TEXT,            -- units | rentable_sqft
+  area_type TEXT,                  -- rentable | gross | NULL (for a per sq ft rate)
+  authoritative TEXT,              -- total | rate: which to trust when both were entered
+  state TEXT NOT NULL CHECK (state IN ('ok', 'projection', 'needs_review')),
+  annual_cents INTEGER,            -- NULL when it needs review: unknown is never zero
+  formula TEXT, reason TEXT, discrepancy_cents INTEGER,
+  evidence_date TEXT,              -- the day the figure is from
+  note TEXT,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_rent_records_property ON rent_records(property_id);
+
+-- The napkin's assumptions, only where somebody changed them: a unit count, the real bedroom mix (counts by
+-- bedroom) and rents by bedroom that replace the HUD ones. NULL = use the default.
+CREATE TABLE IF NOT EXISTS rent_assumptions (
+  property_id INTEGER PRIMARY KEY REFERENCES properties(id) ON DELETE CASCADE,
+  units INTEGER,
+  mix_json TEXT,                   -- {"1": 8, "2": 16}
+  rents_json TEXT,                 -- {"2": 150000} monthly rent in cents by bedroom count
+  updated_by TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+
+-- What a person recorded about a property's history: who built it (with a source), whether the last sale was
+-- part of a bundle. Kept apart from condition and management claims.
+CREATE TABLE IF NOT EXISTS property_history (
+  property_id INTEGER PRIMARY KEY REFERENCES properties(id) ON DELETE CASCADE,
+  builder_state TEXT NOT NULL DEFAULT 'unknown' CHECK (builder_state IN ('supported', 'suggested', 'contradicted', 'unknown')),
+  builder_source TEXT, builder_note TEXT,
+  sale_bundled INTEGER NOT NULL DEFAULT 0,
+  sale_source TEXT,
+  updated_by TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 
 -- Deals that worked out (or not), entered by you. Used to tune the score.

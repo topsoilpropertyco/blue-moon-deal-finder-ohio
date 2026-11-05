@@ -39,6 +39,9 @@ RETIRED_FLAG = "crexi_differs"     # the old "Crexi sent different data" warning
 # never an alternate: Crexi writing "ST" for "STREET" is not a disagreement about the property.
 IDENTITY_FIELDS = frozenset({"source", "source_id", "crexi_url", "address", "unit", "city", "state", "zip", "apn",
                              "lat", "lng", "geocode_quality"})
+# Fields that only describe another field (net or gross area): a blank is filled, a different value is never
+# an alternate.
+FILL_ONLY_FIELDS = frozenset({"building_area_type"})
 RAW_PREFIX = "raw:"     # an alternate for a column kept only with the original columns (raw_json), e.g. raw:Occupancy
 MAILING_FIELDS = ("mailing_address", "mailing_unit", "mailing_city", "mailing_state", "mailing_zip",
                   "mailing_care_of")
@@ -47,7 +50,7 @@ LABELS = {
     "name": "property name", "property_type": "property type", "county": "county", "units": "units",
     "building_sqft": "building sq ft", "lot_acres": "lot acres", "building_count": "buildings",
     "stories": "stories", "year_built": "year built", "sale_date": "last sale date", "sale_price": "last sale price",
-    "lender": "lender", "loan_amount": "loan amount", "loan_type": "loan type", "interest_rate": "interest rate",
+    "asking_price": "asking price", "lender": "lender", "loan_amount": "loan amount", "loan_type": "loan type", "interest_rate": "interest rate",
     "loan_maturity": "loan maturity", "improvement_value": "building value", "land_value": "land value",
     "total_value": "total value", "value_type": "value type", "tax_year": "tax year", "annual_tax": "annual tax",
     "usps_vacant": "USPS vacant", "opportunity_zone": "opportunity zone", "preforeclosure": "pre-foreclosure",
@@ -196,7 +199,7 @@ def plan_facts(existing: Mapping[str, Any], incoming: Mapping[str, Any], columns
             plan.fills[f] = new
         else:
             plan.merged[f] = old
-            if not _same(f, old, new) and f not in IDENTITY_FIELDS and f not in skip_set:
+            if not _same(f, old, new) and f not in IDENTITY_FIELDS | FILL_ONLY_FIELDS and f not in skip_set:
                 plan.alternates[f] = (new, old)
                 if f == "owner_name":
                     plan.new_owner = clean_str(new)
@@ -313,7 +316,7 @@ HEADERS = {
     "units": "Units", "building_sqft": "Building sq ft", "year_built": "Year built", "lot_acres": "Lot acres",
     "property_type": "Property type", "county": "County", "owner_name": "Owner", "mailing_address": "Mailing address",
     "name": "Property name", "building_count": "Buildings", "stories": "Stories", "sale_date": "Last sale date",
-    "sale_price": "Last sale price", "lender": "Lender", "loan_amount": "Loan amount", "loan_type": "Loan type",
+    "sale_price": "Last sale price", "asking_price": "Asking price", "lender": "Lender", "loan_amount": "Loan amount", "loan_type": "Loan type",
     "interest_rate": "Interest rate", "loan_maturity": "Loan maturity", "improvement_value": "Building value",
     "land_value": "Land value", "total_value": "Total value", "value_type": "Value type", "tax_year": "Tax year",
     "annual_tax": "Annual tax",

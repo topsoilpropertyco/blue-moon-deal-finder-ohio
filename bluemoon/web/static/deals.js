@@ -31,7 +31,7 @@
   const ESTIMATED = new Set(['address_estimate', 'sqft_estimate', 'acres_estimate']);
   const ROW_KEYS = ['level', 'drill_status', 'channels', 'next_step_text', 'next_step_kind', 'best_guess_person',
     'score', 'coverage_have', 'coverage_total', 'rank', 'visual', 'rent_fit', 'in_buybox', 'exclusion_reasons',
-    'rule_reasons', 'by_hand', 'aside_buckets'];
+    'rule_reasons', 'by_hand', 'aside_buckets', 'rent_detail'];
   const GROUP_KEY = /^[a-z_]+:[a-z0-9-]+$/;   // a set-aside group: 'drive_time:76-90' (scoring/buckets.py)
 
   const prefsByMarket = {};
@@ -532,6 +532,9 @@
       ['sweet', ideal ? ideal + ' ' + (ac.size_unit || '') : 'Ideal size'],
       ac.visual_enabled ? ['walk', ac.target_word || 'Photo target'] : null,
       ['mom', 'Mom-and-pop'],
+      ['prior_below', 'Last sale under half the price'],
+      ['prior_at_above', 'Last sale at or over half'],
+      ['prior_unknown', 'Last sale unknown'],
       ['long', 'Owned ' + fmt.num(th.long_owned_years === undefined ? 15 : th.long_owned_years) + '+ yrs'],
       ['moon', 'Blue Moon ' + cut(th.moon_score === undefined ? 0.10 : th.moon_score) + '+'],
       ac.visual_enabled ? ['review', 'Needs photo review'] : null,
@@ -795,7 +798,7 @@
     }
     const c = ctx.cols;
     const head = '<th>Blue Moon</th><th>Property</th><th>Contact level</th><th class="c">' + esc(c.sizeHead) +
-      '</th><th class="c">Drive</th>' + (c.visual ? '<th>' + esc(c.target) + '</th>' : '') + (c.rent ? '<th>Rent fit</th>' : '') +
+      '</th><th class="c">Drive</th>' + (c.visual ? '<th>' + esc(c.target) + '</th>' : '') + (c.rent ? '<th title="HUD area rents compared with the buyer\'s rent scale">Area rent check</th>' : '') +
       '<th>Owner type</th><th class="c">Owned</th><th title="How many score signals we have data for">Signals</th>';
     const sel = BM.route.property;
     body.innerHTML = '<div class="tablewrap"><table class="deals-table"><thead><tr>' + head + '</tr></thead><tbody data-rows>' +
@@ -936,10 +939,12 @@
   }
 
   const RENT = {in: ['g', 'Match'], near: ['y', 'Close'], out: ['r', 'Off'], na: ['n', 'No data']};
-  function rentCell(fit) {
-    const r = RENT[fit];
+  function rentCell(p) {
+    const r = RENT[p.rent_fit];
     if (!r) return '<span class="muted" title="Rent step has not run yet">—</span>';
-    return '<span class="dot ' + r[0] + '"></span>' + (fit === 'na' ? '<span class="muted">' + r[1] + '</span>' : r[1]);
+    // the tooltip shows both numbers: the HUD area rent and the buyer's target
+    return '<span title="' + esc(p.rent_detail || 'Area rent check') + '"><span class="dot ' + r[0] + '"></span>' +
+      (p.rent_fit === 'na' ? '<span class="muted">' + r[1] + '</span>' : r[1]) + '</span>';
   }
 
   function ownerText(p) {
@@ -981,7 +986,7 @@
       '<td class="num c size">' + sizeCell(p, c) + '</td>' +
       '<td class="num c">' + driveCell(p) + '</td>' +
       (c.visual ? '<td>' + photoCell(p.visual) + '</td>' : '') +
-      (c.rent ? '<td>' + rentCell(p.rent_fit) + '</td>' : '') +
+      (c.rent ? '<td>' + rentCell(p) + '</td>' : '') +
       '<td>' + esc(ownerText(p)) + '</td>' +
       '<td class="num c">' + (years ? esc(years) : '<span class="muted">?</span>') + '</td>' +
       '<td>' + ui.coverage(p.coverage_have, p.coverage_total) + '</td></tr>';
@@ -1002,7 +1007,7 @@
       nextLabel(p) ? '<span>Next: ' + esc(nextLabel(p)) + '</span>' : '',
       '<span>' + (sz.unknown ? '? ' : (sz.est ? '~' : '') + esc(sz.text) + ' ') + esc(c.unit) + '</span>',
       c.visual ? '<span><span class="dot ' + ph.dot + '"></span>' + esc(c.target) + (ph.muted ? '' : ' ' + esc(ph.text)) + '</span>' : '',
-      c.rent ? '<span><span class="dot ' + (rent ? rent[0] : 'n') + '"></span>Rent</span>' : '',
+      c.rent ? '<span title="' + esc(p.rent_detail || 'Area rent check') + '"><span class="dot ' + (rent ? rent[0] : 'n') + '"></span>Area rent check</span>' : '',
       '<span>' + esc(ownerText(p)) + '</span>',
       years ? '<span>' + esc(years) + '</span>' : '',
     ].filter(Boolean).join('');

@@ -1,0 +1,24 @@
+# Rent, the Blue Moon price and the prior-purchase check. Everything tunable lives here, never in code.
+# Money is worked out in whole cents (bluemoon/pricing.py), so these numbers are exact.
+pricing:
+  # The Blue Moon price is the yearly gross rent times a multiple. The reference multiple (4x) is the starting
+  # price. The comparison multiples are scenarios to look at: they are never a ceiling and never an automatic
+  # next offer.
+  reference_multiple: 4
+  comparison_multiples: [5, 6]
+
+  # When nobody knows the real bedroom mix, the napkin assumes this share of the units for each bedroom count
+  # (0 = studio). Per asset class; percentages add up to 100. A class with no entry has no assumed mix, so its
+  # rent stays unknown until you type the mix or a rent.
+  default_unit_mix:
+    apartments: {0: 10, 1: 30, 2: 50, 3: 10}
+
+  # A recorded last sale under this many dollars is treated as a nominal (non-market) transfer, so the
+  # "half of the Blue Moon price" check says unavailable instead of looking cheap.
+  nominal_sale_price: 1000
+
+  # Dates before this year are treated as impossible when checking a year built.
+  earliest_year_built: 1700
+
+  # The date ages and years owned are worked out against. Leave blank for today; tests set a fixed date.
+  evaluation_date:

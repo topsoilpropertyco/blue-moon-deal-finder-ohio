@@ -51,7 +51,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from . import pipeline
+from . import napkin, pipeline, pricing
 from .config import AssetClass, Settings, get_settings
 from .crexi import merge as cmerge
 from .db import loads, market_by_slug, rows, this_month
@@ -133,6 +133,11 @@ def property_columns(ac: AssetClass) -> list[Col]:
         _col("size_value", "Size used", "num"), _col("size_basis", "Size based on"),
         _col("size_color", "Size color", "color"),
         _col("drive_minutes", "Drive minutes", "num"), _col("drive_method", "Drive time from"),
+        # rent and price (bluemoon/napkin.py): money in dollars; the multiple (YAML) is its own column
+        _col("rent_annual", "Yearly gross rent", "num"), _col("rent_basis", "Rent basis"),
+        _col("rent_confidence", "Rent confidence"), _col("blue_moon_price", "Blue Moon price", "num"),
+        _col("price_multiple", "Price multiple", "num"), _col("prior_check", "Last sale vs half the Blue Moon price"),
+        _col("asking_price", "Asking price", "num"),
     ]
     if ac.visual_enabled:
         cols += [_col("photo_label", "Photo label"), _col("photo_p", "Photo check %", "num"),
@@ -142,8 +147,8 @@ def property_columns(ac: AssetClass) -> list[Col]:
                  _col("photo_buildings", "Buildings seen (AI)", "int"), _col("photo_condition", "Condition (AI)"),
                  _col("photo_checked_by", "Photo answer from")]
     if ac.rent_enabled:
-        cols += [_col("rent_fit", "Rent fit"), _col("rent_color", "Rent color", "color"),
-                 _col("rent_detail", "Rent detail")]
+        cols += [_col("rent_fit", "Area rent check"), _col("rent_color", "Area rent check color", "color"),
+                 _col("rent_detail", "Area rent check detail")]
     cols += [
         _col("owner_name", "Owner"), _col("owner_type", "Owner type"), _col("years_owned", "Years owned", "num"),
         _col("absentee", "Absentee owner"), _col("debt", "Debt"),
@@ -378,9 +383,12 @@ def load_market(conn: sqlite3.Connection, market_slug: str) -> MarketData:
     spec = buckets.group_spec(market, ac, settings)
     decided = _last_decided(conn, market["id"])
     out, headers = [], {}
+    pcfg = pricing.load_config(settings.pricing)
+    priced = napkin.resolve_market(conn, market["id"], ac.key, pcfg)
     for prop, enrich in load_scoring_rows(conn, [market["id"]]):
         row = _property_row(prop, enrich, scores.get(prop["id"]), summaries.get(prop["id"]), ac, market, settings,
                             decisions.get(prop["id"]) or {}, spec)
+        row.update(_price_fields(priced.get(prop["id"]), prop, pcfg))
         row["row_as_of"] = max(str(prop.get("updated_at") or ""), str(decided.get(prop["id"]) or "")) or None
         headers.update(dict.fromkeys(row["_raw"]))
         out.append(row)
@@ -439,6 +447,23 @@ def _property_row(prop: dict, enrich: dict, score: dict | None, summary: dict | 
     row.update(_drill_fields(summary))
     row.update(_link_fields(prop))
     return row
+
+
+def _price_fields(priced: dict | None, prop: dict, cfg: pricing.PricingConfig) -> dict:
+    """Rent and price columns. Unknown stays blank: a missing rent is never written as 0."""
+    out = {"asking_price": prop.get("asking_price")}
+    if not priced:
+        return out
+    rent, prior = priced["rent"], priced["prior"]
+    annual = rent["annual_cents"]
+    out.update(
+        rent_annual=None if annual is None else annual / 100,
+        rent_basis=napkin.BASIS_LABELS.get(rent["basis"] or ""), rent_confidence=None if annual is None else rent["confidence"],
+        blue_moon_price=None if priced["reference_cents"] is None else priced["reference_cents"] / 100,
+        price_multiple=None if priced["reference_cents"] is None else float(cfg.reference_multiple),
+        prior_check=(f"{prior['label']} ({prior['share_pct']:.1f}% of the price)" if prior["state"] != pricing.UNAVAILABLE
+                     else f"Unavailable: {prior['reason']}"))
+    return out
 
 
 def _decision_fields(score: dict | None, rule_reasons: list[str], found: dict, prop: dict,
@@ -882,7 +907,7 @@ def _color_counts(items: list[dict], ac: AssetClass) -> dict[str, Counter]:
     if ac.visual_enabled:
         axes["Photo check"] = "photo_color"
     if ac.rent_enabled:
-        axes["Rent fit"] = "rent_color"
+        axes["Area rent check"] = "rent_color"
     return {label: Counter(r.get(key) or "none" for r in items) for label, key in axes.items()}
 
 
@@ -896,7 +921,7 @@ def _step_counts(conn: sqlite3.Connection, market_id: int, ac: AssetClass) -> li
            ("Drive times", {DRIVE_LABELS.get(k, k): n for k, n in grouped(
                "SELECT x.method AS k, COUNT(*) AS n " + join.format(t="drive_times")).items()})]
     if ac.rent_enabled:
-        out.append(("Rent fit", grouped("SELECT x.fit AS k, COUNT(*) AS n " + join.format(t="rent_fits"))))
+        out.append(("Area rent check", grouped("SELECT x.fit AS k, COUNT(*) AS n " + join.format(t="rent_fits"))))
     if ac.visual_enabled:
         out.append(("Photos", grouped("SELECT x.status AS k, COUNT(*) AS n " + join.format(t="visual_checks"))))
         out.append(("Photo check", grouped(

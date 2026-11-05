@@ -534,3 +534,27 @@ details.p-more[open] > summary{margin-bottom:8px}
 .p-crexi,.p-alts{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;font-size:13px}
 .p-alts li{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--line);padding-top:8px}
 .p-alts li:first-child{border-top:0;padding-top:0}
+
+/* drawer: rent and Blue Moon price (pricing.js) */
+.pr-income{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s6);align-items:flex-end}
+.pr-fig{border:0;border-bottom:1px dashed var(--faint);background:none;padding:4px 0;min-height:32px;font:inherit;font-size:22px;font-weight:700;color:var(--ink);cursor:pointer}
+.pr-fig:hover{border-bottom-color:var(--accent);color:var(--accent)}
+.pr-fig:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.pr-price .big{font-size:40px;overflow-wrap:anywhere}
+.pr-price,.pr-prior{display:flex;flex-direction:column;gap:var(--s2)}
+.pr-price .note,.pr-prior .note,.sec.pr .note{margin:0}
+.pr-napkin{display:flex;flex-direction:column;gap:var(--s3);border:1px solid var(--line);border-radius:14px;padding:var(--s4);background:var(--sunk);min-width:0}
+.pr-nhead{display:flex;justify-content:space-between;align-items:center;gap:var(--s3)}
+.pr-nhead h3,.pr-napkin h4{margin:0}
+.pr-known,.pr-records{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:13px}
+.pr-records li{display:flex;flex-direction:column;gap:4px;padding:10px 0;border-top:1px solid var(--line)}
+.pr-records li:first-child{border-top:0}
+.pr-records li.sel{border-left:3px solid var(--good);padding-left:10px}
+.pr-records .btn{align-self:flex-start}
+.pr-table th,.pr-table td{vertical-align:middle}
+.pr-table tfoot th{text-align:left}
+.pr-in{width:100%;min-width:64px;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;padding:7px 8px;font-size:14px}
+.pr-in:focus{outline:2px solid var(--accent);outline-offset:0;border-color:var(--accent)}
+.pr-warn{color:var(--warn-ink)}
+.pr-form[data-rate="0"] .rate-only,.pr-form[data-sqft="0"] .sqft-only{display:none}
+@media (max-width:480px){.pr-napkin{padding:var(--s3)}.pr-table .shr{display:none}.pr-in{min-width:56px}.pr-price .big{font-size:32px}}

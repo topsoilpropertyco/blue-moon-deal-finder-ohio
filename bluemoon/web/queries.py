@@ -23,8 +23,9 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .. import history, napkin, pricing
 from ..config import AssetClass, Settings, get_settings, has_secret
-from ..db import loads, market_by_slug, one, pending_rescore, rows, scalar, this_month
+from ..db import dumps, loads, market_by_slug, one, pending_rescore, rows, scalar, this_month
 from ..drill import engine
 from ..drill import links as drill_links
 from ..enrich import parcels
@@ -162,7 +163,7 @@ s.in_buybox, s.exclusion_reasons, s.size_value, s.size_basis, s.size_color, s.re
 s.score, s.coverage_have, s.coverage_total, s.rank,
 COALESCE(s.rule_reasons, s.exclusion_reasons) AS rule_reasons, s.aside_buckets,
 dt.minutes AS drive_minutes, dt.method AS drive_method,
-rf.fit AS rent_fit,
+rf.fit AS rent_fit, rf.detail AS rent_detail,
 v.property_id AS v_id, v.status AS v_status, v.ai_label, v.final_p, v.reviewed_label, v.checked_at AS v_checked_at,
 o.owner_type, o.years_owned,
 COALESCE(ds.level, 1) AS level, COALESCE(ds.status, 'active') AS drill_status,
@@ -199,6 +200,11 @@ VIEWS: dict[str, str] = {
     "mom": "o.owner_type IN (:mom0, :mom1, :mom2, :mom3, :mom4, :mom5, :mom6, :mom7, :mom8, :mom9)",
     "long": "o.years_owned >= :long_years",
     "moon": "s.score >= :moon",
+    # The last recorded sale compared with half of the 4x Blue Moon price (bluemoon/napkin.py). The ids are
+    # worked out per request (list_properties) and passed as JSON lists.
+    "prior_below": "p.id IN (SELECT value FROM json_each(:prior_below))",
+    "prior_at_above": "p.id IN (SELECT value FROM json_each(:prior_at_above))",
+    "prior_unknown": "p.id IN (SELECT value FROM json_each(:prior_unknown))",
     "everything": "1 = 1",
     # Crexi (bulk batches): Crexi returned an owner or contact for it / Crexi was tried and gave nothing / sent
     # and waiting for the reply. Credits can go to owners just outside the buy box, so these look everywhere.
@@ -231,6 +237,8 @@ def view_labels(ac: AssetClass, web: Mapping[str, Any]) -> dict[str, str]:
         "all": "In the buy box", "below": "Not confirmed yet", "review": "Needs a photo look",
         "sweet": "Sweet-spot size", "walk": target_word(ac), "mom": "Mom-and-pop owners",
         "long": f"Owned {web['long_owned_years']:g}+ years", "moon": f"Blue Moon {web['moon_score']:.0%}+",
+        "prior_below": "Last sale under half the price", "prior_at_above": "Last sale at or over half",
+        "prior_unknown": "Last sale unknown",
         "level1": "No owner data", "level2": "Possible owner", "confirmed": "Confirmed owner",
         "dnc": "Do not contact", "crexi_data": "Has Crexi data", "crexi_none": "No Crexi data",
         "crexi_waiting": "Sent to Crexi, waiting", "excluded": "Set aside", "everything": "Everything",
@@ -337,7 +345,7 @@ def property_row(r: Mapping[str, Any], drill: Mapping[str, Any] | None, mc: Mark
         "size_value": r.get("size_value"), "size_basis": r.get("size_basis"), "size_color": r.get("size_color"),
         "drive_minutes": _round(r.get("drive_minutes")), "drive_method": r.get("drive_method"),
         "visual": _visual(r, mc),
-        "rent_fit": r.get("rent_fit"), "rent_color": r.get("rent_color"),
+        "rent_fit": r.get("rent_fit"), "rent_color": r.get("rent_color"), "rent_detail": r.get("rent_detail"),
         "owner_name": r.get("owner_name"), "owner_type": r.get("owner_type"),
         "years_owned": _round(r.get("years_owned")),
         "score": r.get("score"), "coverage_have": r.get("coverage_have"), "coverage_total": r.get("coverage_total"),
@@ -375,7 +383,10 @@ def list_properties(conn: sqlite3.Connection, slug: str, *, view: str | None = "
     order, direction = _order_by(sort, direction)
     limit, offset = _clamp_page(limit, offset, mc.web)
     search_sql, search_params = _search(q)
-    params = {**_base_params(mc), **search_params, **group_params, "limit": limit, "offset": offset}
+    pcfg = pricing.load_config(mc.settings.pricing)
+    groups = napkin.prior_group_ids(napkin.resolve_market(conn, mc.id, mc.ac.key, pcfg))
+    params = {**_base_params(mc), **search_params, **group_params, "limit": limit, "offset": offset,
+              **{f"prior_{k}": dumps(ids) for k, ids in groups.items()}}
     scope = f"({B.MEMBER_SQL})" if group else _view_where(view, include_excluded)
     where = f"{BASE_FROM} AND {scope} AND {search_sql}"
     found = _all(conn, f"SELECT {ROW_COLUMNS}, COUNT(*) OVER () AS _total {where} "
@@ -423,6 +434,7 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
     enrich = {"drive": layers["drive_times"], "rent": layers["rent_fits"], "visual": layers["visual_checks"],
               "owner": layers["owners"]}
     score = layers["scores"] or {}
+    pcfg = pricing.load_config(mc.settings.pricing)
     return {
         **property_row(joined or prop, summary, mc),
         "property": {k: v for k, v in prop.items() if k not in ("raw_json", "flags_json")},
@@ -435,6 +447,8 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
         "drive": _drive_detail(layers["drive_times"], mc),
         "visual_check": _visual_detail(prop, layers["visual_checks"], joined or {}, mc),
         "rent": _rent_detail(layers["rent_fits"], mc),
+        "pricing": napkin.block(conn, prop, mc.ac.key, pcfg, layers["rent_fits"]),
+        "history": history.history_block(conn, prop, pcfg),
         "owner": _owner_detail(conn, prop, layers["owners"]),
         "drill": drill,
         "links": drill_links.links_for({**prop, "asset_class": mc.ac.key}, None, drill["best_guess_person"],
@@ -443,6 +457,18 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
         "asset_class": asset_class_info(mc.ac),
         "crexi": _crexi_block(conn, pid),
     }
+
+
+def pricing_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Settings | None = None) -> dict:
+    """Only the drawer's rent, price and history sections for one property (after a change)."""
+    mc = market_ctx(conn, slug, settings)
+    prop = one(conn, "SELECT * FROM properties WHERE id = ? AND market_id = ?", (pid, mc.id))
+    if not prop:
+        raise KeyError(f"Property {pid} is not in this market.")
+    pcfg = pricing.load_config(mc.settings.pricing)
+    return {"pricing": napkin.block(conn, prop, mc.ac.key, pcfg, _one_by_property(conn, "rent_fits", pid)),
+            "history": history.history_block(conn, prop, pcfg),
+            "property": {k: prop.get(k) for k in ("building_sqft", "building_area_type", "sale_price", "sale_date")}}
 
 
 def _crexi_block(conn: sqlite3.Connection, pid: int) -> dict:
@@ -667,7 +693,7 @@ def _layers(conn: sqlite3.Connection, mc: MarketCtx, c: Mapping[str, int]) -> li
         _layer("owners", "Owners", c["owners_done"], n),
         _layer("drive", "Drive time", c["drive_done"], n,
                note=f"{c['drive_estimated']:,} are straight-line estimates" if c["drive_estimated"] else None),
-        _layer("rent", "Rent fit", c["rent_done"], n, enabled=mc.ac.rent_enabled),
+        _layer("rent", "Area rent check", c["rent_done"], n, enabled=mc.ac.rent_enabled),
         _layer("photos", "Photos", c["photos_done"], box, enabled=visual, note="Buy-box properties only"),
         _layer("photo_check", "Photo check", c["photo_checked"], box, enabled=visual, note="Buy-box properties only"),
         _layer("score", "Score", c["scored"], n),
