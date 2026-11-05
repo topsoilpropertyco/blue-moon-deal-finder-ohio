@@ -70,7 +70,7 @@ from ..imagery import streetview
 from ..ingest import IngestError, import_file, preview_file
 from ..scoring import overrides
 from ..scoring.learn import model_summary, set_outcome
-from .. import history, napkin
+from .. import history, napkin, offers
 from ..people import choose_recipient, clear_recipient
 from . import auth, crexi_api, queries
 
@@ -382,6 +382,57 @@ class HistoryIn(BaseModel):
     building_area_type: str | None = Field(default=None, max_length=20)
 
 
+class OfferIn(BaseModel):
+    """A new offer. No price = start at 4x the yearly rent; a price is a manual override."""
+    price: Amount = None
+
+
+class OfferPriceIn(BaseModel):
+    price: Amount = None        # null goes back to following the 4x default
+
+
+class OfferSentIn(BaseModel):
+    how: str = Field(max_length=20)
+    when: str | None = Field(default=None, max_length=30)
+
+
+class OfferHistoricalIn(BaseModel):
+    """An offer made before this app. Also used to correct one (only the fields sent change)."""
+    price: Amount = None
+    how: str | None = Field(default=None, max_length=20)
+    sent_on: str | None = Field(default=None, max_length=30)
+    recipient_name: Name = None
+    note: Text = None
+
+
+class OfferResponseIn(BaseModel):
+    text: str = Field(max_length=offers.MAX_TEXT)
+    classification: str | None = Field(default=None, max_length=30)
+    counter_low: Amount = None
+    counter_high: Amount = None
+    received_on: str | None = Field(default=None, max_length=30)
+
+
+class OfferResponseFixIn(BaseModel):
+    classification: str = Field(max_length=30)
+    counter_low: Amount = None
+    counter_high: Amount = None
+
+
+class OfferActionIn(BaseModel):
+    text: str = Field(max_length=offers.MAX_NOTE)
+    due_on: str | None = Field(default=None, max_length=30)
+    owner: Name = None
+
+
+class OfferActionFixIn(BaseModel):
+    """Only the fields sent change; due_on null clears the date."""
+    text: str | None = Field(default=None, max_length=offers.MAX_NOTE)
+    due_on: str | None = Field(default=None, max_length=30)
+    owner: Name = None
+    done: bool | None = None
+
+
 class UndoIn(BaseModel):
     batch_id: str = Field(max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
@@ -412,6 +463,20 @@ def require_market(conn: sqlite3.Connection, slug: str) -> dict:
 def require_property(conn: sqlite3.Connection, slug: str, pid: int) -> None:
     if not queries.property_in_market(conn, slug, pid):
         raise HTTPException(404, f"Property {pid} is not in this market.")
+
+
+def require_offer(conn: sqlite3.Connection, slug: str, oid: int) -> dict:
+    """The offer, when its property is in this market (KeyError -> 404 otherwise)."""
+    found = db.one(conn, "SELECT o.* FROM offers o JOIN properties p ON p.id = o.property_id "
+                         "JOIN markets m ON m.id = p.market_id WHERE o.id = ? AND m.slug = ?", (oid, slug))
+    if not found:
+        raise KeyError(f"Offer {oid} is not in this market.")
+    return found
+
+
+def require_offer_child(conn: sqlite3.Connection, table: str, cid: int, oid: int) -> None:
+    if db.scalar(conn, f"SELECT 1 FROM {table} WHERE id = ? AND offer_id = ?", (cid, oid)) is None:
+        raise KeyError(f"That item is not on offer {oid}.")
 
 
 def safe_child(base: Path, rel: str) -> Path | None:
@@ -737,6 +802,101 @@ def add_contact(slug: str, pid: int, body: ContactIn, conn: Conn) -> dict:
     require_property(conn, slug, pid)
     return engine.add_contact(conn, pid, body.channel, body.value, source=body.source,
                               person_name=body.person_name, notes=body.notes)
+
+
+# --- routes: offers --------------------------------------------------------------------------------------
+
+@router.get("/api/m/{slug}/offers")
+def list_offers(slug: str, conn: Conn) -> dict:
+    return queries.list_offers(conn, slug)
+
+
+@router.get("/api/m/{slug}/properties/{pid}/offers")
+def property_offers(slug: str, pid: int, conn: Conn) -> dict:
+    return queries.offers_detail(conn, slug, pid)
+
+
+def _offer_done(conn: sqlite3.Connection, slug: str, oid: int, message: str) -> dict:
+    return {**queries.offers_detail(conn, slug, require_offer(conn, slug, oid)["property_id"]), "message": message}
+
+
+@router.post("/api/m/{slug}/properties/{pid}/offers")
+def prepare_offer(slug: str, pid: int, body: OfferIn, request: Request, conn: Conn) -> dict:
+    prop, snap, _ = queries.offer_basis(conn, slug, pid)
+    offer = offers.prepare(conn, prop, snap, _actor(request), price=body.price)
+    return {**queries.offers_detail(conn, slug, pid), "message": f"Offer version {offer['version']} prepared (not sent)."}
+
+
+@router.post("/api/m/{slug}/properties/{pid}/offers/historical")
+def record_historical_offer(slug: str, pid: int, body: OfferHistoricalIn, request: Request, conn: Conn) -> dict:
+    prop, _, cfg = queries.offer_basis(conn, slug, pid)
+    offers.record_historical(conn, prop, _actor(request), cfg, **body.model_dump())
+    return {**queries.offers_detail(conn, slug, pid), "message": "Earlier offer recorded."}
+
+
+@router.put("/api/m/{slug}/offers/{oid}/historical")
+def correct_historical_offer(slug: str, oid: int, body: OfferHistoricalIn, request: Request, conn: Conn) -> dict:
+    pid = require_offer(conn, slug, oid)["property_id"]
+    _, _, cfg = queries.offer_basis(conn, slug, pid)
+    offers.correct_historical(conn, oid, body.model_dump(exclude_unset=True), _actor(request), cfg)
+    return _offer_done(conn, slug, oid, "Earlier offer corrected.")
+
+
+@router.post("/api/m/{slug}/offers/{oid}/refresh")
+def refresh_offer(slug: str, oid: int, request: Request, conn: Conn) -> dict:
+    pid = require_offer(conn, slug, oid)["property_id"]
+    prop, snap, _ = queries.offer_basis(conn, slug, pid)
+    offers.refresh(conn, oid, prop, snap, _actor(request))
+    return _offer_done(conn, slug, oid, "Draft updated to today's rent figures.")
+
+
+@router.put("/api/m/{slug}/offers/{oid}/price")
+def set_offer_price(slug: str, oid: int, body: OfferPriceIn, request: Request, conn: Conn) -> dict:
+    require_offer(conn, slug, oid)
+    offers.set_price(conn, oid, body.price, _actor(request))
+    return _offer_done(conn, slug, oid, "Offer price saved.")
+
+
+@router.post("/api/m/{slug}/offers/{oid}/sent")
+def mark_offer_sent(slug: str, oid: int, body: OfferSentIn, request: Request, conn: Conn) -> dict:
+    pid = require_offer(conn, slug, oid)["property_id"]
+    _, _, cfg = queries.offer_basis(conn, slug, pid)
+    offers.mark_sent(conn, oid, body.how, body.when, _actor(request), cfg)
+    return _offer_done(conn, slug, oid, "Marked as sent. A follow-up was added to the next actions.")
+
+
+@router.post("/api/m/{slug}/offers/{oid}/responses")
+def add_offer_response(slug: str, oid: int, body: OfferResponseIn, request: Request, conn: Conn) -> dict:
+    pid = require_offer(conn, slug, oid)["property_id"]
+    _, _, cfg = queries.offer_basis(conn, slug, pid)
+    offers.add_response(conn, oid, body.text, _actor(request), cfg, classification=body.classification,
+                        counter_low=body.counter_low, counter_high=body.counter_high, received_on=body.received_on)
+    return _offer_done(conn, slug, oid, "Response saved. The offer itself did not change.")
+
+
+@router.put("/api/m/{slug}/offers/{oid}/responses/{rid}")
+def correct_offer_response(slug: str, oid: int, rid: int, body: OfferResponseFixIn, request: Request,
+                           conn: Conn) -> dict:
+    require_offer(conn, slug, oid)
+    require_offer_child(conn, "offer_responses", rid, oid)
+    offers.correct_response(conn, rid, _actor(request), classification=body.classification,
+                            counter_low=body.counter_low, counter_high=body.counter_high)
+    return _offer_done(conn, slug, oid, "Response corrected.")
+
+
+@router.post("/api/m/{slug}/offers/{oid}/actions")
+def add_offer_action(slug: str, oid: int, body: OfferActionIn, request: Request, conn: Conn) -> dict:
+    require_offer(conn, slug, oid)
+    offers.add_action(conn, oid, body.text, _actor(request), due_on=body.due_on, owner=body.owner)
+    return _offer_done(conn, slug, oid, "Next action added.")
+
+
+@router.put("/api/m/{slug}/offers/{oid}/actions/{aid}")
+def update_offer_action(slug: str, oid: int, aid: int, body: OfferActionFixIn, request: Request, conn: Conn) -> dict:
+    require_offer(conn, slug, oid)
+    require_offer_child(conn, "offer_actions", aid, oid)
+    offers.update_action(conn, aid, body.model_dump(exclude_unset=True), _actor(request))
+    return _offer_done(conn, slug, oid, "Next action saved.")
 
 
 @router.post("/api/m/{slug}/properties/{pid}/people")

@@ -72,6 +72,12 @@ Crexi CSV/XLSX ─► ingest ─► properties (master list, every original colu
   confirmed names, loose contacts, recipient, owner-name conflicts, `role_choices`), `choose_recipient()` /
   `clear_recipient()` (table property_recipients: who offers are addressed to, apart from the seller). Role changes
   live in `drill/engine.py` (`set_person_role()`, `SETTABLE_ROLES`; `broker` is a role that never counts as owner).
+- `bluemoon/offers.py`: offers (tables offers, offer_events, offer_responses, offer_actions, offer_documents). `prepare()`
+  (version 1, or the next version once the latest was sent; 4x default or a typed price), `refresh()`, `set_price()`,
+  `set_status()` (letter stages need a letter made from the current snapshot), `mark_sent()` (how, when, who, `via`
+  manual or provider; adds the follow-up action `follow_up_days` later), `record_historical()` / `correct_historical()`,
+  `add_response()` / `correct_response()`, `add_action()` / `update_action()`, and the views (`views()`,
+  `property_block()`, `market_list()`). Money is cents; the rent snapshot is `napkin.snapshot()`, frozen on the offer.
 - `bluemoon/cache.py`: `make_key()`, `cached(conn, key, provider, fetch)`, `record_call()`, `month_usage()`,
   `estimate_cost(conn, sku, units)`.
 - `bluemoon/util.py`: `normalize_address/county/owner/zip`, `haversine_miles`, `bearing_deg`, `parse_date`,
@@ -503,6 +509,18 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | PUT | `/api/m/{slug}/properties/{id}/people/{person_id}/role` | body `{role}`; confirmed owners and same-owner matches keep their role (400); returns the engine result plus `people` |
 | PUT | `/api/m/{slug}/properties/{id}/recipient` | body `{person_id, contact_id?, note?}`: who offers are addressed to (404 unknown person or contact, 400 contact of someone else or wrong / do-not-contact); the seller is not touched; returns `{people}` |
 | DELETE | `/api/m/{slug}/properties/{id}/recipient` | clears the recipient; returns `{people}` |
+| GET | `/api/m/{slug}/offers` | the Offers screen: `{items, counts, total, status_labels}`; each item is an offer view plus `address`, `city` (stale flag worked out for unsent drafts) |
+| GET | `/api/m/{slug}/properties/{id}/offers` | the drawer section: `{offers: {offers, can_prepare, next_version, current, recipient, sent_how, class_choices}}` |
+| POST | `/api/m/{slug}/properties/{id}/offers` | body `{price?}`: a new version; no price = exactly 4x the yearly rent (`default`), a price = `override` (400 when a draft is open, the rent is unknown or $0 with no price, or the price is not above $0) |
+| POST | `/api/m/{slug}/properties/{id}/offers/historical` | body `{price, how, sent_on, recipient_name?, note?}`: an offer made before this app (sent, incomplete snapshot); the same price, day and method is refused as already recorded |
+| PUT | `/api/m/{slug}/offers/{oid}/historical` | body with only the fields to fix (`price`, `how`, `sent_on`): corrects a hand-entered offer in place |
+| POST | `/api/m/{slug}/offers/{oid}/refresh` | re-bases an unsent draft on today's rent; a default price moves to the new 4x, a typed price stays (400 once sent) |
+| PUT | `/api/m/{slug}/offers/{oid}/price` | body `{price}` (override) or `{price: null}` (back to the default); 400 once sent |
+| POST | `/api/m/{slug}/offers/{oid}/sent` | body `{how: email\|in person\|mail, when?}`: the only way an offer becomes sent (manual); adds the follow-up action; 400 if already sent or the day is in the future |
+| POST | `/api/m/{slug}/offers/{oid}/responses` | body `{text, classification?, counter_low?, counter_high?, received_on?}`: only for a sent offer; unclear = `needs_review`; amounts only for a counter or needs-review reply; never changes the offer |
+| PUT | `/api/m/{slug}/offers/{oid}/responses/{rid}` | body `{classification, counter_low?, counter_high?}`: fixes the category or range, never the original text |
+| POST | `/api/m/{slug}/offers/{oid}/actions` | body `{text, due_on?, owner?}` |
+| PUT | `/api/m/{slug}/offers/{oid}/actions/{aid}` | body with any of `text, due_on (null clears), owner, done` |
 | POST | `/api/m/{slug}/properties/{id}/outreach` | body `{channel, outcome, contact_point_id?, notes?}` |
 | POST | `/api/m/{slug}/properties/{id}/level` | body `{action, person?, note?}` |
 | POST | `/api/m/{slug}/properties/{id}/credit` | body `{result?}` |
@@ -582,6 +600,16 @@ forms PUT the assumptions, POST rent records and pin them, and each answer redra
 People block: `people` in the property detail (and in the answers above) feeds `BM.people.html(detail)` /
 `BM.people.mount(root, detail, onDrill)` in `people.js`, drawn under the property title. Table `property_recipients`
 (one row per property: person, optional contact, note, who and when); columns `people.edited_by`, `people.edited_at`.
+
+Offers in the browser: `offers.js` (loaded after `pricing.js` and `people.js`) draws the drawer's "Offers" section under
+the rent and price section (`BM.offers.html(detail)` / `BM.offers.mount(root, detail)`) and registers the Offers screen
+(Work menu). Each answer from the offer routes carries `offers` and redraws the section. Deals rows carry
+`offer_status` (the newest version's stage; only `sent` is shown as sent) and the exports gain "Offer status" and
+"Offer price". Tables: `offers` (one row per version: seller and recipient snapshots, `price_cents`, `price_mode`,
+frozen `snapshot_json` + `snapshot_hash`, `incomplete_snapshot`, `sent_how/on/by/via`; unique per property, version
+and intent), `offer_events` (append-only log), `offer_responses` (original text kept, `counter_low_cents` /
+`counter_high_cents`), `offer_actions` (next actions), `offer_documents` (letters made from a snapshot; filled by the
+Google Drive step). `follow_up_days` lives in `config/pricing.yaml`.
 
 Tables added: `rent_records` (evidence, normalized yearly cents, state, pinned), `rent_assumptions` (typed units,
 mix, rents), `property_history` (builder evidence, bundled-sale flag, sale source). Columns added to `properties`:

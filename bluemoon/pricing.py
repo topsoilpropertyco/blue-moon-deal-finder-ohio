@@ -49,6 +49,7 @@ class PricingConfig(BaseModel):
     default_unit_mix: dict[str, dict[int, Decimal]] = Field(default_factory=dict)
     nominal_sale_price: Decimal = Decimal(1000)
     earliest_year_built: int = 1700
+    follow_up_days: int = Field(default=7, ge=0, le=365)
     evaluation_date: date | str | None = None
 
     def today(self) -> date:

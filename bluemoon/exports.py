@@ -51,7 +51,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from . import napkin, pipeline, pricing
+from . import napkin, offers, pipeline, pricing
 from .config import AssetClass, Settings, get_settings
 from .crexi import merge as cmerge
 from .db import loads, market_by_slug, rows, this_month
@@ -138,6 +138,8 @@ def property_columns(ac: AssetClass) -> list[Col]:
         _col("rent_confidence", "Rent confidence"), _col("blue_moon_price", "Blue Moon price", "num"),
         _col("price_multiple", "Price multiple", "num"), _col("prior_check", "Last sale vs half the Blue Moon price"),
         _col("asking_price", "Asking price", "num"),
+        # offers (bluemoon/offers.py): the latest version's stage and price; a draft is never shown as sent
+        _col("offer_status", "Offer status"), _col("offer_price", "Offer price", "num"),
     ]
     if ac.visual_enabled:
         cols += [_col("photo_label", "Photo label"), _col("photo_p", "Photo check %", "num"),
@@ -385,10 +387,12 @@ def load_market(conn: sqlite3.Connection, market_slug: str) -> MarketData:
     out, headers = [], {}
     pcfg = pricing.load_config(settings.pricing)
     priced = napkin.resolve_market(conn, market["id"], ac.key, pcfg)
+    offered = _latest_offers(conn, market["id"])
     for prop, enrich in load_scoring_rows(conn, [market["id"]]):
         row = _property_row(prop, enrich, scores.get(prop["id"]), summaries.get(prop["id"]), ac, market, settings,
                             decisions.get(prop["id"]) or {}, spec)
         row.update(_price_fields(priced.get(prop["id"]), prop, pcfg))
+        row.update(offered.get(prop["id"], {}))
         row["row_as_of"] = max(str(prop.get("updated_at") or ""), str(decided.get(prop["id"]) or "")) or None
         headers.update(dict.fromkeys(row["_raw"]))
         out.append(row)
@@ -447,6 +451,15 @@ def _property_row(prop: dict, enrich: dict, score: dict | None, summary: dict | 
     row.update(_drill_fields(summary))
     row.update(_link_fields(prop))
     return row
+
+
+def _latest_offers(conn: sqlite3.Connection, market_id: int) -> dict[int, dict]:
+    """{property id: offer columns} for the newest version of each property's offer."""
+    found = rows(conn, "SELECT o.property_id, o.status, o.price_cents FROM offers o JOIN properties p ON p.id = o.property_id "
+                       "WHERE p.market_id = ? AND o.version = (SELECT MAX(x.version) FROM offers x "
+                       "WHERE x.property_id = o.property_id AND x.intent = o.intent)", (market_id,))
+    return {r["property_id"]: {"offer_status": offers.STATUS_LABELS[r["status"]], "offer_price": r["price_cents"] / 100}
+            for r in found}
 
 
 def _price_fields(priced: dict | None, prop: dict, cfg: pricing.PricingConfig) -> dict:

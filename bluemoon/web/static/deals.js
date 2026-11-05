@@ -31,7 +31,7 @@
   const ESTIMATED = new Set(['address_estimate', 'sqft_estimate', 'acres_estimate']);
   const ROW_KEYS = ['level', 'drill_status', 'channels', 'next_step_text', 'next_step_kind', 'best_guess_person',
     'score', 'coverage_have', 'coverage_total', 'rank', 'visual', 'rent_fit', 'in_buybox', 'exclusion_reasons',
-    'rule_reasons', 'by_hand', 'aside_buckets', 'rent_detail'];
+    'rule_reasons', 'by_hand', 'aside_buckets', 'rent_detail', 'offer_status'];
   const GROUP_KEY = /^[a-z_]+:[a-z0-9-]+$/;   // a set-aside group: 'drive_time:76-90' (scoring/buckets.py)
 
   const prefsByMarket = {};
@@ -877,6 +877,12 @@
     return {text, cls: 'setaside'};
   }
 
+  /** An offer's stage on the row. Only a version marked as sent says "sent"; anything earlier is a draft. */
+  function offerPill(p) {
+    if (!p.offer_status) return '';
+    return p.offer_status === 'sent' ? '<span class="pill good">Offer sent</span>' : '<span class="pill warn">Offer draft, not sent</span>';
+  }
+
   /** The row's buy-box buttons: Add to buy box, or what was decided by hand with Undo. */
   function rowActHtml(p) {
     const id = esc(p.id);
@@ -979,7 +985,7 @@
     return '<tr data-id="' + esc(p.id) + '" tabindex="0"' + (cls ? ' class="' + cls + '"' : '') + '>' +
       '<td>' + moonCell(p) + '</td>' +
       '<td><div class="addr" title="' + esc(addr) + '">' + esc(addr) + '</div><div class="city">' + esc(city) + '</div>' +
-      (aside.text ? '<span class="' + aside.cls + '">' + esc(aside.text) + '</span>' : '') + acts + '</td>' +
+      (aside.text ? '<span class="' + aside.cls + '">' + esc(aside.text) + '</span>' : '') + offerPill(p) + acts + '</td>' +
       '<td><div class="lvcell" title="' + esc(p.next_step_text ? 'Next: ' + p.next_step_text : '') + '">' +
       ui.levelPips(p.level, p.drill_status) + ui.channelBadges(p.channels) + '</div>' +
       (nextLabel(p) ? '<div class="city">Next: ' + esc(nextLabel(p)) + '</div>' : '') + '</td>' +
@@ -1016,7 +1022,7 @@
       '<button type="button" class="' + cls + '" data-id="' + esc(p.id) + '">' +
       '<span class="side">' + ui.moon(p.score, 30) + '<span class="pct num">' + fmt.pct(p.score) + '</span></span>' +
       '<span class="who"><span class="addr">' + esc(addr) + '</span><span class="city">' + esc(city + drive) + '</span>' +
-      (aside.text ? '<span class="' + aside.cls + '">' + esc(aside.text) + '</span>' : '') + '</span>' +
+      (aside.text ? '<span class="' + aside.cls + '">' + esc(aside.text) + '</span>' : '') + offerPill(p) + '</span>' +
       '<span class="meta">' + meta + '</span></button>' +
       (acts ? '<div class="card-acts">' + acts + '</div>' : '') + '</div>';
   }

@@ -95,10 +95,11 @@
     }
     const early = c.outcomeEarly;
     root.innerHTML = headerHtml(d) + BM.people.html(d) + scoreHtml(d) + buyboxHtml(d) + (early ? outcomeHtml(d) : '') + contactHtml(d) + crexiHtml(d) + whyHtml(d) + photoHtml(d) +
-      BM.pricing.html(d) + rentHtml(d) + buildingHtml(d) + ownerHtml(d) + linksHtml(d) + (early ? '' : outcomeHtml(d)) + rawHtml(d);
+      BM.pricing.html(d) + BM.offers.html(d) + rentHtml(d) + buildingHtml(d) + ownerHtml(d) + linksHtml(d) + (early ? '' : outcomeHtml(d)) + rawHtml(d);
     root.querySelectorAll('details[data-keep]').forEach((el) => { if (c.kept.has(el.getAttribute('data-keep'))) el.open = true; });
     BM.pricing.mount(root, d);
     BM.people.mount(root, d, (res) => applyDrill(c, res));
+    BM.offers.mount(root, d);
     box.scrollTop = opts && opts.keepScroll ? top : 0;
   }
 

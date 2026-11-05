@@ -387,6 +387,80 @@ CREATE TABLE IF NOT EXISTS property_history (
   updated_by TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 
+-- Offers. One row per version of an offer for a property. The price is whole cents and the rent it was based on
+-- is frozen in snapshot_json (napkin.snapshot), so a later rent change never rewrites it. price_mode says whether
+-- the price still follows the 4x default or was typed by hand. 'sent' only comes from an explicit record (how, when,
+-- by whom); sent_via tells a hand-marked send from one a mail provider reported. Rows are never deleted.
+CREATE TABLE IF NOT EXISTS offers (
+  id INTEGER PRIMARY KEY,
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  intent TEXT NOT NULL DEFAULT 'loi',
+  status TEXT NOT NULL DEFAULT 'internal_draft' CHECK (status IN ('internal_draft', 'loi_template_needed',
+    'required_fields_missing', 'loi_generated', 'ready_for_review', 'ready_to_send', 'sent')),
+  origin TEXT NOT NULL DEFAULT 'prepared' CHECK (origin IN ('prepared', 'historical')),
+  seller_name TEXT,                -- the owner of record when the offer was prepared
+  recipient_person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+  recipient_name TEXT,             -- who it is addressed to (can be a broker), apart from the seller
+  recipient_contact_id INTEGER REFERENCES contact_points(id) ON DELETE SET NULL,
+  recipient_contact TEXT,
+  price_cents INTEGER NOT NULL CHECK (price_cents > 0),
+  price_mode TEXT NOT NULL CHECK (price_mode IN ('default', 'override')),
+  snapshot_json TEXT NOT NULL, snapshot_hash TEXT NOT NULL,
+  incomplete_snapshot INTEGER NOT NULL DEFAULT 0,   -- 1: entered by hand after the fact, rent basis unknown
+  sent_how TEXT CHECK (sent_how IN ('email', 'in person', 'mail')),
+  sent_on TEXT, sent_by TEXT,
+  sent_via TEXT CHECK (sent_via IN ('manual', 'provider')),
+  created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE (property_id, version, intent)
+);
+
+-- Everything that happens to an offer, appended and never changed.
+CREATE TABLE IF NOT EXISTS offer_events (
+  id INTEGER PRIMARY KEY,
+  offer_id INTEGER NOT NULL REFERENCES offers(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  detail_json TEXT,
+  actor TEXT NOT NULL, at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_offer_events_offer ON offer_events(offer_id);
+
+-- What the seller side answered. original_text is kept exactly as entered; the category can be corrected.
+-- A counter keeps its range (counter_high_cents is NULL for a single figure). Nothing here accepts an offer.
+CREATE TABLE IF NOT EXISTS offer_responses (
+  id INTEGER PRIMARY KEY,
+  offer_id INTEGER NOT NULL REFERENCES offers(id) ON DELETE CASCADE,
+  classification TEXT NOT NULL CHECK (classification IN ('serious_interest', 'counter', 'info_request', 'rejection',
+    'no_response', 'needs_review')),
+  original_text TEXT NOT NULL,
+  counter_low_cents INTEGER, counter_high_cents INTEGER,
+  received_on TEXT NOT NULL,
+  recorded_by TEXT NOT NULL, recorded_at TEXT NOT NULL,
+  corrected_by TEXT, corrected_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_offer_responses_offer ON offer_responses(offer_id);
+
+CREATE TABLE IF NOT EXISTS offer_actions (
+  id INTEGER PRIMARY KEY,
+  offer_id INTEGER NOT NULL REFERENCES offers(id) ON DELETE CASCADE,
+  text TEXT NOT NULL, owner TEXT NOT NULL, due_on TEXT,
+  done INTEGER NOT NULL DEFAULT 0, done_by TEXT, done_at TEXT,
+  auto INTEGER NOT NULL DEFAULT 0,       -- 1: made by the app when the offer was marked sent
+  created_by TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_offer_actions_offer ON offer_actions(offer_id);
+
+-- The letter itself (a copy of the master template). Each row is tied to the offer snapshot it was made from.
+CREATE TABLE IF NOT EXISTS offer_documents (
+  id INTEGER PRIMARY KEY,
+  offer_id INTEGER NOT NULL REFERENCES offers(id) ON DELETE CASCADE,
+  template_id TEXT NOT NULL, template_version TEXT,
+  snapshot_hash TEXT NOT NULL,
+  doc_id TEXT, doc_url TEXT, pdf_id TEXT, pdf_url TEXT,
+  created_by TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_offer_documents_offer ON offer_documents(offer_id);
+
 -- Deals that worked out (or not), entered by you. Used to tune the score.
 CREATE TABLE IF NOT EXISTS outcomes (
   property_id INTEGER PRIMARY KEY REFERENCES properties(id) ON DELETE CASCADE,

@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .. import history, napkin, people, pricing
+from .. import history, napkin, offers, people, pricing
 from ..config import AssetClass, Settings, get_settings, has_secret
 from ..db import dumps, loads, market_by_slug, one, pending_rescore, rows, scalar, this_month
 from ..drill import engine
@@ -167,7 +167,8 @@ rf.fit AS rent_fit, rf.detail AS rent_detail,
 v.property_id AS v_id, v.status AS v_status, v.ai_label, v.final_p, v.reviewed_label, v.checked_at AS v_checked_at,
 o.owner_type, o.years_owned,
 COALESCE(ds.level, 1) AS level, COALESCE(ds.status, 'active') AS drill_status,
-ds.best_guess_person, ds.confirmed_person
+ds.best_guess_person, ds.confirmed_person,
+(SELECT x.status FROM offers x WHERE x.property_id = p.id ORDER BY x.version DESC, x.id DESC LIMIT 1) AS offer_status
 """
 
 IN_BOX = "COALESCE(s.in_buybox, 1) = 1"     # not scored yet = not excluded (missing data never excludes)
@@ -346,6 +347,7 @@ def property_row(r: Mapping[str, Any], drill: Mapping[str, Any] | None, mc: Mark
         "drive_minutes": _round(r.get("drive_minutes")), "drive_method": r.get("drive_method"),
         "visual": _visual(r, mc),
         "rent_fit": r.get("rent_fit"), "rent_color": r.get("rent_color"), "rent_detail": r.get("rent_detail"),
+        "offer_status": r.get("offer_status"),
         "owner_name": r.get("owner_name"), "owner_type": r.get("owner_type"),
         "years_owned": _round(r.get("years_owned")),
         "score": r.get("score"), "coverage_have": r.get("coverage_have"), "coverage_total": r.get("coverage_total"),
@@ -451,6 +453,7 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
         "history": history.history_block(conn, prop, pcfg),
         "owner": _owner_detail(conn, prop, layers["owners"]),
         "people": people.block(conn, prop, mc.settings),
+        "offers": offers.property_block(conn, pid, napkin.snapshot(conn, prop, mc.ac.key, pcfg, layers["rent_fits"])),
         "drill": drill,
         "links": drill_links.links_for({**prop, "asset_class": mc.ac.key}, None, drill["best_guess_person"],
                                        settings=mc.settings, parse_owner=False),
@@ -479,6 +482,39 @@ def people_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Setti
     if not prop:
         raise KeyError(f"Property {pid} is not in this market.")
     return {"people": people.block(conn, prop, mc.settings)}
+
+
+def offer_basis(conn: sqlite3.Connection, slug: str, pid: int,
+                settings: Settings | None = None) -> tuple[dict, dict, pricing.PricingConfig]:
+    """(property row, the rent snapshot an offer made now would be based on, pricing settings)."""
+    mc = market_ctx(conn, slug, settings)
+    prop = one(conn, "SELECT * FROM properties WHERE id = ? AND market_id = ?", (pid, mc.id))
+    if not prop:
+        raise KeyError(f"Property {pid} is not in this market.")
+    pcfg = pricing.load_config(mc.settings.pricing)
+    return prop, napkin.snapshot(conn, prop, mc.ac.key, pcfg, _one_by_property(conn, "rent_fits", pid)), pcfg
+
+
+def offers_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Settings | None = None) -> dict:
+    """Only the drawer's Offers section for one property (after a change)."""
+    _, snap, _ = offer_basis(conn, slug, pid, settings)
+    return {"offers": offers.property_block(conn, pid, snap)}
+
+
+def list_offers(conn: sqlite3.Connection, slug: str, settings: Settings | None = None) -> dict:
+    """The Offers screen: every offer of the market, newest first, and how many are in each stage."""
+    mc = market_ctx(conn, slug, settings)
+    pcfg = pricing.load_config(mc.settings.pricing)
+    unsent = rows(conn, "SELECT DISTINCT p.* FROM offers o JOIN properties p ON p.id = o.property_id "
+                        "WHERE p.market_id = ? AND o.status != 'sent'", (mc.id,))
+    hashes = {p["id"]: napkin.snapshot(conn, p, mc.ac.key, pcfg, _one_by_property(conn, "rent_fits", p["id"]))["hash"]
+              for p in unsent}
+    found = offers.market_list(conn, mc.id, hashes)
+    counts: dict[str, int] = {}
+    for o in found:
+        counts[o["status"]] = counts.get(o["status"], 0) + 1
+    return {"items": found, "counts": counts, "total": len(found),
+            "status_labels": [[k, v] for k, v in offers.STATUS_LABELS.items()]}
 
 
 def _crexi_block(conn: sqlite3.Connection, pid: int) -> dict:

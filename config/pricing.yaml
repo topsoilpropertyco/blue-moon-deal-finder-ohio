@@ -20,5 +20,9 @@ pricing:
   # Dates before this year are treated as impossible when checking a year built.
   earliest_year_built: 1700
 
+  # When an offer is marked as sent, the app adds the next action "Follow up: did they get the LOI?" this many
+  # days after the day it was sent. You can change the date on that action.
+  follow_up_days: 7
+
   # The date ages and years owned are worked out against. Leave blank for today; tests set a fixed date.
   evaluation_date:
