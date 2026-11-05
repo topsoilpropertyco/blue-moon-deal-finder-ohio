@@ -1,5 +1,6 @@
 /* Settings (Setup): a read-only view of the settings that matter, and how to change them.
- * Markets, the current asset class's buy box, which keys are set (yes/no only, never the values), the
+ * Markets, the current asset class's buy box, which keys are set (yes/no only, never the values), the LOI
+ * template (the master Google Doc, the Drive folder and the fields to fill: the one place that saves), the
  * photo check setup, Google's free calls used this month, where the data lives, and copy-paste commands
  * for editing config.yaml and restarting the app.
  */
@@ -248,6 +249,60 @@
       H.command('cd ' + APP_FOLDER + ' && uv run run.py share password') + '</details>', 'vw-full');
   }
 
+  /* ---------- LOI template (the offer letter made from your own Google Doc) ---------- */
+
+  function loiBody(l) {
+    const check = l.check;
+    const shown = check ? check.tokens : [];
+    const label = new Map((l.map || []).map((m) => [m.token, m.label]));
+    const fields = shown.length
+      ? '<div class="vw-scroll"><table class="wt"><thead><tr><th>Field in your template</th><th>Filled with</th></tr></thead><tbody>' +
+        shown.map((t) => '<tr><td><code class="se-code">{{' + esc(t) + '}}</code></td><td>' +
+          (label.has(t) ? esc(label.get(t)) : '<span class="pill warn">Not mapped in config/loi.yaml</span>') + '</td></tr>').join('') + '</tbody></table></div>'
+      : '';
+    const checked = check
+      ? '<p class="note vw-tight">Last read: <b>' + esc(check.template_name) + '</b> (version ' + esc(check.template_version) + '), letters go to <b>' + esc(check.folder_name) + '</b>.</p>'
+      : '';
+    const todo = l.problems.length ? '<ul class="se-steps">' + l.problems.map((p) => '<li>' + esc(p) + '</li>').join('') + '</ul>' : '';
+    const ready = l.template_id && l.folder_id && l.signed_in;
+    return '<p><span class="pill ' + (l.active ? 'good' : 'warn') + '">' + esc(l.headline) + '</span> ' +
+      '<span class="se-yn"><span class="dot ' + (l.signed_in ? 'g' : 'n') + '" aria-hidden="true"></span>Google sign-in: ' + (l.signed_in ? 'done' : 'needed') + '</span></p>' + todo +
+      '<form class="of-stack" data-loi-form><label class="field">Link to your master letter (a Google Doc)<input name="template" maxlength="500" autocomplete="off" value="' + esc(l.template_url || '') + '"></label>' +
+      '<label class="field">Link to the Drive folder the letters go in<input name="folder" maxlength="500" autocomplete="off" value="' + esc(l.folder_url || '') + '"></label>' +
+      '<div class="of-inline"><button type="submit" class="btn small primary">Save the links</button>' +
+      '<button type="button" class="btn small" data-loi-check' + (ready ? '' : ' disabled') + '>Read the template</button></div></form>' + checked + fields +
+      '<p class="note vw-tight">The app copies your master, fills these fields and saves a PDF. It never writes the wording.</p>' +
+      '<details class="im-more"><summary>How to connect Google</summary>' +
+      '<p class="note">One-time setup is in the README ("Letters from your Google Doc"). Once the Google client file is saved in the data folder, sign in on the Mac Mini:</p>' +
+      H.command('cd ' + APP_FOLDER + ' && ' + l.sign_in_command) + '</details>';
+  }
+
+  function loiPanel(l) {
+    return l ? panel('LOI template', '<div data-loi>' + loiBody(l) + '</div>', 'vw-full') : '';
+  }
+
+  function mountLoi(root) {
+    const send = async (path, method, body, message) => {
+      try {
+        const res = await BM.api(path, {method, body});
+        const el = root.querySelector('[data-loi]');
+        if (el) el.innerHTML = loiBody(res);
+        BM.toast(message);
+      } catch (err) {
+        BM.toast(err.message, {error: true});
+      }
+    };
+    root.addEventListener('submit', (ev) => {
+      const form = ev.target instanceof Element ? ev.target.closest('form[data-loi-form]') : null;
+      if (!form) return;
+      ev.preventDefault();
+      send('/api/loi', 'PUT', {template: form.elements.template.value, folder: form.elements.folder.value}, 'Links saved.');
+    });
+    root.addEventListener('click', (ev) => {
+      if (ev.target instanceof Element && ev.target.closest('[data-loi-check]')) send('/api/loi/check', 'POST', undefined, 'Template read.');
+    });
+  }
+
   function whenText(iso) {
     const d = iso ? new Date(iso) : null;
     if (!d || Number.isNaN(d.getTime())) return 'unknown time';
@@ -279,7 +334,7 @@
   /* ---------- page ---------- */
 
   const HEAD = H.head('Setup · Settings', 'Settings', [
-    'Read-only here. Change them in the files on the Mac Mini (steps at the bottom).',
+    'Read-only here, except the LOI template links. Change the rest in the files on the Mac Mini (steps at the bottom).',
     'Keys are shown as yes or no, never their values.',
   ]);
 
@@ -288,7 +343,7 @@
     const acs = st.asset_classes || {};
     const s = BM.state.summary;
     const acKey = (s && s.asset_class && s.asset_class.key) || ((H.currentMarket() || {}).asset_class);
-    return HEAD + '<div class="grid2">' + updatesPanel(st.updates) + sharePanel(st.share) + marketsPanel(cfg, acs) + buyBoxPanel(acs[acKey]) + keysPanel(st.keys) +
+    return HEAD + '<div class="grid2">' + updatesPanel(st.updates) + sharePanel(st.share) + loiPanel(st.loi) + marketsPanel(cfg, acs) + buyBoxPanel(acs[acKey]) + keysPanel(st.keys) +
       photoPanel(cfg, health) + usagePanel(cfg, usage) + pathsPanel(cfg) + safetyPanel(cfg) + howPanel() + '</div>';
   }
 
@@ -304,7 +359,12 @@
       return;
     }
     const [h, u] = await Promise.all([health, usage, H.summary()]);
-    if (root.isConnected) root.innerHTML = page(st || {}, h, u);
+    if (!root.isConnected) return;
+    root.innerHTML = page(st || {}, h, u);
+    if (!root.__bmLoiBound) {
+      root.__bmLoiBound = true;
+      mountLoi(root);
+    }
   }
 
   BM.registerView('settings', {label: 'Settings', group: 'setup', order: 4, render});

@@ -3,9 +3,10 @@
  *
  * An offer is one version of a price for a property, based on a frozen copy of the rent figures. It starts at
  * 4x the yearly rent and follows that default until a price is typed. A draft is not a sent offer: only
- * "Mark as sent" records a send (how, when, who). A counteroffer is written down next to the offer and never
- * changes it. All money arrives as whole cents. Every change goes to the offer routes in ARCHITECTURE.md and the
- * answer redraws the section.
+ * "Mark as sent" records a send (how, when, who). The LOI is made from the owner's own Google Doc (the app never
+ * writes letter wording), and only a letter made from the offer's current numbers counts. A counteroffer is written
+ * down next to the offer and never changes it. All money arrives as whole cents. Every change goes to the offer
+ * routes in ARCHITECTURE.md and the answer redraws the section.
  */
 (function () {
   'use strict';
@@ -15,7 +16,7 @@
   const HOW = [['email', 'By email'], ['in person', 'In person'], ['mail', 'By mail']];
   const STATUS_CLASS = {sent: 'good', internal_draft: ''};
 
-  let st = null;   // {id, d, root, busy}
+  let st = null;   // {id, d, root, busy, previews: {offer id: field review}}
 
   /* ---------- small helpers ---------- */
 
@@ -130,6 +131,39 @@
       '<span class="hint">' + esc(a.owner) + '</span></li>';
   }
 
+  function safeUrl(url) {
+    return /^https:\/\/(docs|drive)\.google\.com\//.test(url || '') ? url : null;
+  }
+
+  function documentHtml(d) {
+    const link = (url, label) => safeUrl(url) ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + label + '</a>' : '';
+    return '<li><span class="pill ' + (d.current ? 'good' : 'warn') + '">' + (d.current ? 'Matches this offer' : 'Made from older numbers') + '</span> ' +
+      link(d.doc_url, 'Google Doc') + ' ' + link(d.pdf_url, 'PDF') +
+      ' <span class="hint">' + esc(BM.fmt.date(d.created_at)) + ' · ' + esc(d.created_by) + (d.template_version ? ' · template version ' + esc(d.template_version) : '') + '</span></li>';
+  }
+
+  function reviewHtml(p) {
+    const rows = p.rows.map((r) => '<tr><td><code>' + esc(r.token) + '</code></td><td>' + (r.label ? esc(r.label) : '<span class="muted">Not mapped</span>') + '</td><td>' +
+      (r.value ? esc(r.value) : '<span class="muted">Nothing yet</span>') + '</td><td><span class="pill ' + (r.state === 'filled' ? 'good' : r.state === 'unused' ? '' : 'warn') + '">' + esc(r.state_text) + '</span></td></tr>').join('');
+    return '<div class="of-review"><p class="note"><b>' + esc(p.note) + '</b>' + (p.checked ? '' : ' The template has not been checked in Settings yet, so every mapped field is listed.') + '</p>' +
+      '<div class="vw-scroll"><table class="wt"><thead><tr><th>Field</th><th>Filled with</th><th>Text</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+  }
+
+  function letterHtml(o) {
+    const docs = o.documents || [];
+    const list = docs.length ? '<ul class="of-list">' + docs.map(documentHtml).join('') + '</ul>' : '';
+    if (o.status === 'sent') return docs.length ? '<h4>Letters made</h4>' + list : '';
+    const made = docs.some((d) => d.current);
+    const next = {loi_generated: ['ready_for_review', 'Mark ready for review'], ready_for_review: ['ready_to_send', 'Mark ready to send']}[o.status];
+    const id = esc(o.id);
+    const preview = st.previews[o.id];
+    return '<h4>Letter (LOI)</h4><p class="note">Made from your own Google Doc. The app never writes the wording.</p>' + list +
+      '<div class="of-inline"><button type="button" class="btn small" data-of-act="preview" data-offer="' + id + '">Check the fields</button>' +
+      '<button type="button" class="btn small' + (made ? '' : ' primary') + '" data-of-act="make-loi" data-again="' + (made ? '1' : '') + '" data-offer="' + id + '">' + (made ? 'Make a new copy' : 'Make the LOI') + '</button>' +
+      (next && made ? '<button type="button" class="btn small primary" data-of-act="stage" data-stage="' + next[0] + '" data-offer="' + id + '">' + next[1] + '</button>' : '') + '</div>' +
+      (preview ? reviewHtml(preview) : '');
+  }
+
   function eventsHtml(o) {
     return '<details class="p-more"><summary>History (' + o.events.length + ')</summary><ul class="of-events">' +
       o.events.map((e) => '<li><b>' + esc(e.kind.replace(/_/g, ' ')) + '</b> <span class="hint">' + esc(BM.fmt.date(e.at)) + ' · ' + esc(e.actor) + '</span></li>').join('') + '</ul></details>';
@@ -153,7 +187,7 @@
       '<dl class="kv"><dt>Seller (owner of record)</dt><dd>' + (o.seller_name ? esc(o.seller_name) : '<span class="muted">Not on record</span>') + '</dd>' +
       '<dt>Addressed to</dt><dd>' + recipient + '</dd>' + (o.sent ? '<dt>Sent</dt><dd>' + sentText(o.sent) + '</dd>' : '<dt>Letter and recipient</dt><dd>' + ready + '</dd>') +
       counter + next + '</dl>' +
-      (o.status === 'sent' ? '' : priceFormHtml(o) + sentFormHtml(o)) +
+      (o.status === 'sent' ? '' : priceFormHtml(o)) + letterHtml(o) + (o.status === 'sent' ? '' : sentFormHtml(o)) +
       (o.responses.length ? '<h4>Responses</h4><ul class="of-list">' + o.responses.map((r) => responseHtml(r, b, o)).join('') + '</ul>' : '') +
       (o.status === 'sent' ? responseFormHtml(b, o) : '') +
       '<h4>Next actions</h4>' + (o.actions.length ? '<ul class="of-list">' + o.actions.map((a) => actionHtml(a, o)).join('') + '</ul>' : '<p class="note">None yet.</p>') +
@@ -165,7 +199,7 @@
   function html(d) {
     const b = d && d.offers;
     if (!b) return '';
-    if (!st || st.id !== d.id) st = {id: d.id, root: null, busy: false};
+    if (!st || st.id !== d.id) st = {id: d.id, root: null, busy: false, previews: {}};
     st.d = d;
     return '<section class="sec of" data-part="offers" aria-labelledby="of-h"><h2 id="of-h">Offers</h2>' +
       '<p class="note">Blue Moon price (4x rent) is the starting price here. It is not the Blue Moon score, which is the chance the owner sells. A draft is not a sent offer.</p>' +
@@ -194,6 +228,7 @@
       const res = await BM.api(path, {method: method || 'POST', body});
       if (st !== mine) return res;
       mine.d.offers = res.offers;
+      mine.previews = {};
       redraw();
       if (res.message) BM.toast(res.message);
       return res;
@@ -202,6 +237,19 @@
       return null;
     } finally {
       mine.busy = false;
+    }
+  }
+
+  async function loadPreview(el) {
+    const mine = st;
+    const id = Number(el.getAttribute('data-offer'));
+    try {
+      const res = await BM.api(offerPath(el, '/loi'));
+      if (st !== mine) return;
+      mine.previews[id] = res;
+      redraw();
+    } catch (err) {
+      if (st === mine) BM.toast(err.message, {error: true});
     }
   }
 
@@ -227,6 +275,9 @@
     const act = b.getAttribute('data-of-act');
     if (act === 'refresh') write(offerPath(b, '/refresh'), undefined);
     else if (act === 'default-price') write(offerPath(b, '/price'), {price: null}, 'PUT');
+    else if (act === 'preview') loadPreview(b);
+    else if (act === 'make-loi') write(offerPath(b, '/loi'), {again: !!b.getAttribute('data-again')});
+    else if (act === 'stage') write(offerPath(b, '/status'), {status: b.getAttribute('data-stage')}, 'PUT');
   }
 
   function onChange(ev) {

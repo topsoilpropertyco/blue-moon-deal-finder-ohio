@@ -101,6 +101,7 @@ class Settings:
         self.sources: dict = _load_yaml(self.root / "config" / "sources.yaml")
         self.parcels: dict = _load_yaml(self.root / "config" / "parcels.yaml")
         self.pricing: dict = (_load_yaml(self.root / "config" / "pricing.yaml").get("pricing") or {})
+        self.loi: dict = (_load_yaml(self.root / "config" / "loi.yaml").get("loi") or {})
 
         defaults = ac_raw.get("default_signals", {})
         self.asset_classes: dict[str, AssetClass] = {}

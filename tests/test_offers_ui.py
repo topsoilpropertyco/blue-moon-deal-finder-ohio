@@ -92,6 +92,9 @@ const sentOffer = (over) => offer(Object.assign({status: 'sent', status_label: '
   actions: [{id: 3, text: 'Follow up: did they get the LOI?', owner: 'seth', due_on: '2020-11-10', done: 0, auto: 1}],
   next_action: {id: 3, text: 'Follow up: did they get the LOI?', owner: 'seth', due_on: '2020-11-10', done: 0}}, over || {}));
 
+const doc = (over) => Object.assign({id: 1, template_version: '7', doc_url: 'https://docs.google.com/document/d/abc/edit',
+  pdf_url: 'https://drive.google.com/file/d/def/view', created_by: 'seth', created_at: '2026-11-05T10:00:00+00:00', current: true}, over || {});
+
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const out = {};
 (async () => {
@@ -103,6 +106,11 @@ const out = {};
   out.history = BM.offers.html(detail(block({offers: [offer({status: 'sent', status_label: 'Sent', incomplete_snapshot: true, rent: null, implied_multiple: null, sent: {how: 'mail', on: '2026-06-01', by: 'seth', via: 'manual', via_label: 'Marked by hand'}})], can_prepare: true})));
   out.provider = BM.offers.html(detail(block({offers: [sentOffer({sent: {how: 'email', on: '2026-11-03', by: 'mail-provider', via: 'provider', via_label: 'Reported by the mail provider'}})]})));
   out.none = BM.offers.html({id: 7});
+  const generated = (docs, over) => BM.offers.html(detail(block({offers: [offer(Object.assign({status: 'loi_generated', status_label: 'LOI generated', documents: docs}, over || {}))]})));
+  out.letter = generated([doc()]);
+  out.ready = generated([doc()], {status: 'ready_for_review', status_label: 'Ready for review'});
+  out.older = generated([doc({id: 2, current: false, doc_url: 'javascript:alert(1)', pdf_url: 'https://evil.example/x.pdf'})], {status: 'internal_draft', status_label: 'Internal draft'});
+  out.sentLetter = BM.offers.html(detail(block({offers: [sentOffer({documents: [doc()]})]})));
 
   const root = new Stub('root');
   BM.offers.html(detail());
@@ -136,6 +144,23 @@ const out = {};
   await flush();
   fire('submit', form('historical', {}, {price: {value: '1250000'}, how: {value: 'mail'}, sent_on: {value: '2026-06-01'}, recipient_name: {value: ''}, note: {value: 'old'}}));
   await flush();
+  next = res(detail().offers, 'LOI made');
+  fire('click', target({'data-of-act': 'make-loi', 'data-again': '', 'data-offer': '5'}));
+  await flush();
+  fire('click', target({'data-of-act': 'make-loi', 'data-again': '1', 'data-offer': '5'}));
+  await flush();
+  fire('click', target({'data-of-act': 'stage', 'data-stage': 'ready_for_review', 'data-offer': '5'}));
+  await flush();
+  next = {note: 'Field review: the text that would fill your template\'s fields. This is not the letter.', checked: true, unresolved: 1,
+    rows: [{token: 'seller_name', label: 'Seller: owner of record', value: 'EXAMPLE <i>HOLDINGS</i> LLC', state: 'filled', state_text: 'Filled'},
+           {token: 'mystery', label: null, value: null, state: 'unmapped', state_text: 'Not mapped in config/loi.yaml'}]};
+  fire('click', target({'data-of-act': 'preview', 'data-offer': '5'}));
+  await flush();
+  out.review = root.children['[data-part="offers"]'].outerHTML;
+  next = res(detail().offers, 'prepared');
+  fire('submit', form('prepare', {}, {price: {value: ''}}));
+  await flush();
+  out.reviewCleared = root.children['[data-part="offers"]'].outerHTML;
   next = new Error('Version 1 was already sent.');
   fire('click', target({'data-of-act': 'refresh', 'data-offer': '5'}));
   await flush();
@@ -235,7 +260,11 @@ def test_actions_send_the_right_requests(ran):
     assert c[10]["body"] == {"due_on": "2026-11-20"}
     assert c[11]["path"].endswith("/properties/7/offers/historical") and c[11]["body"] == {
         "price": "1250000", "how": "mail", "sent_on": "2026-06-01", "recipient_name": None, "note": "old"}
-    assert "Version 1 was already sent." in ran["toasts"] and "prepared" in ran["toasts"]
+    assert c[12] == {"path": base + "/offers/5/loi", "method": "POST", "body": {"again": False}}
+    assert c[13] == {"path": base + "/offers/5/loi", "method": "POST", "body": {"again": True}}
+    assert c[14] == {"path": base + "/offers/5/status", "method": "PUT", "body": {"status": "ready_for_review"}}
+    assert c[15] == {"path": base + "/offers/5/loi", "method": "GET", "body": None}
+    assert "Version 1 was already sent." in ran["toasts"] and "prepared" in ran["toasts"] and "LOI made" in ran["toasts"]
 
 
 def test_the_offers_screen_lists_each_offer_with_stage_price_counter_and_next_action(ran):
@@ -247,3 +276,31 @@ def test_the_offers_screen_lists_each_offer_with_stage_price_counter_and_next_ac
     assert ran["filtered"].count('class="of-item"') == 2 and "1 Fake St" not in ran["filtered"]
     assert "No offers yet" in ran["screenEmpty"]
     assert ran["view"] == {"label": "Offers", "group": "work"}
+
+
+def test_the_letter_section_makes_checks_and_moves_the_letter_along(ran):
+    assert "Make the LOI" in ran["draft"] and "never writes the wording" in ran["draft"] and "Check the fields" in ran["draft"]
+    assert "Make a new copy" not in ran["draft"] and "Mark ready for review" not in ran["draft"]      # no letter yet
+    h = ran["letter"]
+    assert "Make a new copy" in h and "Mark ready for review" in h and "Make the LOI" not in h and "Matches this offer" in h
+    assert 'href="https://docs.google.com/document/d/abc/edit"' in h and 'href="https://drive.google.com/file/d/def/view"' in h
+    assert "template version 7" in h and 'rel="noopener noreferrer"' in h
+    assert "Mark ready to send" in ran["ready"] and "Mark ready for review" not in ran["ready"]
+
+
+def test_an_old_letter_is_labeled_and_only_google_links_are_drawn(ran):
+    h = ran["older"]
+    assert "Made from older numbers" in h and "Make the LOI" in h and "Mark ready" not in h
+    assert "javascript:" not in h and "evil.example" not in h
+
+
+def test_a_sent_offer_lists_its_letters_and_cannot_make_another(ran):
+    h = ran["sentLetter"]
+    assert "Letters made" in h and "Google Doc" in h and "Make the LOI" not in h and "Make a new copy" not in h
+
+
+def test_the_field_review_is_labeled_escaped_and_cleared_by_any_change(ran):
+    h = ran["review"]
+    assert "This is not the letter" in h and "<code>seller_name</code>" in h and "Not mapped" in h
+    assert "EXAMPLE &lt;i&gt;HOLDINGS&lt;/i&gt; LLC" in h and "<i>HOLDINGS" not in h
+    assert "This is not the letter" not in ran["reviewCleared"]

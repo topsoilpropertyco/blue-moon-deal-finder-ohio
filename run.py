@@ -10,6 +10,7 @@
     uv run run.py research --limit 5 --dry-run
     uv run run.py export
     uv run run.py serve
+    uv run run.py loi signin        (once: connect your Google account for the offer letters; then 'loi test')
 
 Every command takes --market SLUG (default: the first market in config.yaml). The pipeline commands
 take --limit N (test with 5 first), --dry-run (count and price only, nothing is called) and --yes (OK to
@@ -137,6 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
     au.add_argument("action", nargs="?", default="status", choices=["install", "uninstall", "status", "now", "jobs"],
                     help="install: turn on nightly updates; uninstall: turn them off; status (default): the "
                          "version and the last update; now: update right away; jobs: how many app jobs are running")
+    loi = add("loi", "The offer letter (LOI) from your master Google Doc: sign in to Google, see where it stands, or "
+                     "read the template to test it.")
+    loi.add_argument("action", choices=["signin", "status", "test"],
+                     help="signin: connect your Google account (once); status: sign-in, template and folder; "
+                          "test: read the master Doc and list its {{fields}} (changes nothing)")
     ky = add("key", "Save a key into .env without opening the file (you paste it hidden; it is never shown).")
     ky.add_argument("which", choices=sorted(KEY_ENV), help="which key: google (Maps), anthropic or census")
     return parser
@@ -488,6 +494,35 @@ def cmd_key(args: argparse.Namespace, settings: Settings) -> int:
     return EXIT_OK
 
 
+def cmd_loi(args: argparse.Namespace, settings: Settings) -> int:
+    """Google sign-in for the offer letters, and a read-only look at the master Doc."""
+    from bluemoon.loi import auth, service
+    if args.action == "signin":
+        auth.sign_in(settings, say=say)
+        say("Signed in. Next: paste the link to your master Google Doc and the Drive folder in Settings, then run "
+            "'uv run run.py loi test'.")
+        return EXIT_OK
+    conn = connect(settings=settings)
+    try:
+        if args.action == "test":
+            st = service.check(conn, settings, service.open_adapter(settings))
+            c = st["check"]
+            say(f"Read '{c['template_name']}' (version {c['template_version']}); letters go to the Drive folder '{c['folder_name']}'.")
+            say("Fields found: " + (", ".join(c["tokens"]) or "none"))
+        else:
+            st = service.status(conn, settings)
+            say("Google sign-in: " + ("done" if st["signed_in"] else "needed"))
+            say("Master Doc: " + (st["template_url"] or "not set (paste its link in Settings)"))
+            say("Letters folder: " + (st["folder_url"] or "not set (paste its link in Settings)"))
+        for problem in st["problems"]:
+            say(f"To do: {problem}")
+        if st["active"]:
+            say("Letters can be made.")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
 def cmd_share(args: argparse.Namespace, settings: Settings) -> int:
     """Manage the people list and team password, or start the free Cloudflare link (runs until Ctrl+C)."""
     if args.action in ("add", "remove"):
@@ -628,6 +663,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_key(args, settings)
         if args.command == "autoupdate":
             return cmd_autoupdate(args, settings)
+        if args.command == "loi":
+            return cmd_loi(args, settings)
         markets = ([resolve_market(args.market, settings)] if args.market or args.command != "status"
                    else [m.slug for m in settings.markets])
         conn = connect(settings=settings)

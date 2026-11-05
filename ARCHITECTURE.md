@@ -78,6 +78,14 @@ Crexi CSV/XLSX ─► ingest ─► properties (master list, every original colu
   manual or provider; adds the follow-up action `follow_up_days` later), `record_historical()` / `correct_historical()`,
   `add_response()` / `correct_response()`, `add_action()` / `update_action()`, and the views (`views()`,
   `property_block()`, `market_list()`). Money is cents; the rent snapshot is `napkin.snapshot()`, frozen on the offer.
+  `letter_hash()` (rent snapshot + price + seller + recipient: a letter counts only while it matches), `add_document()`
+  (keeps a made letter, stage "LOI generated") and `letter_note()` (blocked or failed, in the history).
+- `bluemoon/loi/`: the offer letter made from Seth's master Google Doc (never authors wording). `fields.py` (`{{token}}`
+  detection, `config/loi.yaml` field_map and the fixed list of sources, `values()`, `review()`), `auth.py` (OAuth
+  installed-app sign-in with PKCE on 127.0.0.1; `data/google_oauth_client.json` + `data/google_token.json`, mode 600,
+  never printed), `drive.py` (`DriveAdapter` protocol; `GoogleDrive` over httpx: describe, export text, copy into the
+  folder, `replaceAllText`, export PDF, multipart upload), `fake.py` (`FakeDrive`, the in-memory test transport),
+  `service.py` (settings in `meta` key `loi_settings`, `status()`, `check()`, `preview()`, `generate()`).
 - `bluemoon/cache.py`: `make_key()`, `cached(conn, key, provider, fetch)`, `record_call()`, `month_usage()`,
   `estimate_cost(conn, sku, units)`.
 - `bluemoon/util.py`: `normalize_address/county/owner/zip`, `haversine_miles`, `bearing_deg`, `parse_date`,
@@ -519,6 +527,9 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | POST | `/api/m/{slug}/offers/{oid}/sent` | body `{how: email\|in person\|mail, when?}`: the only way an offer becomes sent (manual); adds the follow-up action; 400 if already sent or the day is in the future |
 | POST | `/api/m/{slug}/offers/{oid}/responses` | body `{text, classification?, counter_low?, counter_high?, received_on?}`: only for a sent offer; unclear = `needs_review`; amounts only for a counter or needs-review reply; never changes the offer |
 | PUT | `/api/m/{slug}/offers/{oid}/responses/{rid}` | body `{classification, counter_low?, counter_high?}`: fixes the category or range, never the original text |
+| GET | `/api/m/{slug}/offers/{oid}/loi` | the field review: `{rows [{token, source, label, value, state filled|empty|unmapped|unused}], unresolved, checked, template_version, note}`; no Google call |
+| POST | `/api/m/{slug}/offers/{oid}/loi` | body `{again?}`: makes the letter (copy of the master in the folder titled `LOI - <address> - <date> v<n>`, fields filled, PDF stored; Doc and PDF ids and links on `offer_documents` with template version and `snapshot_hash` = `offers.letter_hash`). Answers 200 with a message when it made one, found one for these numbers, or could not start (stage `loi_template_needed` or `required_fields_missing`, nothing copied); 400 for a sent offer or a Google failure (written to the offer's history) |
+| PUT | `/api/m/{slug}/offers/{oid}/status` | body `{status: ready_for_review\|ready_to_send}`: needs a letter made from the offer's current numbers (400 otherwise or once sent); `sent` is only ever set by Mark as sent |
 | POST | `/api/m/{slug}/offers/{oid}/actions` | body `{text, due_on?, owner?}` |
 | PUT | `/api/m/{slug}/offers/{oid}/actions/{aid}` | body with any of `text, due_on (null clears), owner, done` |
 | POST | `/api/m/{slug}/properties/{id}/outreach` | body `{channel, outcome, contact_point_id?, notes?}` |
@@ -561,7 +572,10 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | GET | `/api/m/{slug}/export/{name}` | file download (`ranked_list.xlsx`, `ranked_list.csv`, `crm_handoff.csv`, `mailing_list.csv`, `drill_worklist.csv`, `excluded.zip`, `run_summary.md`); a GET never changes data |
 | POST | `/api/m/{slug}/export/crm_handoff.csv` | JSON body `{mark: true}`: the CRM list, marking the newly confirmed owners in it as handed off |
 | GET | `/images/{property_id}/{file}` | cached image (local only) |
-| GET | `/api/settings` | readable settings (no secrets), `share`, and `updates` (version + last nightly update) |
+| GET | `/api/settings` | readable settings (no secrets), `share`, `updates` (version + last nightly update) and `loi` |
+| GET | `/api/loi` | the LOI template panel: `{signed_in, client_file, template_url, folder_url, check {template_name, template_version, folder_name, tokens, unmapped, checked_at}, problems, active, headline, map}` |
+| PUT | `/api/loi` | body `{template?, folder?}` (Google links or ids, blank clears; 400 when not a Google Doc / Drive link); a change clears the last check |
+| POST | `/api/loi/check` | reads the master and folder from Google (changes nothing there) and keeps the fields found; 400 without Google sign-in or on a Google error |
 
 PropertyRow: `{id, address, city, state, zip, county, lat, lng, units, building_sqft, lot_acres, size_value,
 size_basis, size_color, drive_minutes, drive_method, visual:{label, p, color, needs_review}, rent_fit, rent_detail,
@@ -609,7 +623,7 @@ the rent and price section (`BM.offers.html(detail)` / `BM.offers.mount(root, de
 frozen `snapshot_json` + `snapshot_hash`, `incomplete_snapshot`, `sent_how/on/by/via`; unique per property, version
 and intent), `offer_events` (append-only log), `offer_responses` (original text kept, `counter_low_cents` /
 `counter_high_cents`), `offer_actions` (next actions), `offer_documents` (letters made from a snapshot; filled by the
-Google Drive step). `follow_up_days` lives in `config/pricing.yaml`.
+Google Drive step; no uniqueness, earlier letters stay). `follow_up_days` lives in `config/pricing.yaml`; the letter field map in `config/loi.yaml` (`Settings.loi`). The Settings panel is in `settings.js` (the only Settings control that saves) and the drawer's letter controls in `offers.js`. Command line: `uv run run.py loi signin|status|test`.
 
 Tables added: `rent_records` (evidence, normalized yearly cents, state, pinned), `rent_assumptions` (typed units,
 mix, rents), `property_history` (builder evidence, bundled-sale flag, sale source). Columns added to `properties`:

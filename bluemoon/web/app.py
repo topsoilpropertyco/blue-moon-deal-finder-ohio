@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager, closing
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import (
@@ -71,6 +71,7 @@ from ..ingest import IngestError, import_file, preview_file
 from ..scoring import overrides
 from ..scoring.learn import model_summary, set_outcome
 from .. import history, napkin, offers
+from ..loi import service as loi
 from ..people import choose_recipient, clear_recipient
 from . import auth, crexi_api, queries
 
@@ -433,6 +434,20 @@ class OfferActionFixIn(BaseModel):
     done: bool | None = None
 
 
+class OfferStageIn(BaseModel):
+    status: Literal["ready_for_review", "ready_to_send"]
+
+
+class LoiMakeIn(BaseModel):
+    again: bool = False         # make another copy although a letter already matches these numbers
+
+
+class LoiLinksIn(BaseModel):
+    """The master Doc and the Drive folder, as links (or ids). Blank clears one."""
+    template: str | None = Field(default=None, max_length=500)
+    folder: str | None = Field(default=None, max_length=500)
+
+
 class UndoIn(BaseModel):
     batch_id: str = Field(max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
@@ -668,8 +683,9 @@ def list_markets(conn: Conn) -> list[dict]:
 
 
 @router.get("/api/settings")
-def settings_view() -> dict:
+def settings_view(conn: Conn) -> dict:
     out = queries.readable_settings()
+    out["loi"] = loi.status(conn, get_settings())
     out["share"] = share_status()
     out["updates"] = update_status()
     return out
@@ -686,6 +702,23 @@ def update_status() -> dict | None:
     except Exception:  # noqa: BLE001 - update status must never break the Settings screen
         log.debug("Could not read the update status", exc_info=True)
         return None
+
+
+@router.get("/api/loi")
+def loi_status(conn: Conn) -> dict:
+    return loi.status(conn, get_settings())
+
+
+@router.put("/api/loi")
+def loi_save_links(body: LoiLinksIn, conn: Conn) -> dict:
+    loi.save_links(conn, body.template, body.folder)
+    return loi.status(conn, get_settings())
+
+
+@router.post("/api/loi/check")
+def loi_check(conn: Conn) -> dict:
+    s = get_settings()
+    return loi.check(conn, s, loi.open_adapter(s))
 
 
 @router.get("/api/sources")
@@ -897,6 +930,29 @@ def update_offer_action(slug: str, oid: int, aid: int, body: OfferActionFixIn, r
     require_offer_child(conn, "offer_actions", aid, oid)
     offers.update_action(conn, aid, body.model_dump(exclude_unset=True), _actor(request))
     return _offer_done(conn, slug, oid, "Next action saved.")
+
+
+@router.get("/api/m/{slug}/offers/{oid}/loi")
+def loi_preview(slug: str, oid: int, conn: Conn) -> dict:
+    offer = require_offer(conn, slug, oid)
+    prop, _, cfg = queries.offer_basis(conn, slug, offer["property_id"])
+    return loi.preview(conn, get_settings(), offer, prop, cfg)
+
+
+@router.post("/api/m/{slug}/offers/{oid}/loi")
+def make_loi(slug: str, oid: int, body: LoiMakeIn, request: Request, conn: Conn) -> dict:
+    pid = require_offer(conn, slug, oid)["property_id"]
+    prop, _, cfg = queries.offer_basis(conn, slug, pid)
+    s = get_settings()
+    made = loi.generate(conn, s, loi.open_adapter(s), oid, prop, cfg, _actor(request), again=body.again)
+    return _offer_done(conn, slug, oid, made["message"])
+
+
+@router.put("/api/m/{slug}/offers/{oid}/status")
+def set_offer_stage(slug: str, oid: int, body: OfferStageIn, request: Request, conn: Conn) -> dict:
+    require_offer(conn, slug, oid)
+    offers.set_status(conn, oid, body.status, _actor(request))
+    return _offer_done(conn, slug, oid, "Offer moved to: " + offers.STATUS_LABELS[body.status] + ".")
 
 
 @router.post("/api/m/{slug}/properties/{pid}/people")

@@ -161,7 +161,7 @@ def _review(reason: str) -> NormalizedRent:
     return NormalizedRent(STATE_REVIEW, None, reason)
 
 
-def _usd(cents: int) -> str:
+def usd(cents: int) -> str:
     return f"${cents / 100:,.2f}".replace(".00", "")
 
 
@@ -219,7 +219,7 @@ def normalize(inp: RentInput) -> NormalizedRent:
     gap = None if other.annual_cents is None else abs(chosen.annual_cents - other.annual_cents)
     return NormalizedRent(chosen.state, chosen.annual_cents, formula=chosen.formula, used=chosen.used,
                           discrepancy_cents=gap,
-                          reason=None if not gap else f"The other figure differs by {_usd(gap)} a year.")
+                          reason=None if not gap else f"The other figure differs by {usd(gap)} a year.")
 
 
 # --- the Blue Moon price ---------------------------------------------------------------------------------
@@ -296,7 +296,7 @@ def prior_purchase(sale_cents: int | None, reference_cents: int | None, *, nomin
     if sale_cents is None:
         return out("The last sale price is not recorded.")
     if sale_cents < nominal_cents:
-        return out(f"The recorded sale ({_usd(sale_cents)}) looks like a nominal transfer, not a market price.")
+        return out(f"The recorded sale ({usd(sale_cents)}) looks like a nominal transfer, not a market price.")
     if bundled:
         return out("The sale was flagged as a bundled or portfolio sale, so its price says nothing about this property.")
     if reference_cents is None or reference_cents <= 0:

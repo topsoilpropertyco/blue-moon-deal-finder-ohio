@@ -8,11 +8,12 @@
 - Versions: a revised offer is a new version, allowed once the latest one has been sent. A sent version is final.
 - Sent: only an explicit record (how, when, by whom) makes an offer sent. A draft, a generated letter or a failed
   send never counts. `sent_via` tells a hand-marked send from one a mail provider reported.
-- Everything that happens is appended to offer_events. Responses, next actions and letters (offer_documents) hang
-  off the offer. Nothing here sends mail, writes legal wording or accepts an offer.
+- Everything that happens is appended to offer_events. Responses, next actions and letters (offer_documents, made in
+  Google Drive by bluemoon/loi) hang off the offer. Nothing here sends mail, writes legal wording or accepts an offer.
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from collections.abc import Mapping
 from datetime import date, timedelta
@@ -60,11 +61,18 @@ def _get(conn: sqlite3.Connection, offer_id: int) -> dict:
     return o
 
 
-def _unsent(conn: sqlite3.Connection, offer_id: int) -> dict:
+def unsent(conn: sqlite3.Connection, offer_id: int) -> dict:
     o = _get(conn, offer_id)
     if o["status"] == "sent":
         raise ValueError(f"Version {o['version']} was already sent, so it can't change. Prepare a revised offer instead.")
     return o
+
+
+def letter_hash(o: Mapping[str, Any]) -> str:
+    """What a letter is made from: the rent snapshot, the price, the seller and the recipient. A letter only counts
+    for an offer while this still matches, so a new price or recipient needs a new letter."""
+    parts = [o["snapshot_hash"], o["price_cents"], o["seller_name"], o["recipient_name"], o["recipient_contact"]]
+    return hashlib.sha256(dumps(parts).encode()).hexdigest()
 
 
 def _price(value: Any) -> int:
@@ -179,7 +187,7 @@ def refresh(conn: sqlite3.Connection, offer_id: int, prop: Mapping[str, Any], sn
             actor: str) -> dict:
     """Re-base an unsent draft on today's rent. A price that follows the default moves to the new 4x; a typed
     price stays. The seller and recipient are read again too."""
-    o = _unsent(conn, offer_id)
+    o = unsent(conn, offer_id)
     cents = _need_default(snap) if o["price_mode"] == "default" else o["price_cents"]
     recipient = _recipient(conn, o["property_id"])
     conn.execute(
@@ -198,7 +206,7 @@ def refresh(conn: sqlite3.Connection, offer_id: int, prop: Mapping[str, Any], sn
 def set_price(conn: sqlite3.Connection, offer_id: int, price: Any, actor: str) -> dict:
     """Type a price (a manual override), or pass None to go back to following the default (4x the rent in the
     offer's own snapshot; use refresh to pick up newer rent first)."""
-    o = _unsent(conn, offer_id)
+    o = unsent(conn, offer_id)
     if price in (None, ""):
         cents, mode = _need_default(loads(o["snapshot_json"], {}) or {}), "default"
     else:
@@ -213,14 +221,45 @@ def set_price(conn: sqlite3.Connection, offer_id: int, price: Any, actor: str) -
 def set_status(conn: sqlite3.Connection, offer_id: int, status: str, actor: str) -> dict:
     """Move an unsent offer along the chain. Letter stages need a letter made from the offer's current snapshot.
     'sent' is never set here: only mark_sent does that."""
-    o = _unsent(conn, offer_id)
+    o = unsent(conn, offer_id)
     if status not in STATUSES or status == "sent":
         raise ValueError("That is not a stage an offer can be moved to. Use Mark as sent to record a send.")
     if status in NEEDS_DOCUMENT and not one(conn, "SELECT id FROM offer_documents WHERE offer_id=? AND snapshot_hash=?",
-                                            (offer_id, o["snapshot_hash"])):
+                                            (offer_id, letter_hash(o))):
         raise ValueError("There is no LOI made from this offer's current numbers yet.")
     conn.execute("UPDATE offers SET status=?, updated_at=? WHERE id=?", (status, now_iso(), offer_id))
     _event(conn, offer_id, "status_changed", actor, from_status=o["status"], to_status=status)
+    conn.commit()
+    return _get(conn, offer_id)
+
+
+# --- the letter (made in Google Drive by bluemoon/loi) ----------------------------------------------------------
+
+def add_document(conn: sqlite3.Connection, offer_id: int, doc: Mapping[str, Any], actor: str) -> dict:
+    """Keep a letter made for this offer (template id and version, the ids and links of the Doc and the PDF),
+    tied to what it was made from. The offer becomes 'LOI generated'. Earlier letters stay on record."""
+    o = unsent(conn, offer_id)
+    stamp = now_iso()
+    cur = conn.execute(
+        "INSERT INTO offer_documents(offer_id, template_id, template_version, snapshot_hash, doc_id, doc_url, pdf_id, "
+        "pdf_url, created_by, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (offer_id, doc["template_id"], doc["template_version"], letter_hash(o), doc["doc_id"], doc["doc_url"],
+         doc["pdf_id"], doc["pdf_url"], actor, stamp))
+    conn.execute("UPDATE offers SET status='loi_generated', updated_at=? WHERE id=?", (stamp, offer_id))
+    _event(conn, offer_id, "document_generated", actor, document_id=cur.lastrowid, template_version=doc["template_version"],
+           snapshot_hash=letter_hash(o))
+    conn.commit()
+    return _get(conn, offer_id)
+
+
+def letter_note(conn: sqlite3.Connection, offer_id: int, kind: str, actor: str, *, status: str | None = None,
+                **detail: Any) -> dict:
+    """Write down that making the letter did not happen (kind 'document_blocked' with the offer's new stage, or
+    'failed'). A sent offer is never touched."""
+    o = unsent(conn, offer_id)
+    if status:
+        conn.execute("UPDATE offers SET status=?, updated_at=? WHERE id=?", (status, now_iso(), offer_id))
+    _event(conn, offer_id, kind, actor, from_status=o["status"], **detail)
     conn.commit()
     return _get(conn, offer_id)
 
@@ -231,7 +270,7 @@ def mark_sent(conn: sqlite3.Connection, offer_id: int, how: str, when: Any, acto
               via: str = "manual") -> dict:
     """Record that this version was sent (how: email | in person | mail; when: a day, today if blank). Adds the
     follow-up action. A second mark on the same version is refused, so a retry never double counts."""
-    o = _unsent(conn, offer_id)
+    o = unsent(conn, offer_id)
     if how not in SENT_HOW:
         raise ValueError(f"Say how it was sent: {', '.join(SENT_HOW)}.")
     if via not in SENT_VIA:
@@ -441,7 +480,8 @@ def _view(o: Mapping[str, Any], responses: list[dict], actions: list[dict], docs
     sent = None if o["status"] != "sent" else {
         "how": o["sent_how"], "on": o["sent_on"], "by": o["sent_by"], "via": o["sent_via"],
         "via_label": "Marked by hand" if o["sent_via"] == "manual" else "Reported by the mail provider"}
-    has_letter = any(d["snapshot_hash"] == o["snapshot_hash"] for d in docs)
+    current = letter_hash(o)
+    has_letter = any(d["snapshot_hash"] == current for d in docs)
     out = {
         "id": o["id"], "property_id": o["property_id"], "version": o["version"], "status": o["status"],
         "status_label": STATUS_LABELS[o["status"]], "origin": o["origin"], "incomplete_snapshot": bool(o["incomplete_snapshot"]),
@@ -456,6 +496,9 @@ def _view(o: Mapping[str, Any], responses: list[dict], actions: list[dict], docs
         "sent": sent, "counter": _counter(responses, annual),
         "responses": [{**r, "classification_label": CLASS_LABELS[r["classification"]]} for r in responses],
         "actions": actions, "next_action": _next_action(actions),
+        "documents": [{"id": d["id"], "template_version": d["template_version"], "doc_url": d["doc_url"],
+                       "pdf_url": d["pdf_url"], "created_by": d["created_by"], "created_at": d["created_at"],
+                       "current": d["snapshot_hash"] == current} for d in reversed(docs)],
         "readiness": {"template": {"ready": has_letter, "text": "LOI made" if has_letter else "LOI template needed"},
                       "recipient": {"ready": bool(o["recipient_name"]),
                                     "text": "Recipient chosen" if o["recipient_name"] else "Recipient needed"}},

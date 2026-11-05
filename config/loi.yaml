@@ -1,0 +1,32 @@
+# The offer letter (LOI) made from your master Google Doc.
+# The app never writes letter wording or terms. It copies your master, fills the {{tokens}} you put in it with the
+# values below, and saves a PDF. Which tokens exist is up to your master document; this file says what each one is
+# filled with.
+loi:
+  # token in the master document (written {{token}}) : what fills it.
+  # Change the left side to match your document, for example `buyer_offer: offer_price`.
+  # What can fill a token:
+  #   seller_name, seller_mailing_address   the owner of record (the seller entity)
+  #   recipient_name, recipient_contact      the person the offer is addressed to (can be a broker)
+  #   property_address, property_city, property_state, property_zip, property_county, property_apn,
+  #   property_full_address, property_units
+  #   offer_price, offer_date, offer_version
+  #   annual_rent                           the yearly rent the price is based on; leave it out unless your
+  #                                         letter really names it
+  # Blue Moon scores, screening numbers, the last sale price and your notes can't fill a token.
+  field_map:
+    seller_name: seller_name
+    seller_mailing_address: seller_mailing_address
+    recipient_name: recipient_name
+    recipient_contact: recipient_contact
+    property_address: property_address
+    property_city: property_city
+    property_state: property_state
+    property_zip: property_zip
+    property_county: property_county
+    property_apn: property_apn
+    property_full_address: property_full_address
+    property_units: property_units
+    offer_price: offer_price
+    offer_date: offer_date
+    offer_version: offer_version

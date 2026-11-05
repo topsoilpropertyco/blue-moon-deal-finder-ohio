@@ -222,6 +222,13 @@ async function render(key) {
   await fire(run, 'click', target(Element, {'data-ru': 'ph-go'}));
   out.runPhotosStarted = text(run);
 
+  // Settings: saving the LOI links and reading the template send the right requests and redraw the panel.
+  const se = await render('settings');
+  await fire(se, 'submit', Object.assign(new Element(), {elements: {template: {value: ' T '}, folder: {value: 'F'}}}));
+  await fire(se, 'click', new Element());
+  out.loiCalls = calls.filter((c) => c.key.includes('/api/loi'));
+  out.loiRedrawn = text(se);
+
   // A market with no properties: friendly empty states with a way to the Import screen.
   setMarket(fx.empty);
   for (const key of ['funnel', 'analytics', 'run', 'exports']) out['empty_' + key] = text(await render(key));
@@ -274,6 +281,7 @@ def fixtures(tmp_root, settings, sample_csv, monkeypatch, tmp_path) -> Path:
         for path in ("/api/sources", "/api/settings", "/api/health", f"/api/jobs?market={MARKET}&limit=10",
                      f"/api/m/{EMPTY}/funnel", f"/api/m/{EMPTY}/analytics"):
             get(path)
+        api["PUT /api/loi"] = api["POST /api/loi/check"] = get("/api/loi")
         markets = c.get("/api/markets").json()
         summaries = {slug: c.get(f"/api/m/{slug}/summary").json() for slug in (MARKET, EMPTY)}
         health = api["GET /api/health"]
@@ -417,10 +425,19 @@ def test_settings_shows_keys_as_yes_no_only(rendered):
     for text in ("Markets", "Buy box: Apartments", "20–50 units", "Studio $800", "GOOGLE_MAPS_API_KEY",
                  "Photo check", "Google free usage this month", "Where the data lives", "data/bluemoon.sqlite",
                  "How to change a setting", "open -e config.yaml", "launchctl kickstart",
-                 "Updates", "Version: <b>", "Last update: ", "uv run run.py autoupdate now"):
+                 "Updates", "Version: <b>", "Last update: ", "uv run run.py autoupdate now",
+                 "LOI template", "Google sign-in: needed", "Link to your master letter", "uv run run.py loi signin"):
         assert text in html, text
+    assert "data-loi-check disabled" in html                        # nothing to read until the links and sign-in are done
     assert FAKE_KEY not in html
     assert FAKE_KEY not in json.dumps(rendered)
+
+
+def test_the_loi_panel_saves_links_and_reads_the_template(rendered):
+    assert [(c["key"], c["body"]) for c in rendered["loiCalls"]] == [
+        ("PUT /api/loi", {"template": " T ", "folder": "F"}), ("POST /api/loi/check", None)]
+    assert "Links saved." in rendered["toasts"] and "Template read." in rendered["toasts"]
+    assert "Link to the Drive folder" in rendered["loiRedrawn"]
 
 
 def test_empty_market_points_to_import(rendered):

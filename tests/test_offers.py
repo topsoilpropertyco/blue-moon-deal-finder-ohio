@@ -223,7 +223,7 @@ def test_letter_stages_need_a_letter_made_from_the_current_numbers(conn):
     with pytest.raises(ValueError, match="no LOI made"):
         offers.set_status(conn, o["id"], "ready_for_review", "seth")
     conn.execute("INSERT INTO offer_documents(offer_id, template_id, snapshot_hash, created_by, created_at) VALUES(?,?,?,?,?)",
-                 (o["id"], "t", o["snapshot_hash"], "seth", now_iso()))
+                 (o["id"], "t", offers.letter_hash(o), "seth", now_iso()))
     conn.commit()
     assert offers.set_status(conn, o["id"], "ready_for_review", "seth")["status"] == "ready_for_review"
     assert offers.views(conn, [o])[0]["readiness"]["template"]["ready"] is True
