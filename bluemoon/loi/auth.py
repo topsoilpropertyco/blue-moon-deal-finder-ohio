@@ -130,7 +130,8 @@ def _wait_for_code(server: HTTPServer, state: str, timeout: float) -> str:
         got = getattr(server, "answer", None)
         if got is not None:
             if got.get("state") != [state]:
-                raise SignInError("The sign-in answer didn't match this request, so it was ignored. Try again.")
+                server.answer = None                         # not ours: ignore it and keep waiting
+                continue
             if "error" in got or "code" not in got:
                 raise SignInError("Google sign-in was cancelled or turned down. Run it again when ready.")
             return got["code"][0]

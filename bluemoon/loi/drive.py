@@ -11,6 +11,8 @@ from typing import Protocol
 
 import httpx
 
+from .auth import SignInError
+
 DRIVE = "https://www.googleapis.com/drive/v3"
 UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
 DOCS = "https://docs.googleapis.com/v1/documents"
@@ -67,9 +69,20 @@ class GoogleDrive:
             res = self.http.request(method, url, headers=headers, **kw)
         except httpx.HTTPError:
             raise DriveError("Couldn't reach Google. Check the internet connection and try again.") from None
+        except SignInError as exc:
+            raise DriveError(str(exc)) from None
         if res.status_code >= 400:
             raise DriveError(self._why(res))
         return res
+
+    def _json(self, res: httpx.Response) -> dict:
+        try:
+            j = res.json()
+            if not isinstance(j, dict) or not j.get("id"):
+                raise ValueError
+            return j
+        except ValueError:
+            raise DriveError("Google's answer wasn't readable. Try again.") from None
 
     @staticmethod
     def _why(res: httpx.Response) -> str:
@@ -87,7 +100,8 @@ class GoogleDrive:
 
     def describe(self, file_id: str) -> FileInfo:
         j = self._call("GET", f"{DRIVE}/files/{file_id}",
-                       params={"fields": "id,name,mimeType,version,modifiedTime", **SHARED}).json()
+                       params={"fields": "id,name,mimeType,version,modifiedTime", **SHARED})
+        j = self._json(j)
         return FileInfo(j["id"], j.get("name") or "", j.get("mimeType") or "", str(j.get("version") or ""),
                         j.get("modifiedTime") or "")
 
@@ -96,7 +110,8 @@ class GoogleDrive:
 
     def copy(self, file_id: str, title: str, folder_id: str) -> StoredFile:
         j = self._call("POST", f"{DRIVE}/files/{file_id}/copy", params={"fields": "id", **SHARED},
-                       json={"name": title, "parents": [folder_id]}).json()
+                       json={"name": title, "parents": [folder_id]})
+        j = self._json(j)
         return StoredFile(j["id"], doc_url(j["id"]))
 
     def replace_tokens(self, doc_id: str, replacements: Mapping[str, str]) -> None:
@@ -115,5 +130,6 @@ class GoogleDrive:
         body = (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{meta}\r\n"
                 f"--{boundary}\r\nContent-Type: application/pdf\r\n\r\n").encode() + data + f"\r\n--{boundary}--".encode()
         j = self._call("POST", UPLOAD, params={"uploadType": "multipart", "fields": "id", **SHARED}, content=body,
-                       headers={"Content-Type": f"multipart/related; boundary={boundary}"}).json()
+                       headers={"Content-Type": f"multipart/related; boundary={boundary}"})
+        j = self._json(j)
         return StoredFile(j["id"], pdf_url(j["id"]))

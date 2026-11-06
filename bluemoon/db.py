@@ -36,6 +36,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # who last added a person or changed their role, and when
     ("people", "edited_by", "TEXT"),
     ("people", "edited_at", "TEXT"),
+    # a fingerprint of the property facts a letter was filled from (address, county, units, mailing address...)
+    ("offer_documents", "facts_hash", "TEXT"),
 )
 # meta key: markets whose scores were saved before version 2. The dashboard re-scores each one once, so the
 # set-aside groups (scores.aside_buckets) exist. JSON list of market ids.
@@ -455,7 +457,7 @@ CREATE TABLE IF NOT EXISTS offer_documents (
   id INTEGER PRIMARY KEY,
   offer_id INTEGER NOT NULL REFERENCES offers(id) ON DELETE CASCADE,
   template_id TEXT NOT NULL, template_version TEXT,
-  snapshot_hash TEXT NOT NULL,
+  snapshot_hash TEXT NOT NULL, facts_hash TEXT,
   doc_id TEXT, doc_url TEXT, pdf_id TEXT, pdf_url TEXT,
   created_by TEXT NOT NULL, created_at TEXT NOT NULL
 );

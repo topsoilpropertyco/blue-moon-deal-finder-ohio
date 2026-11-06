@@ -78,6 +78,8 @@ def leftovers(text: str) -> list[str]:
 
 def _text(value: Any) -> str | None:
     s = " ".join((clean_str(value) or "").split())
+    if "{{" in s or "}}" in s:      # would be read as a field by the fill; treated as no value so it is blocked first
+        return None
     return s[:MAX_VALUE] or None
 
 

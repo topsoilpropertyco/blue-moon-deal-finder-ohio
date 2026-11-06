@@ -75,8 +75,7 @@ def _check_ready(conn: sqlite3.Connection, o: Mapping[str, Any]) -> dict:
                          "is Ready to send.")
     if not o["recipient_contact"] or not o["recipient_contact"].startswith("email:"):
         raise ValueError("The recipient needs an email address before this can be sent by email.")
-    doc = one(conn, "SELECT * FROM offer_documents WHERE offer_id = ? AND snapshot_hash = ? ORDER BY id DESC LIMIT 1",
-              (o["id"], offers.letter_hash(o)))
+    doc = offers.current_document(conn, o)
     if not doc:
         raise ValueError("There is no letter made from this offer's current numbers. Make the LOI first.")
     # The recipient is re-read: a contact or name marked wrong or do-not-contact after the draft was made is not used.

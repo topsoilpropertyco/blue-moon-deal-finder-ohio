@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -19,6 +20,7 @@ import httpx
 from .. import offers
 from ..config import Settings
 from ..db import dumps, loads, now_iso, one
+from ..db import rows as db_rows
 from ..pricing import PricingConfig
 from . import auth, fields
 from .drive import DOC_MIME, FOLDER_MIME, DriveAdapter, DriveError, FileInfo, GoogleDrive, StoredFile, doc_url
@@ -162,24 +164,37 @@ def _title(address: str | None, offer: Mapping[str, Any], cfg: PricingConfig) ->
     return f"LOI - {address or 'address unknown'} - {cfg.today().isoformat()} v{offer['version']}"[:200]
 
 
+_LOCKS: dict[int, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
 def generate(conn: sqlite3.Connection, settings: Settings, adapter: DriveAdapter | None, offer_id: int,
              prop: Mapping[str, Any], cfg: PricingConfig, actor: str, *, again: bool = False) -> dict:
     """Make the letter for an unsent offer. Returns {result, message}: generated, exists (already made from these
     numbers, so no second copy unless `again`), template_needed or fields_missing (nothing was made in Drive).
     A Google failure is written to the offer's history and raised."""
+    with _LOCKS_GUARD:
+        lock = _LOCKS.setdefault(offer_id, threading.Lock())
+    with lock:          # one letter at a time per offer: a double click waits, then finds the letter already made
+        return _generate(conn, settings, adapter, offer_id, prop, cfg, actor, again=again)
+
+
+def _generate(conn: sqlite3.Connection, settings: Settings, adapter: DriveAdapter | None, offer_id: int,
+              prop: Mapping[str, Any], cfg: PricingConfig, actor: str, *, again: bool) -> dict:
     o = offers.unsent(conn, offer_id)
     reasons = blockers(conn, settings, adapter is not None)
     if adapter is None or reasons:
         offers.letter_note(conn, offer_id, "document_blocked", actor, status="loi_template_needed", reasons=reasons)
         return {"result": "template_needed", "message": "LOI template needed. " + " ".join(reasons)}
     h = offers.letter_hash(o)          # what this letter is made from; checked again when it is saved
+    fh = offers.facts_hash(conn, o)
     state = load(conn)
     fmap = fields.load_map(settings.loi)
     made: dict[str, str] = {}
     try:
         info, tokens = _read_template(adapter, state["template_id"])
-        if not again and one(conn, "SELECT id FROM offer_documents WHERE offer_id=? AND snapshot_hash=? AND "
-                                   "template_version=?", (offer_id, offers.letter_hash(o), info.version)):
+        if not again and any(d["template_version"] == info.version and offers.document_matches(d, o, fh) for d in
+                             db_rows(conn, "SELECT * FROM offer_documents WHERE offer_id=?", (offer_id,))):
             if o["status"] not in offers.NEEDS_DOCUMENT:
                 offers.set_status(conn, offer_id, "loi_generated", actor)
             return {"result": "exists", "message": "A letter was already made from these numbers. Nothing new was "
@@ -209,6 +224,6 @@ def generate(conn: sqlite3.Connection, settings: Settings, adapter: DriveAdapter
         raise
     offers.add_document(conn, offer_id, {"template_id": state["template_id"], "template_version": info.version,
                                          "doc_id": copy.id, "doc_url": copy.url, "pdf_id": pdf.id, "pdf_url": pdf.url},
-                        actor, expected_hash=h)
+                        actor, expected_hash=h, expected_facts=fh)
     return {"result": "generated", "message": "LOI made. The Doc and the PDF are in your Drive folder. Read it through "
                                               "before you mark it ready."}

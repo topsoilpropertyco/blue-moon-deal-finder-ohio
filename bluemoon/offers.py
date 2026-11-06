@@ -94,6 +94,31 @@ def letter_hash(o: Mapping[str, Any]) -> str:
     return hashlib.sha256(dumps(parts).encode()).hexdigest()
 
 
+def facts_hash(conn: sqlite3.Connection, o: Mapping[str, Any]) -> str:
+    """A fingerprint of the property facts a letter is filled with (address, county, APN, units, mailing address,
+    contact), not the date. A correction to any of them makes an earlier letter out of date."""
+    from .loi import fields                      # late import: bluemoon.loi imports this module
+    prop = one(conn, "SELECT * FROM properties WHERE id=?", (o["property_id"],)) or {}
+    filled = fields.values(conn, prop, o, date(2000, 1, 1))
+    filled.pop("offer_date", None)
+    return hashlib.sha256(dumps(filled).encode()).hexdigest()
+
+
+def document_matches(d: Mapping[str, Any], o: Mapping[str, Any], facts: str) -> bool:
+    """A letter counts when it was made from this offer's numbers and its property facts (a letter kept before
+    facts were recorded has none and is judged on the numbers alone)."""
+    return d["snapshot_hash"] == letter_hash(o) and (d.get("facts_hash") is None or d["facts_hash"] == facts)
+
+
+def current_document(conn: sqlite3.Connection, o: Mapping[str, Any]) -> dict | None:
+    """The newest letter that still matches the offer, or None."""
+    facts = facts_hash(conn, o)
+    for d in rows(conn, "SELECT * FROM offer_documents WHERE offer_id=? ORDER BY id DESC", (o["id"],)):
+        if document_matches(d, o, facts):
+            return d
+    return None
+
+
 def parse_price(value: Any) -> int:
     try:
         cents = pricing.to_cents(value, "price")
@@ -246,8 +271,7 @@ def set_status(conn: sqlite3.Connection, offer_id: int, status: str, actor: str)
     o = unsent(conn, offer_id)
     if status not in STATUSES or status == "sent":
         raise ValueError("That is not a stage an offer can be moved to. Use Mark as sent to record a send.")
-    if status in NEEDS_DOCUMENT and not one(conn, "SELECT id FROM offer_documents WHERE offer_id=? AND snapshot_hash=?",
-                                            (offer_id, letter_hash(o))):
+    if status in NEEDS_DOCUMENT and not current_document(conn, o):
         raise ValueError("There is no LOI made from this offer's current numbers yet.")
     if status in NEEDS_DOCUMENT and status != o["status"] and status not in STATUS_EDGES.get(o["status"], ()):
         raise ValueError(f"A version that is '{STATUS_LABELS[o['status']]}' can't move straight to "
@@ -263,11 +287,13 @@ def set_status(conn: sqlite3.Connection, offer_id: int, status: str, actor: str)
 # --- the letter (made in Google Drive by bluemoon/loi) ----------------------------------------------------------
 
 def add_document(conn: sqlite3.Connection, offer_id: int, doc: Mapping[str, Any], actor: str, *,
-                 expected_hash: str | None = None) -> dict:
+                 expected_hash: str | None = None, expected_facts: str | None = None) -> dict:
     """Keep a letter made for this offer (template id and version, the ids and links of the Doc and the PDF),
     tied to what it was made from. The offer becomes 'LOI generated'. Earlier letters stay on record."""
     o = unsent(conn, offer_id)
-    if expected_hash is not None and letter_hash(o) != expected_hash:
+    facts = facts_hash(conn, o)
+    if (expected_hash is not None and letter_hash(o) != expected_hash) or \
+            (expected_facts is not None and facts != expected_facts):
         # The numbers changed while the letter was being made, so it does not match this offer and is not kept.
         _event(conn, offer_id, "document_stale", actor, doc_id=doc.get("doc_id"), pdf_id=doc.get("pdf_id"))
         conn.commit()
@@ -275,10 +301,10 @@ def add_document(conn: sqlite3.Connection, offer_id: int, doc: Mapping[str, Any]
                          "Make the LOI again.")
     stamp = now_iso()
     cur = conn.execute(
-        "INSERT INTO offer_documents(offer_id, template_id, template_version, snapshot_hash, doc_id, doc_url, pdf_id, "
-        "pdf_url, created_by, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (offer_id, doc["template_id"], doc["template_version"], expected_hash or letter_hash(o), doc["doc_id"], doc["doc_url"],
-         doc["pdf_id"], doc["pdf_url"], actor, stamp))
+        "INSERT INTO offer_documents(offer_id, template_id, template_version, snapshot_hash, facts_hash, doc_id, "
+        "doc_url, pdf_id, pdf_url, created_by, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (offer_id, doc["template_id"], doc["template_version"], expected_hash or letter_hash(o), expected_facts or facts,
+         doc["doc_id"], doc["doc_url"], doc["pdf_id"], doc["pdf_url"], actor, stamp))
     conn.execute("UPDATE offers SET status='loi_generated', updated_at=? WHERE id=?", (stamp, offer_id))
     _event(conn, offer_id, "document_generated", actor, document_id=cur.lastrowid, template_version=doc["template_version"],
            snapshot_hash=letter_hash(o))
@@ -291,7 +317,7 @@ def letter_note(conn: sqlite3.Connection, offer_id: int, kind: str, actor: str, 
     """Write down that making the letter did not happen (kind 'document_blocked' with the offer's new stage, or
     'failed'). A sent offer is never touched."""
     o = unsent(conn, offer_id)
-    if status:
+    if status and not current_document(conn, o):      # an offer that still has a matching letter keeps its stage
         conn.execute("UPDATE offers SET status=?, updated_at=? WHERE id=?", (status, now_iso(), offer_id))
     _event(conn, offer_id, kind, actor, from_status=o["status"], **detail)
     conn.commit()
@@ -511,14 +537,14 @@ def _next_action(actions: list[dict]) -> dict | None:
 
 
 def _view(o: Mapping[str, Any], responses: list[dict], actions: list[dict], docs: list[dict], sends: list[dict],
-          events: list[dict] | None, current_hash: str | None) -> dict:
+          events: list[dict] | None, current_hash: str | None, facts: str = "") -> dict:
     snap = loads(o["snapshot_json"], {}) or {}
     annual = snap.get("annual_cents")
     sent = None if o["status"] != "sent" else {
         "how": o["sent_how"], "on": o["sent_on"], "by": o["sent_by"], "via": o["sent_via"],
         "via_label": "Marked by hand" if o["sent_via"] == "manual" else "Reported by the mail provider"}
     current = letter_hash(o)
-    has_letter = any(d["snapshot_hash"] == current for d in docs)
+    has_letter = any(document_matches(d, o, facts) for d in docs)
     out = {
         "id": o["id"], "property_id": o["property_id"], "version": o["version"], "status": o["status"],
         "status_label": STATUS_LABELS[o["status"]], "origin": o["origin"], "incomplete_snapshot": bool(o["incomplete_snapshot"]),
@@ -535,7 +561,7 @@ def _view(o: Mapping[str, Any], responses: list[dict], actions: list[dict], docs
         "actions": actions, "next_action": _next_action(actions),
         "documents": [{"id": d["id"], "template_version": d["template_version"], "doc_url": d["doc_url"],
                        "pdf_url": d["pdf_url"], "created_by": d["created_by"], "created_at": d["created_at"],
-                       "current": d["snapshot_hash"] == current} for d in reversed(docs)],
+                       "current": document_matches(d, o, facts)} for d in reversed(docs)],
         "sends": [{"id": x["id"], "state": x["state"], "state_label": SEND_STATE_LABELS[x["state"]],
                    "transport": x["transport"], "recipient_name": x["recipient_name"],
                    "recipient_contact": x["recipient_contact"], "error": x["error"], "created_by": x["created_by"],
@@ -569,7 +595,8 @@ def views(conn: sqlite3.Connection, offers: list[dict], current_hashes: Mapping[
     evs = _children(conn, offers, "offer_events", "id DESC") if events else {}
     hashes = current_hashes or {}
     return [_view(o, resp.get(o["id"], []), acts.get(o["id"], []), docs.get(o["id"], []), sends.get(o["id"], []),
-                  evs.get(o["id"], []) if events else None, hashes.get(o["property_id"])) for o in offers]
+                  evs.get(o["id"], []) if events else None, hashes.get(o["property_id"]),
+                  facts_hash(conn, o) if docs.get(o["id"]) else "") for o in offers]
 
 
 def property_block(conn: sqlite3.Connection, pid: int, snap: Mapping[str, Any]) -> dict:

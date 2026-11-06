@@ -396,16 +396,25 @@ def test_sign_in_trades_the_code_for_a_private_token_and_prints_no_token(setting
         httpx.get(q["redirect_uri"], params={"code": "bad", "state": "other"})              # an answer for another request
 
     http = httpx.Client(transport=httpx.MockTransport(token_service))
-    with pytest.raises(auth.SignInError, match="didn't match"):
-        auth.sign_in(settings, http=http, open_page=browser, timeout=5)
+    with pytest.raises(auth.SignInError, match="in time"):           # the stray answer is ignored, not fatal
+        auth.sign_in(settings, http=http, open_page=browser, timeout=2)
     assert not auth.signed_in(settings)
+
+    def browser_stray_first(url: str) -> None:
+        q = httpx.URL(url).params
+        httpx.get(q["redirect_uri"], params={"code": "bad", "state": "other"})
+        httpx.get(q["redirect_uri"], params={"code": "real-code", "state": q["state"]})
+
+    auth.sign_in(settings, http=http, open_page=browser_stray_first, timeout=5)
+    assert auth.signed_in(settings) and posted[-1]["code"] == "real-code"
+    auth.token_path(settings).unlink()
 
     def browser_ok(url: str) -> None:
         q = httpx.URL(url).params
         httpx.get(q["redirect_uri"], params={"code": "the-code", "state": q["state"]})
 
     auth.sign_in(settings, http=http, open_page=browser_ok, timeout=5)
-    assert auth.signed_in(settings) and posted[0]["code"] == "the-code" and posted[0]["code_verifier"]
+    assert auth.signed_in(settings) and posted[-1]["code"] == "the-code" and posted[-1]["code_verifier"]
     assert (auth.token_path(settings).stat().st_mode & 0o777) == 0o600
     shown = capsys.readouterr()
     assert REFRESH not in shown.out + shown.err and "ACCESS" not in shown.out.replace("access_type", "")
@@ -550,3 +559,85 @@ def test_the_one_sign_in_server_thread_does_not_leak(settings):
         auth.sign_in(settings, http=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500))),
                      open_page=lambda url: None, timeout=0.2, say=lambda text: None)
     assert threading.active_count() <= before + 1
+
+
+# --- review fixes (drive) --------------------------------------------------------------------------------------
+
+def test_a_price_changed_while_the_letter_is_made_means_the_letter_is_not_kept(conn, settings):
+    pid, o = draft(conn)
+    drive = configure(conn)
+    real = drive.replace_tokens
+
+    def edit_midway(doc_id, replacements):
+        offers.set_price(conn, o["id"], "1700000", "seth")           # someone types a new price during the fill
+        real(doc_id, replacements)
+
+    drive.replace_tokens = edit_midway
+    with pytest.raises(ValueError, match="changed while the letter was being made"):
+        make(conn, settings, drive, pid, o["id"])
+    assert scalar(conn, "SELECT COUNT(*) FROM offer_documents") == 0
+    assert status_of(conn, o["id"]) == "internal_draft" and "document_stale" in events(conn, o["id"])
+    with pytest.raises(ValueError, match="no LOI"):
+        offers.set_status(conn, o["id"], "loi_generated", "seth")
+
+
+def test_correcting_the_address_after_the_letter_makes_it_out_of_date(conn, settings):
+    pid, o = draft(conn)
+    drive = configure(conn)
+    make(conn, settings, drive, pid, o["id"])
+    offers.set_status(conn, o["id"], "ready_for_review", "seth")
+    conn.execute("UPDATE properties SET address='99 CORRECTED RD', zip='45502' WHERE id=?", (pid,))
+    conn.commit()
+    assert not offers.current_document(conn, offers._get(conn, o["id"]))
+    with pytest.raises(ValueError, match="no LOI"):
+        offers.set_status(conn, o["id"], "ready_to_send", "seth")
+    assert make(conn, settings, drive, pid, o["id"])["result"] == "generated"       # not 'exists': a new copy is made
+    offers.set_status(conn, o["id"], "ready_for_review", "seth")
+
+
+def test_a_blocked_attempt_does_not_downgrade_an_offer_with_a_matching_letter(conn, settings):
+    pid, o = draft(conn)
+    drive = configure(conn)
+    make(conn, settings, drive, pid, o["id"])
+    offers.set_status(conn, o["id"], "ready_for_review", "seth")
+    out = make(conn, settings, None, pid, o["id"], again=True)                 # sign-in lapsed
+    assert out["result"] == "template_needed"
+    assert status_of(conn, o["id"]) == "ready_for_review" and "document_blocked" in events(conn, o["id"])
+
+
+def test_a_second_click_waits_and_finds_the_letter_already_made(conn, settings):
+    pid, o = draft(conn)
+    drive = configure(conn)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(make(conn, settings, drive, pid, o["id"])["result"]))
+               for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == ["exists", "generated"]
+    assert len([c for c in drive.calls if c[0] == "copy"]) == 1
+
+
+def test_a_value_with_braces_is_blocked_before_any_copy(conn, settings):
+    pid = add_prop(conn, owner_name="{{offer_price}} HOLDINGS")
+    napkin.add_record(conn, pid, source="manual", basis="scheduled", actor="seth", total="34240", total_period="monthly")
+    o = offers.prepare(conn, prop_of(conn, pid), snap(conn, pid), "seth")
+    drive = configure(conn)
+    out = make(conn, settings, drive, pid, o["id"])
+    assert out["result"] == "fields_missing" and "seller_name" in out["message"]
+    assert not [c for c in drive.calls if c[0] == "copy"]
+
+
+def test_unreadable_google_answers_and_a_lapsed_sign_in_become_drive_errors():
+    http = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, text="<html>proxy</html>")))
+    with pytest.raises(DriveError, match="wasn't readable"):
+        GoogleDrive(http, lambda: "tok").copy("a", "t", "f")
+    with pytest.raises(DriveError, match="wasn't readable"):
+        GoogleDrive(httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))),
+                    lambda: "tok").describe("a")
+
+    def lapsed() -> str:
+        raise auth.SignInError("Google sign-in needed.")
+    with pytest.raises(DriveError, match="sign-in needed"):
+        GoogleDrive(http, lapsed).describe("a")
