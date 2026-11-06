@@ -225,9 +225,18 @@ def test_letter_stages_need_a_letter_made_from_the_current_numbers(conn):
     conn.execute("INSERT INTO offer_documents(offer_id, template_id, snapshot_hash, created_by, created_at) VALUES(?,?,?,?,?)",
                  (o["id"], "t", offers.letter_hash(o), "seth", now_iso()))
     conn.commit()
+    offers.set_status(conn, o["id"], "loi_generated", "seth")
     assert offers.set_status(conn, o["id"], "ready_for_review", "seth")["status"] == "ready_for_review"
     assert offers.views(conn, [o])[0]["readiness"]["template"]["ready"] is True
     assert offers.set_status(conn, o["id"], "loi_template_needed", "seth")["status"] == "loi_template_needed"
+    offers.set_status(conn, o["id"], "loi_generated", "seth")
+    offers.set_status(conn, o["id"], "ready_for_review", "seth")
+    with pytest.raises(ValueError, match="recipient"):                        # no recipient chosen yet
+        offers.set_status(conn, o["id"], "ready_to_send", "seth")
+    conn.execute("UPDATE offers SET recipient_name='Bea Broker' WHERE id=?", (o["id"],))
+    conn.execute("INSERT INTO offer_documents(offer_id, template_id, snapshot_hash, created_by, created_at) VALUES(?,?,?,?,?)",
+                 (o["id"], "t", offers.letter_hash(offers._get(conn, o["id"])), "seth", now_iso()))
+    conn.commit()
     offers.set_status(conn, o["id"], "ready_to_send", "seth")
     offers.set_price(conn, o["id"], "1,500,000", "seth")                      # the letter no longer matches
     assert one(conn, "SELECT status FROM offers WHERE id=?", (o["id"],))["status"] == "internal_draft"

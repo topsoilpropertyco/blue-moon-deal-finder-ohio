@@ -178,6 +178,7 @@ def test_a_new_price_needs_a_new_letter_and_a_changed_master_gets_a_new_copy(con
     pid, o = draft(conn)
     drive = configure(conn)
     make(conn, settings, drive, pid, o["id"])
+    offers.set_status(conn, o["id"], "ready_for_review", "seth")
     offers.set_status(conn, o["id"], "ready_to_send", "seth")
     offers.set_price(conn, o["id"], "1,700,000", "seth")
     assert status_of(conn, o["id"]) == "internal_draft"

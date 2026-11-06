@@ -74,6 +74,11 @@ def ready(conn, pid=None, with_recipient=True) -> dict:
         recipient(conn, pid)
     o = offers.prepare(conn, prop_of(conn, pid), snap(conn, pid), "seth")
     offers.add_document(conn, o["id"], DOC, "seth")
+    if not with_recipient:       # a hand-made state: the chain itself refuses ready_to_send without a recipient
+        conn.execute("UPDATE offers SET status='ready_to_send' WHERE id=?", (o["id"],))
+        conn.commit()
+        return one(conn, "SELECT * FROM offers WHERE id=?", (o["id"],))
+    offers.set_status(conn, o["id"], "ready_for_review", "seth")
     return offers.set_status(conn, o["id"], "ready_to_send", "seth")
 
 
@@ -283,3 +288,113 @@ def test_a_reply_after_marking_sent_keeps_its_words_range_and_category_and_leave
     view = offers.views(conn, [one(conn, "SELECT * FROM offers WHERE id=?", (o["id"],))])[0]
     assert view["price_cents"] == o["price_cents"] and view["counter"]["low_cents"] == 190000000
     assert view["next_action"]["text"] == offers.FOLLOW_UP_TEXT           # the next action stays visible
+
+
+# --- review fixes (offers): races, key, stale recipient, stage chain ---------------------------------------------
+
+def test_a_second_mark_sent_from_a_stale_read_is_refused_and_adds_nothing(conn, monkeypatch):
+    o = ready(conn)
+    stale = dict(o)
+    offers.mark_sent(conn, o["id"], "email", None, "seth", CFG)
+    monkeypatch.setattr(offers, "unsent", lambda c, i: stale)          # the second request read it before the first wrote
+    with pytest.raises(ValueError, match="already sent"):
+        offers.mark_sent(conn, o["id"], "in person", None, "other", CFG)
+    assert scalar(conn, "SELECT COUNT(*) FROM offer_actions WHERE offer_id=?", (o["id"],)) == 1
+    assert scalar(conn, "SELECT COUNT(*) FROM offer_events WHERE offer_id=? AND kind='marked_sent'", (o["id"],)) == 1
+    assert one(conn, "SELECT sent_by, sent_how FROM offers WHERE id=?", (o["id"],)) == {"sent_by": "seth", "sent_how": "email"}
+
+
+def test_losing_the_claim_on_a_first_send_is_a_duplicate_not_a_crash(conn, tmp_path, monkeypatch):
+    o = ready(conn)
+    t = outbox(tmp_path)
+    first = sending.send_offer(conn, o["id"], t, "seth")
+    real = sending.one
+    seen = []
+    monkeypatch.setattr(sending, "one", lambda c, q, p=(): None if "offer_sends WHERE intent_key" in q and not seen.append(1) and len(seen) == 1 else real(c, q, p))
+    again = sending.send_offer(conn, o["id"], t, "seth")                # its read saw nothing, its insert hits the key
+    assert again["duplicate"] and again["send_id"] == first["send_id"]
+    assert scalar(conn, "SELECT COUNT(*) FROM offer_sends") == 1
+
+
+def test_losing_the_claim_on_a_retry_does_not_submit_twice(conn, tmp_path, monkeypatch):
+    o = ready(conn)
+    sending.send_offer(conn, o["id"], Down(), "seth")
+    failed_row = one(conn, "SELECT * FROM offer_sends")
+    t = outbox(tmp_path)
+    assert sending.send_offer(conn, o["id"], t, "seth")["state"] == "submitted"     # the winner
+    real = sending.one
+    monkeypatch.setattr(sending, "one", lambda c, q, p=(): failed_row if "offer_sends WHERE intent_key" in q else real(c, q, p))
+    calls = []
+    t.submit = lambda key, message: calls.append(key) or ("submitted", "x.json")
+    late = sending.send_offer(conn, o["id"], t, "seth")                 # it still saw 'failed'
+    assert late["duplicate"] and not calls
+    assert scalar(conn, "SELECT state FROM offer_sends") == "submitted"
+
+
+def test_a_corrected_letter_on_the_same_version_is_sent_again(conn, tmp_path):
+    o = ready(conn)
+    t = outbox(tmp_path)
+    assert sending.send_offer(conn, o["id"], t, "seth")["state"] == "submitted"
+    offers.set_price(conn, o["id"], "1,000,000", "seth")
+    offers.add_document(conn, o["id"], DOC, "seth")
+    offers.set_status(conn, o["id"], "ready_for_review", "seth")
+    offers.set_status(conn, o["id"], "ready_to_send", "seth")
+    again = sending.send_offer(conn, o["id"], t, "seth")
+    assert not again["duplicate"] and again["state"] == "submitted"
+    assert scalar(conn, "SELECT COUNT(*) FROM offer_sends") == 2
+
+
+@pytest.mark.parametrize("status", ["wrong", "dnc"])
+def test_a_contact_marked_wrong_after_the_draft_is_not_sent_to(conn, tmp_path, status):
+    o = ready(conn)
+    conn.execute("UPDATE contact_points SET status=? WHERE id=?", (status, o["recipient_contact_id"]))
+    conn.commit()
+    with pytest.raises(ValueError, match="Choose a new recipient"):
+        sending.send_offer(conn, o["id"], outbox(tmp_path), "seth")
+    assert scalar(conn, "SELECT COUNT(*) FROM offer_sends") == 0
+
+
+def test_a_person_marked_wrong_after_the_draft_is_not_sent_to(conn, tmp_path):
+    o = ready(conn)
+    conn.execute("UPDATE people SET role='rejected' WHERE id=?", (o["recipient_person_id"],))
+    conn.commit()
+    with pytest.raises(ValueError, match="Choose a new recipient"):
+        sending.send_offer(conn, o["id"], outbox(tmp_path), "seth")
+
+
+def test_the_stage_chain_goes_one_step_at_a_time_and_needs_a_recipient(conn):
+    pid = add_prop(conn)
+    napkin.add_record(conn, pid, source="manual", basis="scheduled", actor="seth", total="34240", total_period="monthly")
+    o = offers.prepare(conn, prop_of(conn, pid), snap(conn, pid), "seth")
+    offers.add_document(conn, o["id"], DOC, "seth")
+    with pytest.raises(ValueError, match="one stage at a time"):
+        offers.set_status(conn, o["id"], "ready_to_send", "seth")
+    offers.set_status(conn, o["id"], "ready_for_review", "seth")
+    with pytest.raises(ValueError, match="recipient"):
+        offers.set_status(conn, o["id"], "ready_to_send", "seth")
+
+
+def test_a_letter_made_for_old_numbers_is_not_kept_when_the_offer_changed_meanwhile(conn):
+    o = ready(conn)
+    h = offers.letter_hash(o)
+    offers.set_price(conn, o["id"], "1,000,000", "seth")                # Seth changed the price while Drive worked
+    with pytest.raises(ValueError, match="changed while the letter was being made"):
+        offers.add_document(conn, o["id"], DOC, "seth", expected_hash=h)
+    assert scalar(conn, "SELECT COUNT(*) FROM offer_documents WHERE offer_id=? AND snapshot_hash=?",
+                  (o["id"], offers.letter_hash(offers._get(conn, o["id"])))) == 0
+    assert "document_stale" in kinds(conn, o["id"])
+    assert one(conn, "SELECT status FROM offers WHERE id=?", (o["id"],))["status"] == "internal_draft"
+
+
+def test_recording_an_earlier_offer_does_not_hide_an_open_draft(conn):
+    from bluemoon import offer_batches
+    pid = add_prop(conn)
+    napkin.add_record(conn, pid, source="manual", basis="scheduled", actor="seth", total="34240", total_period="monthly")
+    draft = offers.prepare(conn, prop_of(conn, pid), snap(conn, pid), "seth")
+    offers.record_historical(conn, prop_of(conn, pid), "seth", CFG, price="900,000", how="email", sent_on="2026-10-01")
+    with pytest.raises(ValueError, match="still a draft"):
+        offers.prepare(conn, prop_of(conn, pid), snap(conn, pid), "seth")
+    assert offers.property_block(conn, pid, snap(conn, pid))["can_prepare"] is False
+    row = offer_batches.assess(conn, pid, lambda p: (prop_of(conn, p), snap(conn, p)))
+    assert not row["can_prepare"] and any(f["key"] == "draft_exists" for f in row["flags"])
+    assert one(conn, "SELECT status FROM offers WHERE id=?", (draft["id"],))["status"] == "internal_draft"

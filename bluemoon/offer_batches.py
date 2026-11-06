@@ -43,8 +43,8 @@ def assess(conn: sqlite3.Connection, pid: int, basis: Basis) -> dict:
     except KeyError:
         return {"property_id": pid, "address": None, "city": None, "can_prepare": False,
                 "flags": [_flag("not_found", "This property is not in this market.", True)]}
-    latest = one(conn, "SELECT version, status FROM offers WHERE property_id = ? AND intent = 'loi' "
-                       "ORDER BY version DESC LIMIT 1", (pid,))
+    latest = offers.open_draft(conn, pid) or one(conn, "SELECT version, status FROM offers WHERE property_id = ? "
+                                                       "AND intent = 'loi' ORDER BY version DESC LIMIT 1", (pid,))
     default = offers.default_cents(snap)
     flags = []
     if default is None:
@@ -93,8 +93,7 @@ def _prepare_row(conn: sqlite3.Connection, row: Mapping[str, Any], basis: Basis,
     pid = row["property_id"]
     try:
         prop, snap = basis(pid)
-        latest = one(conn, "SELECT id, version, status FROM offers WHERE property_id = ? AND intent = 'loi' "
-                           "ORDER BY version DESC LIMIT 1", (pid,))
+        latest = offers.open_draft(conn, pid)
         if latest and latest["status"] != "sent":
             _set(conn, row["id"], "existing", latest["id"],
                  f"Version {latest['version']} was already a draft, so no second offer was made.")

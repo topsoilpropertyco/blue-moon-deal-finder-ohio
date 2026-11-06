@@ -33,6 +33,13 @@ STATUS_LABELS = {
     "required_fields_missing": "Required fields missing", "loi_generated": "LOI generated",
     "ready_for_review": "Ready for review", "ready_to_send": "Ready to send", "sent": "Sent",
 }
+# Forward steps are one at a time; stepping back is always fine. The letter stages still need a letter.
+STATUS_EDGES = {
+    "internal_draft": ("loi_generated",), "loi_template_needed": ("loi_generated",),
+    "required_fields_missing": ("loi_generated",), "loi_generated": ("ready_for_review", "internal_draft"),
+    "ready_for_review": ("ready_to_send", "loi_generated", "internal_draft"),
+    "ready_to_send": ("ready_for_review", "loi_generated", "internal_draft"),
+}
 NEEDS_DOCUMENT = STATUSES[3:6]          # these only make sense once a letter was made from the current snapshot
 SENT_HOW = ("email", "in person", "mail")
 SENT_VIA = ("manual", "provider")
@@ -72,6 +79,12 @@ def unsent(conn: sqlite3.Connection, offer_id: int) -> dict:
     if o["status"] == "sent":
         raise ValueError(f"Version {o['version']} was already sent, so it can't change. Prepare a revised offer instead.")
     return o
+
+
+def open_draft(conn: sqlite3.Connection, property_id: int) -> dict | None:
+    """The property's unsent offer, if any (whatever its version number: a later hand-entered offer must not hide it)."""
+    return one(conn, "SELECT id, version, status FROM offers WHERE property_id=? AND intent='loi' AND status != 'sent' "
+                     "ORDER BY version DESC LIMIT 1", (property_id,))
 
 
 def letter_hash(o: Mapping[str, Any]) -> str:
@@ -166,8 +179,9 @@ def prepare(conn: sqlite3.Connection, prop: Mapping[str, Any], snap: Mapping[str
     pid = int(prop["id"])
     latest = one(conn, "SELECT id, version, status FROM offers WHERE property_id=? AND intent='loi' "
                        "ORDER BY version DESC LIMIT 1", (pid,))
-    if latest and latest["status"] != "sent":
-        raise ValueError(f"Version {latest['version']} is still a draft. Change or refresh it, or mark it sent "
+    draft = open_draft(conn, pid)
+    if draft:
+        raise ValueError(f"Version {draft['version']} is still a draft. Change or refresh it, or mark it sent "
                          "before preparing a revised offer.")
     cents, mode = (parse_price(price), "override") if price not in (None, "") else (_need_default(snap), "default")
     version = (latest["version"] + 1) if latest else 1
@@ -235,6 +249,11 @@ def set_status(conn: sqlite3.Connection, offer_id: int, status: str, actor: str)
     if status in NEEDS_DOCUMENT and not one(conn, "SELECT id FROM offer_documents WHERE offer_id=? AND snapshot_hash=?",
                                             (offer_id, letter_hash(o))):
         raise ValueError("There is no LOI made from this offer's current numbers yet.")
+    if status in NEEDS_DOCUMENT and status != o["status"] and status not in STATUS_EDGES.get(o["status"], ()):
+        raise ValueError(f"A version that is '{STATUS_LABELS[o['status']]}' can't move straight to "
+                         f"'{STATUS_LABELS[status]}'. Go one stage at a time.")
+    if status == "ready_to_send" and not o["recipient_name"]:
+        raise ValueError("Choose a recipient (and refresh the offer) before it is Ready to send.")
     conn.execute("UPDATE offers SET status=?, updated_at=? WHERE id=?", (status, now_iso(), offer_id))
     _event(conn, offer_id, "status_changed", actor, from_status=o["status"], to_status=status)
     conn.commit()
@@ -243,15 +262,22 @@ def set_status(conn: sqlite3.Connection, offer_id: int, status: str, actor: str)
 
 # --- the letter (made in Google Drive by bluemoon/loi) ----------------------------------------------------------
 
-def add_document(conn: sqlite3.Connection, offer_id: int, doc: Mapping[str, Any], actor: str) -> dict:
+def add_document(conn: sqlite3.Connection, offer_id: int, doc: Mapping[str, Any], actor: str, *,
+                 expected_hash: str | None = None) -> dict:
     """Keep a letter made for this offer (template id and version, the ids and links of the Doc and the PDF),
     tied to what it was made from. The offer becomes 'LOI generated'. Earlier letters stay on record."""
     o = unsent(conn, offer_id)
+    if expected_hash is not None and letter_hash(o) != expected_hash:
+        # The numbers changed while the letter was being made, so it does not match this offer and is not kept.
+        _event(conn, offer_id, "document_stale", actor, doc_id=doc.get("doc_id"), pdf_id=doc.get("pdf_id"))
+        conn.commit()
+        raise ValueError("The offer changed while the letter was being made, so that letter was not kept. "
+                         "Make the LOI again.")
     stamp = now_iso()
     cur = conn.execute(
         "INSERT INTO offer_documents(offer_id, template_id, template_version, snapshot_hash, doc_id, doc_url, pdf_id, "
         "pdf_url, created_by, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (offer_id, doc["template_id"], doc["template_version"], letter_hash(o), doc["doc_id"], doc["doc_url"],
+        (offer_id, doc["template_id"], doc["template_version"], expected_hash or letter_hash(o), doc["doc_id"], doc["doc_url"],
          doc["pdf_id"], doc["pdf_url"], actor, stamp))
     conn.execute("UPDATE offers SET status='loi_generated', updated_at=? WHERE id=?", (stamp, offer_id))
     _event(conn, offer_id, "document_generated", actor, document_id=cur.lastrowid, template_version=doc["template_version"],
@@ -285,8 +311,11 @@ def mark_sent(conn: sqlite3.Connection, offer_id: int, how: str, when: Any, acto
         raise ValueError(f"'via' must be one of: {', '.join(SENT_VIA)}.")
     today = cfg.today()
     day = _day(when, "send date", today)
-    conn.execute("UPDATE offers SET status='sent', sent_how=?, sent_on=?, sent_by=?, sent_via=?, updated_at=? WHERE id=?",
-                 (how, day, actor, via, now_iso(), offer_id))
+    cur = conn.execute("UPDATE offers SET status='sent', sent_how=?, sent_on=?, sent_by=?, sent_via=?, updated_at=? "
+                       "WHERE id=? AND status != 'sent'", (how, day, actor, via, now_iso(), offer_id))
+    if cur.rowcount != 1:      # a second click or tab got there first
+        conn.rollback()
+        raise ValueError(f"Version {o['version']} was already sent, so it can't change. Prepare a revised offer instead.")
     _event(conn, offer_id, "marked_sent", actor, how=how, on=day, via=via)
     due = (parse_date(day) + timedelta(days=cfg.follow_up_days)).isoformat()
     _add_action(conn, offer_id, FOLLOW_UP_TEXT, actor, due_on=due, owner=actor, auto=True)
@@ -549,7 +578,7 @@ def property_block(conn: sqlite3.Connection, pid: int, snap: Mapping[str, Any]) 
     latest = found[0] if found else None
     return {
         "offers": views(conn, found, {pid: snap["hash"]}, events=True),
-        "can_prepare": latest is None or latest["status"] == "sent",
+        "can_prepare": open_draft(conn, pid) is None,
         "next_version": (latest["version"] + 1) if latest else 1,
         "current": {"annual_cents": snap.get("annual_cents"), "basis": snap.get("basis"), "source": snap.get("source"),
                     "default_cents": default_cents(snap)},

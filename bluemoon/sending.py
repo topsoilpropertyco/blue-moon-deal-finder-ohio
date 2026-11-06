@@ -24,6 +24,7 @@ from typing import Any, Protocol
 from . import offers
 from .config import Settings
 from .db import dumps, now_iso, one
+from .people import HIDDEN_ROLES, NO_RECIPIENT_STATUSES
 
 INTENT = "loi"
 REPORTED_STATES = ("queued", "submitted", "delivered")      # what a transport may answer with
@@ -62,7 +63,8 @@ def outbox_transport(settings: Settings) -> OutboxTransport:
 
 
 def intent_key(o: Mapping[str, Any], intent: str = INTENT) -> str:
-    parts = [o["id"], o["version"], o["recipient_name"], o["recipient_contact"], intent]
+    # The letter hash (rent snapshot, price, seller, recipient) is part of the key: a corrected letter is a new send.
+    parts = [o["id"], o["version"], o["recipient_name"], o["recipient_contact"], intent, offers.letter_hash(o)]
     return hashlib.sha256(dumps(parts).encode()).hexdigest()
 
 
@@ -77,6 +79,16 @@ def _check_ready(conn: sqlite3.Connection, o: Mapping[str, Any]) -> dict:
               (o["id"], offers.letter_hash(o)))
     if not doc:
         raise ValueError("There is no letter made from this offer's current numbers. Make the LOI first.")
+    # The recipient is re-read: a contact or name marked wrong or do-not-contact after the draft was made is not used.
+    if o.get("recipient_contact_id"):
+        c = one(conn, "SELECT status FROM contact_points WHERE id = ?", (o["recipient_contact_id"],))
+        if not c or c["status"] in NO_RECIPIENT_STATUSES:
+            raise ValueError("That email address was marked wrong or do-not-contact. Choose a new recipient and "
+                             "refresh the offer.")
+    if o.get("recipient_person_id"):
+        p = one(conn, "SELECT role FROM people WHERE id = ?", (o["recipient_person_id"],))
+        if not p or p["role"] in HIDDEN_ROLES:
+            raise ValueError("That person was marked wrong. Choose a new recipient and refresh the offer.")
     return doc
 
 
@@ -93,20 +105,32 @@ def send_offer(conn: sqlite3.Connection, offer_id: int, transport: Transport, ac
     o = offers.unsent(conn, offer_id)
     doc = _check_ready(conn, o)
     key = intent_key(o, intent)
+    duplicate = ("Already sent this way for this version and recipient, so nothing was submitted again.")
     previous = one(conn, "SELECT * FROM offer_sends WHERE intent_key = ?", (key,))
     if previous and previous["state"] != "failed":
-        return _result(conn, previous["id"], "Already sent this way for this version and recipient, so nothing was "
-                       "submitted again.", duplicate=True)
+        return _result(conn, previous["id"], duplicate, duplicate=True)
     stamp = now_iso()
+    # Claim the key and commit the claim before submitting, so a second caller loses the claim and submits nothing.
     if previous:
         send_id = previous["id"]
-        conn.execute("UPDATE offer_sends SET state = 'prepared', error = NULL, updated_at = ? WHERE id = ?", (stamp, send_id))
+        claim = conn.execute("UPDATE offer_sends SET state = 'prepared', error = NULL, updated_at = ? "
+                             "WHERE id = ? AND state = 'failed'", (stamp, send_id))
+        won = claim.rowcount == 1
     else:
-        send_id = int(conn.execute(
-            "INSERT INTO offer_sends(offer_id, intent_key, transport, state, recipient_name, recipient_contact, "
-            "created_by, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-            (offer_id, key, transport.name, "prepared", o["recipient_name"], o["recipient_contact"], actor, stamp,
-             stamp)).lastrowid)
+        try:
+            send_id = int(conn.execute(
+                "INSERT INTO offer_sends(offer_id, intent_key, transport, state, recipient_name, recipient_contact, "
+                "created_by, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (offer_id, key, transport.name, "prepared", o["recipient_name"], o["recipient_contact"], actor, stamp,
+                 stamp)).lastrowid)
+            won = True
+        except sqlite3.IntegrityError:
+            won = False
+    if not won:
+        conn.rollback()
+        taken = one(conn, "SELECT id FROM offer_sends WHERE intent_key = ?", (key,))
+        return _result(conn, taken["id"], duplicate, duplicate=True)
+    conn.commit()
     message = {"intent": intent, "offer_id": offer_id, "version": o["version"], "property_id": o["property_id"],
                "to_name": o["recipient_name"], "to": o["recipient_contact"].removeprefix("email:").strip(),
                "letter_pdf": doc["pdf_url"], "letter_doc": doc["doc_url"], "send_key": key}

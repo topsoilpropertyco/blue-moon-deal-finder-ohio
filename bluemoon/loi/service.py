@@ -172,6 +172,7 @@ def generate(conn: sqlite3.Connection, settings: Settings, adapter: DriveAdapter
     if adapter is None or reasons:
         offers.letter_note(conn, offer_id, "document_blocked", actor, status="loi_template_needed", reasons=reasons)
         return {"result": "template_needed", "message": "LOI template needed. " + " ".join(reasons)}
+    h = offers.letter_hash(o)          # what this letter is made from; checked again when it is saved
     state = load(conn)
     fmap = fields.load_map(settings.loi)
     made: dict[str, str] = {}
@@ -208,6 +209,6 @@ def generate(conn: sqlite3.Connection, settings: Settings, adapter: DriveAdapter
         raise
     offers.add_document(conn, offer_id, {"template_id": state["template_id"], "template_version": info.version,
                                          "doc_id": copy.id, "doc_url": copy.url, "pdf_id": pdf.id, "pdf_url": pdf.url},
-                        actor)
+                        actor, expected_hash=h)
     return {"result": "generated", "message": "LOI made. The Doc and the PDF are in your Drive folder. Read it through "
                                               "before you mark it ready."}
