@@ -8,6 +8,7 @@
 - Versions: a revised offer is a new version, allowed once the latest one has been sent. A sent version is final.
 - Sent: only an explicit record (how, when, by whom) makes an offer sent. A draft, a generated letter or a failed
   send never counts. `sent_via` tells a hand-marked send from one a mail provider reported.
+- A send through a transport (bluemoon/sending.py, tables offer_sends) is a record of an attempt, never of "sent".
 - Everything that happens is appended to offer_events. Responses, next actions and letters (offer_documents, made in
   Google Drive by bluemoon/loi) hang off the offer. Nothing here sends mail, writes legal wording or accepts an offer.
 """
@@ -39,6 +40,11 @@ CLASSES = ("serious_interest", "counter", "info_request", "rejection", "no_respo
 CLASS_LABELS = {
     "serious_interest": "Serious interest", "counter": "Counteroffer", "info_request": "Asked for information",
     "rejection": "Rejected", "no_response": "No response", "needs_review": "Needs review",
+}
+SEND_STATES = ("prepared", "queued", "submitted", "failed", "delivered")
+SEND_STATE_LABELS = {
+    "prepared": "Prepared", "queued": "Queued", "submitted": "Handed to the test outbox (nothing was emailed)",
+    "failed": "Failed (can retry)", "delivered": "Delivered",
 }
 AMOUNT_CLASSES = ("counter", "needs_review")     # the only categories that can carry a counter figure
 FOLLOW_UP_TEXT = "Follow up: did they get the LOI?"
@@ -473,8 +479,8 @@ def _next_action(actions: list[dict]) -> dict | None:
     return min(open_, key=lambda a: (a["due_on"] is None, a["due_on"] or "", a["id"])) if open_ else None
 
 
-def _view(o: Mapping[str, Any], responses: list[dict], actions: list[dict], docs: list[dict], events: list[dict] | None,
-          current_hash: str | None) -> dict:
+def _view(o: Mapping[str, Any], responses: list[dict], actions: list[dict], docs: list[dict], sends: list[dict],
+          events: list[dict] | None, current_hash: str | None) -> dict:
     snap = loads(o["snapshot_json"], {}) or {}
     annual = snap.get("annual_cents")
     sent = None if o["status"] != "sent" else {
@@ -499,6 +505,10 @@ def _view(o: Mapping[str, Any], responses: list[dict], actions: list[dict], docs
         "documents": [{"id": d["id"], "template_version": d["template_version"], "doc_url": d["doc_url"],
                        "pdf_url": d["pdf_url"], "created_by": d["created_by"], "created_at": d["created_at"],
                        "current": d["snapshot_hash"] == current} for d in reversed(docs)],
+        "sends": [{"id": x["id"], "state": x["state"], "state_label": SEND_STATE_LABELS[x["state"]],
+                   "transport": x["transport"], "recipient_name": x["recipient_name"],
+                   "recipient_contact": x["recipient_contact"], "error": x["error"], "created_by": x["created_by"],
+                   "updated_at": x["updated_at"]} for x in reversed(sends)],
         "readiness": {"template": {"ready": has_letter, "text": "LOI made" if has_letter else "LOI template needed"},
                       "recipient": {"ready": bool(o["recipient_name"]),
                                     "text": "Recipient chosen" if o["recipient_name"] else "Recipient needed"}},
@@ -524,9 +534,10 @@ def views(conn: sqlite3.Connection, offers: list[dict], current_hashes: Mapping[
     resp = _children(conn, offers, "offer_responses", "id")
     acts = _children(conn, offers, "offer_actions", "id")
     docs = _children(conn, offers, "offer_documents", "id")
+    sends = _children(conn, offers, "offer_sends", "id")
     evs = _children(conn, offers, "offer_events", "id DESC") if events else {}
     hashes = current_hashes or {}
-    return [_view(o, resp.get(o["id"], []), acts.get(o["id"], []), docs.get(o["id"], []),
+    return [_view(o, resp.get(o["id"], []), acts.get(o["id"], []), docs.get(o["id"], []), sends.get(o["id"], []),
                   evs.get(o["id"], []) if events else None, hashes.get(o["property_id"])) for o in offers]
 
 

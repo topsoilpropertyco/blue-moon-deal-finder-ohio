@@ -77,7 +77,7 @@ const offer = (over) => Object.assign({
   id: 5, property_id: 7, version: 1, status: 'internal_draft', status_label: 'Internal draft', origin: 'prepared', incomplete_snapshot: false,
   seller_name: 'EXAMPLE HOLDINGS LLC', recipient: {person_id: 1, name: 'Bea Broker', contact: 'email: bea@example.com'},
   price_cents: 164352000, price_mode: 'default', implied_multiple: '4.00', rent: {annual_cents: 41088000, basis: 'scheduled', source: 'record', scenarios},
-  stale: false, sent: null, counter: null, responses: [], actions: [], next_action: null,
+  stale: false, sent: null, counter: null, responses: [], sends: [], actions: [], next_action: null,
   readiness: {template: {ready: false, text: 'LOI template needed'}, recipient: {ready: true, text: 'Recipient chosen'}},
   created_by: 'seth', created_at: '2026-11-05T10:00:00+00:00', events: [{kind: 'prepared', actor: 'seth', at: '2026-11-05T10:00:00+00:00', detail: {}}]}, over || {});
 const block = (over) => Object.assign({offers: [offer()], can_prepare: false, next_version: 2,
@@ -110,6 +110,12 @@ const out = {};
   out.letter = generated([doc()]);
   out.ready = generated([doc()], {status: 'ready_for_review', status_label: 'Ready for review'});
   out.older = generated([doc({id: 2, current: false, doc_url: 'javascript:alert(1)', pdf_url: 'https://evil.example/x.pdf'})], {status: 'internal_draft', status_label: 'Internal draft'});
+  const ssend = (state, label, error) => ({id: 1, state, state_label: label, transport: 'test outbox', recipient_contact: 'email: bea@example.com', error: error || null, created_by: 'seth', updated_at: '2026-11-05T10:00:00+00:00'});
+  const readyTo = (sends) => BM.offers.html(detail(block({offers: [offer({status: 'ready_to_send', status_label: 'Ready to send', sends})]})));
+  out.sendReady = readyTo([]);
+  out.sendDone = readyTo([ssend('submitted', 'Handed to the test outbox (nothing was emailed)')]);
+  out.sendFailed = readyTo([ssend('failed', 'Failed (can retry)', 'The outbox is closed <b>(test)</b>')]);
+  out.sendDraft = BM.offers.html(detail());
   out.sentLetter = BM.offers.html(detail(block({offers: [sentOffer({documents: [doc()]})]})));
 
   const root = new Stub('root');
@@ -163,6 +169,9 @@ const out = {};
   out.reviewCleared = root.children['[data-part="offers"]'].outerHTML;
   next = new Error('Version 1 was already sent.');
   fire('click', target({'data-of-act': 'refresh', 'data-offer': '5'}));
+  await flush();
+  next = res(detail().offers, 'Handed to the test outbox');
+  fire('click', target({'data-of-act': 'send', 'data-offer': '5'}));
   await flush();
   out.calls = calls;
   out.toasts = toasts;
@@ -265,6 +274,15 @@ def test_actions_send_the_right_requests(ran):
     assert c[14] == {"path": base + "/offers/5/status", "method": "PUT", "body": {"status": "ready_for_review"}}
     assert c[15] == {"path": base + "/offers/5/loi", "method": "GET", "body": None}
     assert "Version 1 was already sent." in ran["toasts"] and "prepared" in ran["toasts"] and "LOI made" in ran["toasts"]
+
+
+def test_the_send_block_offers_the_test_outbox_only_when_ready_and_shows_what_the_transport_said(ran):
+    assert "Send a test copy to the outbox" in ran["sendReady"] and "There is no live email yet" in ran["sendReady"]
+    assert "Send a test copy" not in ran["sendDone"] and "Handed to the test outbox (nothing was emailed)" in ran["sendDone"]
+    assert "Try the test outbox again" in ran["sendFailed"] and "The outbox is closed &lt;b&gt;(test)&lt;/b&gt;" in ran["sendFailed"]
+    assert "Send a test copy" not in ran["sendDraft"]                              # a plain draft is not ready to send
+    assert ran["calls"][18] == {"path": "/api/m/apartments-test/offers/5/send", "method": "POST", "body": None}
+    assert "Handed to the test outbox" in ran["toasts"]
 
 
 def test_the_offers_screen_lists_each_offer_with_stage_price_counter_and_next_action(ran):

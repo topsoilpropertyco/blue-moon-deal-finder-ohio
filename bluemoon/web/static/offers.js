@@ -100,6 +100,15 @@
       '<p class="note">This only records that you sent it. Nothing is sent from here.</p>';
   }
 
+  function sendsHtml(o) {
+    const list = o.sends.length ? '<ul class="of-list">' + o.sends.map((x) => '<li><span class="pill ' + (x.state === 'failed' ? 'bad' : 'warn') + '">' + esc(x.state_label) + '</span> ' +
+      esc(x.recipient_contact || '') + ' <span class="hint">' + esc(BM.fmt.date(x.updated_at)) + ' · ' + esc(x.created_by) + (x.error ? ' · ' + esc(x.error) : '') + '</span></li>').join('') + '</ul>' : '';
+    const retry = o.sends.some((x) => x.state === 'failed');
+    const allowed = o.status === 'ready_to_send' && !o.sends.some((x) => x.state !== 'failed');
+    return '<h4>Send</h4><p class="note">There is no live email yet. The test outbox only saves what would be sent, in <code>data/outbox</code>, and the offer stays unsent until you mark it sent.</p>' + list +
+      (allowed ? '<div class="of-inline"><button type="button" class="btn small" data-of-act="send" data-offer="' + esc(o.id) + '">' + (retry ? 'Try the test outbox again' : 'Send a test copy to the outbox') + '</button></div>' : '');
+  }
+
   function responseHtml(r, b, o) {
     const range = has(r.counter_low_cents) ? '<div><b>Asked for ' + esc(usd(r.counter_low_cents) + (has(r.counter_high_cents) ? ' to ' + usd(r.counter_high_cents) : '')) + '</b></div>' : '';
     const fix = '<details class="p-more"><summary>Fix the category</summary><form class="of-inline" data-of-form="fix-response" data-offer="' + esc(o.id) + '" data-response="' + esc(r.id) + '">' +
@@ -187,7 +196,7 @@
       '<dl class="kv"><dt>Seller (owner of record)</dt><dd>' + (o.seller_name ? esc(o.seller_name) : '<span class="muted">Not on record</span>') + '</dd>' +
       '<dt>Addressed to</dt><dd>' + recipient + '</dd>' + (o.sent ? '<dt>Sent</dt><dd>' + sentText(o.sent) + '</dd>' : '<dt>Letter and recipient</dt><dd>' + ready + '</dd>') +
       counter + next + '</dl>' +
-      (o.status === 'sent' ? '' : priceFormHtml(o)) + letterHtml(o) + (o.status === 'sent' ? '' : sentFormHtml(o)) +
+      (o.status === 'sent' ? '' : priceFormHtml(o)) + letterHtml(o) + (o.status === 'sent' ? '' : sendsHtml(o) + sentFormHtml(o)) +
       (o.responses.length ? '<h4>Responses</h4><ul class="of-list">' + o.responses.map((r) => responseHtml(r, b, o)).join('') + '</ul>' : '') +
       (o.status === 'sent' ? responseFormHtml(b, o) : '') +
       '<h4>Next actions</h4>' + (o.actions.length ? '<ul class="of-list">' + o.actions.map((a) => actionHtml(a, o)).join('') + '</ul>' : '<p class="note">None yet.</p>') +
@@ -275,6 +284,7 @@
     const act = b.getAttribute('data-of-act');
     if (act === 'refresh') write(offerPath(b, '/refresh'), undefined);
     else if (act === 'default-price') write(offerPath(b, '/price'), {price: null}, 'PUT');
+    else if (act === 'send') write(offerPath(b, '/send'), undefined);
     else if (act === 'preview') loadPreview(b);
     else if (act === 'make-loi') write(offerPath(b, '/loi'), {again: !!b.getAttribute('data-again')});
     else if (act === 'stage') write(offerPath(b, '/status'), {status: b.getAttribute('data-stage')}, 'PUT');

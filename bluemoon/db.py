@@ -472,6 +472,22 @@ CREATE TABLE IF NOT EXISTS lead_events (
 );
 CREATE INDEX IF NOT EXISTS ix_lead_events_property ON lead_events(property_id);
 
+-- A send attempt through a transport (the test outbox for now; nothing here emails anyone). intent_key is what makes
+-- a retry safe: the same offer version to the same recipient for the same intent is one row, so it is never
+-- submitted twice, while a revised version has its own key. A row never makes the offer "sent" (only Mark as sent
+-- or a provider's report does). state is what the transport reported.
+CREATE TABLE IF NOT EXISTS offer_sends (
+  id INTEGER PRIMARY KEY,
+  offer_id INTEGER NOT NULL REFERENCES offers(id) ON DELETE CASCADE,
+  intent_key TEXT NOT NULL UNIQUE,
+  transport TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('prepared', 'queued', 'submitted', 'failed', 'delivered')),
+  recipient_name TEXT, recipient_contact TEXT,
+  outbox_file TEXT, error TEXT,
+  created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_offer_sends_offer ON offer_sends(offer_id);
+
 -- "Prepare offers for selected": one batch and one row per property. A row ends as created (a new draft), existing
 -- (the property already had an unsent draft, so nothing was added), failed (can be retried) or excluded (left out
 -- by you). A retry only touches failed rows, so it can never make a second draft.

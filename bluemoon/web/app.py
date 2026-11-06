@@ -70,7 +70,7 @@ from ..imagery import streetview
 from ..ingest import IngestError, import_file, preview_file
 from ..scoring import overrides
 from ..scoring.learn import model_summary, set_outcome
-from .. import history, leads, napkin, offer_batches, offers, pricing
+from .. import history, leads, napkin, offer_batches, offers, pricing, sending
 from ..loi import service as loi
 from ..people import choose_recipient, clear_recipient
 from . import auth, crexi_api, queries
@@ -457,6 +457,10 @@ class OfferActionFixIn(BaseModel):
     due_on: str | None = Field(default=None, max_length=30)
     owner: Name = None
     done: bool | None = None
+
+
+class OfferSendManyIn(BaseModel):
+    offer_ids: list[int] = Field(min_length=1, max_length=200)
 
 
 class OfferStageIn(BaseModel):
@@ -927,6 +931,21 @@ def mark_offer_sent(slug: str, oid: int, body: OfferSentIn, request: Request, co
     _, _, cfg = queries.offer_basis(conn, slug, pid)
     offers.mark_sent(conn, oid, body.how, body.when, _actor(request), cfg)
     return _offer_done(conn, slug, oid, "Marked as sent. A follow-up was added to the next actions.")
+
+
+@router.post("/api/m/{slug}/offers/{oid}/send")
+def send_offer(slug: str, oid: int, request: Request, conn: Conn) -> dict:
+    require_offer(conn, slug, oid)
+    result = sending.send_offer(conn, oid, sending.outbox_transport(get_settings()), _actor(request))
+    return {**_offer_done(conn, slug, oid, result["message"]), "result": result}
+
+
+@router.post("/api/m/{slug}/offers/send")
+def send_offers(slug: str, body: OfferSendManyIn, request: Request, conn: Conn) -> dict:
+    """Send several offers through the test outbox; every record is reported on its own."""
+    for oid in body.offer_ids:
+        require_offer(conn, slug, oid)
+    return sending.send_many(conn, body.offer_ids, sending.outbox_transport(get_settings()), _actor(request))
 
 
 @router.post("/api/m/{slug}/offers/{oid}/responses")

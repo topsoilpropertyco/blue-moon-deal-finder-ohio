@@ -80,6 +80,13 @@ Crexi CSV/XLSX ─► ingest ─► properties (master list, every original colu
   `property_block()`, `market_list()`). Money is cents; the rent snapshot is `napkin.snapshot()`, frozen on the offer.
   `letter_hash()` (rent snapshot + price + seller + recipient: a letter counts only while it matches), `add_document()`
   (keeps a made letter, stage "LOI generated") and `letter_note()` (blocked or failed, in the history).
+- `bluemoon/sending.py`: sending a letter through a transport (table offer_sends). `send_offer()` needs a Ready to send
+  offer with an email recipient and a letter made from its current numbers (ValueError otherwise); the send-intent key
+  (`intent_key()`: offer id + version + recipient + intent, UNIQUE) makes a repeat a no-op (`duplicate`) while a failed
+  attempt is retried on the same row and a revised version (new offer id) has its own key. The recorded state is what
+  the transport reports (prepared, queued, submitted, failed, delivered). `OutboxTransport` is the only transport: it
+  writes `data/outbox/<key>.json` (recipient, letter links, no wording) and reports submitted. A send never sets
+  `offers.status = 'sent'` (only `mark_sent`, manual or provider). `send_many()` reports each record on its own.
 - `bluemoon/leads.py`: "Add a property" (`parse()`, `find_matches()`, `add()`, `events()`; table lead_events). A Crexi link is
   saved as the source only (never fetched). Sure matches (same Crexi link, same street + city + ZIP key) are never added
   twice and only fill a blank link; unsure matches (same street address, city or ZIP differs or is missing) come back as
@@ -538,6 +545,8 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | GET | `/api/m/{slug}/offers/{oid}/loi` | the field review: `{rows [{token, source, label, value, state filled|empty|unmapped|unused}], unresolved, checked, template_version, note}`; no Google call |
 | POST | `/api/m/{slug}/offers/{oid}/loi` | body `{again?}`: makes the letter (copy of the master in the folder titled `LOI - <address> - <date> v<n>`, fields filled, PDF stored; Doc and PDF ids and links on `offer_documents` with template version and `snapshot_hash` = `offers.letter_hash`). Answers 200 with a message when it made one, found one for these numbers, or could not start (stage `loi_template_needed` or `required_fields_missing`, nothing copied); 400 for a sent offer or a Google failure (written to the offer's history) |
 | PUT | `/api/m/{slug}/offers/{oid}/status` | body `{status: ready_for_review\|ready_to_send}`: needs a letter made from the offer's current numbers (400 otherwise or once sent); `sent` is only ever set by Mark as sent |
+| POST | `/api/m/{slug}/offers/{oid}/send` | no body: submits the offer's letter to the test outbox (`data/outbox/`); `{offers, message, result {send_id, state, state_label, ok, duplicate}}`; 400 when the offer is not Ready to send, has no email recipient or no current letter, or was sent; a second call for the same version and recipient is a `duplicate` and writes nothing; the offer never becomes sent |
+| POST | `/api/m/{slug}/offers/send` | body `{offer_ids}` (1 to 200): `{results [{offer_id, send_id, state, ok, duplicate, message}], text}`, one line per offer; an offer that is not ready is a failed line, not an error; 404 if any id is not in this market |
 | POST | `/api/m/{slug}/offers/{oid}/actions` | body `{text, due_on?, owner?}` |
 | PUT | `/api/m/{slug}/offers/{oid}/actions/{aid}` | body with any of `text, due_on (null clears), owner, done` |
 | POST | `/api/m/{slug}/leads` | body `{address?, city?, state?, zip?, link?, same_as?, as_new?}` (an address or a Crexi link is required; 400 for a link that is not crexi.com, a bad state or ZIP, or `same_as` that was not one of the shown matches): `{outcome: created\|duplicate\|needs_resolution, property_id, matches [{property_id, certainty same\|maybe, why, ...}], message}`; `created` also runs the free after-import steps |
@@ -637,7 +646,7 @@ the rent and price section (`BM.offers.html(detail)` / `BM.offers.mount(root, de
 frozen `snapshot_json` + `snapshot_hash`, `incomplete_snapshot`, `sent_how/on/by/via`; unique per property, version
 and intent), `offer_events` (append-only log), `offer_responses` (original text kept, `counter_low_cents` /
 `counter_high_cents`), `offer_actions` (next actions), `offer_documents` (letters made from a snapshot; filled by the
-Google Drive step; no uniqueness, earlier letters stay). `follow_up_days` lives in `config/pricing.yaml`; the letter field map in `config/loi.yaml` (`Settings.loi`). The Settings panel is in `settings.js` (the only Settings control that saves) and the drawer's letter controls in `offers.js`. Command line: `uv run run.py loi signin|status|test`.
+Google Drive step; no uniqueness, earlier letters stay), `offer_sends` (one row per send-intent key: transport, reported state, recipient, outbox file, error). `follow_up_days` lives in `config/pricing.yaml`; the letter field map in `config/loi.yaml` (`Settings.loi`). The Settings panel is in `settings.js` (the only Settings control that saves) and the drawer's letter controls in `offers.js`. Command line: `uv run run.py loi signin|status|test`.
 
 Leads and batches in the browser: `leads.js` (after `offers.js`) draws the "Add a property" and "Prepare offers for selected"
 panels (`BM.leads.addPanel(el, onAdded)`, `BM.leads.batchPanel(el, ids, onDone)`) and the drawer's "How it got on the list"
