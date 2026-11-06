@@ -17,7 +17,7 @@ import pytest
 STATIC = Path(__file__).resolve().parent.parent / "bluemoon" / "web" / "static"
 
 HARNESS = r"""
-const [coreJs, pricingJs, peopleJs, offersJs, propertyJs, dealsJs] = process.argv.slice(2);
+const [coreJs, pricingJs, peopleJs, offersJs, leadsJs, propertyJs, dealsJs] = process.argv.slice(2);
 const docListeners = {};
 class Element {}
 class Stub extends Element {
@@ -78,6 +78,7 @@ BM.registerView = (key, def) => { if (key === 'deals') dealsView = def; realRegi
 require(pricingJs);
 require(peopleJs);
 require(offersJs);
+require(leadsJs);
 require(propertyJs);
 require(dealsJs);
 
@@ -226,7 +227,7 @@ def ui(tmp_path_factory) -> dict:
         pytest.skip("Node is not installed")
     script = tmp_path_factory.mktemp("node") / "buybox_ui.js"
     script.write_text(HARNESS, encoding="utf-8")
-    result = subprocess.run([node, str(script), str(STATIC / "core.js"), str(STATIC / "pricing.js"), str(STATIC / "people.js"), str(STATIC / "offers.js"),
+    result = subprocess.run([node, str(script), str(STATIC / "core.js"), str(STATIC / "pricing.js"), str(STATIC / "people.js"), str(STATIC / "offers.js"), str(STATIC / "leads.js"),
                              str(STATIC / "property.js"),
                             str(STATIC / "deals.js")],
                             capture_output=True, text=True, timeout=60)

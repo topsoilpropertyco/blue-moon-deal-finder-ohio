@@ -70,7 +70,7 @@ from ..imagery import streetview
 from ..ingest import IngestError, import_file, preview_file
 from ..scoring import overrides
 from ..scoring.learn import model_summary, set_outcome
-from .. import history, napkin, offers
+from .. import history, leads, napkin, offer_batches, offers, pricing
 from ..loi import service as loi
 from ..people import choose_recipient, clear_recipient
 from . import auth, crexi_api, queries
@@ -397,6 +397,31 @@ class OfferSentIn(BaseModel):
     when: str | None = Field(default=None, max_length=30)
 
 
+class LeadIn(BaseModel):
+    """A property added by hand: a street address, a Crexi link, or both. same_as / as_new answer the unsure matches."""
+    address: Name = None
+    city: Name = None
+    state: str | None = Field(default=None, max_length=20)
+    zip: str | None = Field(default=None, max_length=20)
+    link: str | None = Field(default=None, max_length=600)
+    same_as: int | None = Field(default=None, ge=1)
+    as_new: bool = False
+
+
+class BatchPreviewIn(BaseModel):
+    property_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class BatchRowIn(BaseModel):
+    property_id: int = Field(ge=1)
+    price: Amount = None
+    exclude: bool = False
+
+
+class BatchIn(BaseModel):
+    rows: list[BatchRowIn] = Field(min_length=1, max_length=1000)
+
+
 class OfferHistoricalIn(BaseModel):
     """An offer made before this app. Also used to correct one (only the fields sent change)."""
     price: Amount = None
@@ -487,6 +512,12 @@ def require_offer(conn: sqlite3.Connection, slug: str, oid: int) -> dict:
     if not found:
         raise KeyError(f"Offer {oid} is not in this market.")
     return found
+
+
+def require_batch(conn: sqlite3.Connection, slug: str, bid: int) -> None:
+    if db.scalar(conn, "SELECT 1 FROM offer_batches b JOIN markets m ON m.id = b.market_id WHERE b.id = ? AND "
+                       "m.slug = ?", (bid, slug)) is None:
+        raise KeyError(f"Batch {bid} is not in this market.")
 
 
 def require_offer_child(conn: sqlite3.Connection, table: str, cid: int, oid: int) -> None:
@@ -930,6 +961,57 @@ def update_offer_action(slug: str, oid: int, aid: int, body: OfferActionFixIn, r
     require_offer_child(conn, "offer_actions", aid, oid)
     offers.update_action(conn, aid, body.model_dump(exclude_unset=True), _actor(request))
     return _offer_done(conn, slug, oid, "Next action saved.")
+
+
+# --- routes: leads and batches ---------------------------------------------------------------------------
+
+@router.post("/api/m/{slug}/leads")
+def add_lead(slug: str, body: LeadIn, request: Request, conn: Conn) -> dict:
+    result = leads.add(conn, require_market(conn, slug), body.model_dump(exclude={"same_as", "as_new"}),
+                       _actor(request), same_as=body.same_as, as_new=body.as_new)
+    if result["outcome"] == "created":
+        result["after_import"] = _after_import(conn, slug)
+    return result
+
+
+def _batch_tools(conn: sqlite3.Connection, slug: str) -> tuple[offer_batches.Basis, pricing.PricingConfig, bool]:
+    """(how to find a property's offer basis, the pricing settings, whether letters can be made)."""
+    mc = queries.market_ctx(conn, slug)
+    return (lambda pid: queries.offer_basis(conn, slug, pid)[:2], pricing.load_config(mc.settings.pricing),
+            bool(loi.status(conn, get_settings())["active"]))
+
+
+@router.post("/api/m/{slug}/offer-batches/preview")
+def preview_offer_batch(slug: str, body: BatchPreviewIn, conn: Conn) -> dict:
+    basis, cfg, ready = _batch_tools(conn, slug)
+    return offer_batches.preview(conn, body.property_ids, basis, cfg, ready)
+
+
+@router.post("/api/m/{slug}/offer-batches")
+def create_offer_batch(slug: str, body: BatchIn, request: Request, conn: Conn) -> dict:
+    basis, cfg, ready = _batch_tools(conn, slug)
+    return offer_batches.create(conn, require_market(conn, slug)["id"], [r.model_dump() for r in body.rows], basis,
+                                cfg, ready, _actor(request))
+
+
+@router.get("/api/m/{slug}/offer-batches/{bid}")
+def get_offer_batch(slug: str, bid: int, conn: Conn) -> dict:
+    require_batch(conn, slug, bid)
+    return offer_batches.view(conn, bid)
+
+
+@router.post("/api/m/{slug}/offer-batches/{bid}/retry")
+def retry_offer_batch(slug: str, bid: int, request: Request, conn: Conn) -> dict:
+    require_batch(conn, slug, bid)
+    return offer_batches.retry(conn, bid, _batch_tools(conn, slug)[0], _actor(request))
+
+
+@router.get("/api/m/{slug}/offer-batches/{bid}/report.csv")
+def offer_batch_report(slug: str, bid: int, conn: Conn) -> FileResponse:
+    require_batch(conn, slug, bid)
+    path = offer_batches.write_report(conn, bid, get_settings().path("output"))
+    return FileResponse(path, media_type="text/csv", filename=f"{slug}_offer_batch_{bid}.csv",
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.get("/api/m/{slug}/offers/{oid}/loi")

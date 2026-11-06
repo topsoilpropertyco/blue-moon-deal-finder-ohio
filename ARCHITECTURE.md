@@ -80,6 +80,14 @@ Crexi CSV/XLSX ─► ingest ─► properties (master list, every original colu
   `property_block()`, `market_list()`). Money is cents; the rent snapshot is `napkin.snapshot()`, frozen on the offer.
   `letter_hash()` (rent snapshot + price + seller + recipient: a letter counts only while it matches), `add_document()`
   (keeps a made letter, stage "LOI generated") and `letter_note()` (blocked or failed, in the history).
+- `bluemoon/leads.py`: "Add a property" (`parse()`, `find_matches()`, `add()`, `events()`; table lead_events). A Crexi link is
+  saved as the source only (never fetched). Sure matches (same Crexi link, same street + city + ZIP key) are never added
+  twice and only fill a blank link; unsure matches (same street address, city or ZIP differs or is missing) come back as
+  `needs_resolution` and nothing is merged until `same_as` / `as_new` answers; reviewed values are never overwritten.
+- `bluemoon/offer_batches.py`: "Prepare offers for selected" (tables offer_batches, offer_batch_rows). `preview()` /
+  `assess()` per row, `create()` (batch and rows saved in one BEGIN IMMEDIATE, then each row prepared on its own via
+  `offers.prepare`), `retry()` (failed rows only), `view()`, `write_report()` (CSV, `safe_cell`). Row states: created,
+  existing (an unsent draft was already there), failed, excluded. `batch_max_properties` is in `config/pricing.yaml`.
 - `bluemoon/loi/`: the offer letter made from Seth's master Google Doc (never authors wording). `fields.py` (`{{token}}`
   detection, `config/loi.yaml` field_map and the fixed list of sources, `values()`, `review()`), `auth.py` (OAuth
   installed-app sign-in with PKCE on 127.0.0.1; `data/google_oauth_client.json` + `data/google_token.json`, mode 600,
@@ -532,6 +540,12 @@ from fonts.gstatic.com, images from this server or data:/blob:, fetch() to this 
 | PUT | `/api/m/{slug}/offers/{oid}/status` | body `{status: ready_for_review\|ready_to_send}`: needs a letter made from the offer's current numbers (400 otherwise or once sent); `sent` is only ever set by Mark as sent |
 | POST | `/api/m/{slug}/offers/{oid}/actions` | body `{text, due_on?, owner?}` |
 | PUT | `/api/m/{slug}/offers/{oid}/actions/{aid}` | body with any of `text, due_on (null clears), owner, done` |
+| POST | `/api/m/{slug}/leads` | body `{address?, city?, state?, zip?, link?, same_as?, as_new?}` (an address or a Crexi link is required; 400 for a link that is not crexi.com, a bad state or ZIP, or `same_as` that was not one of the shown matches): `{outcome: created\|duplicate\|needs_resolution, property_id, matches [{property_id, certainty same\|maybe, why, ...}], message}`; `created` also runs the free after-import steps |
+| POST | `/api/m/{slug}/offer-batches/preview` | body `{property_ids}` (1 to `batch_max_properties`): `{rows [{property_id, address, rent_basis, annual_cents, default_cents, owner, recipient, flags [{key, text, blocks}], can_prepare}], letters_ready, note}`; saves nothing |
+| POST | `/api/m/{slug}/offer-batches` | body `{rows: [{property_id, price?, exclude?}]}`: saves and runs the batch; `{id, status done\|partial, counts, text, rows [{property_id, status created\|existing\|failed\|excluded, offer_id, version, message}]}`; 400 for an unknown property, a repeated one or a bad price (nothing saved) |
+| GET | `/api/m/{slug}/offer-batches/{bid}` | the batch report (404 for another market's batch) |
+| POST | `/api/m/{slug}/offer-batches/{bid}/retry` | tries the failed rows again; created, existing and left-out rows are never touched, so no duplicate offers |
+| GET | `/api/m/{slug}/offer-batches/{bid}/report.csv` | the report as a formula-safe CSV (also written to `output/offers/`) |
 | POST | `/api/m/{slug}/properties/{id}/outreach` | body `{channel, outcome, contact_point_id?, notes?}` |
 | POST | `/api/m/{slug}/properties/{id}/level` | body `{action, person?, note?}` |
 | POST | `/api/m/{slug}/properties/{id}/credit` | body `{result?}` |
@@ -624,6 +638,13 @@ frozen `snapshot_json` + `snapshot_hash`, `incomplete_snapshot`, `sent_how/on/by
 and intent), `offer_events` (append-only log), `offer_responses` (original text kept, `counter_low_cents` /
 `counter_high_cents`), `offer_actions` (next actions), `offer_documents` (letters made from a snapshot; filled by the
 Google Drive step; no uniqueness, earlier letters stay). `follow_up_days` lives in `config/pricing.yaml`; the letter field map in `config/loi.yaml` (`Settings.loi`). The Settings panel is in `settings.js` (the only Settings control that saves) and the drawer's letter controls in `offers.js`. Command line: `uv run run.py loi signin|status|test`.
+
+Leads and batches in the browser: `leads.js` (after `offers.js`) draws the "Add a property" and "Prepare offers for selected"
+panels (`BM.leads.addPanel(el, onAdded)`, `BM.leads.batchPanel(el, ids, onDone)`) and the drawer's "How it got on the list"
+lines (`BM.leads.html(detail)`, from `lead_events` in the property detail). Deals owns the checkboxes (`ctx.picked`, cleared
+when the list reloads). A hand-added property carries the flag `manual_lead` (shown in the drawer and in the exports'
+"Flags" column). Tables: `lead_events` (new_listing | duplicate | same_property, append-only), `offer_batches`
+(status running | done | partial, `letters_ready`), `offer_batch_rows` (unique per batch and property; typed `price_cents`).
 
 Tables added: `rent_records` (evidence, normalized yearly cents, state, pinned), `rent_assumptions` (typed units,
 mix, rents), `property_history` (builder evidence, bundled-sale flag, sale source). Columns added to `properties`:

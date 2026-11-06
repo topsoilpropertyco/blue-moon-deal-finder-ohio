@@ -75,7 +75,7 @@ def letter_hash(o: Mapping[str, Any]) -> str:
     return hashlib.sha256(dumps(parts).encode()).hexdigest()
 
 
-def _price(value: Any) -> int:
+def parse_price(value: Any) -> int:
     try:
         cents = pricing.to_cents(value, "price")
     except MoneyError as exc:
@@ -131,7 +131,7 @@ def _need_default(snap: Mapping[str, Any]) -> int:
     return cents
 
 
-def _recipient(conn: sqlite3.Connection, property_id: int) -> dict:
+def current_recipient(conn: sqlite3.Connection, property_id: int) -> dict:
     """The person (and contact) offers for this property are addressed to, as chosen in the people block."""
     r = one(conn, "SELECT r.person_id, r.contact_point_id, p.name, p.role, c.channel, c.value, c.status "
                   "FROM property_recipients r JOIN people p ON p.id = r.person_id "
@@ -161,7 +161,7 @@ def prepare(conn: sqlite3.Connection, prop: Mapping[str, Any], snap: Mapping[str
     if latest and latest["status"] != "sent":
         raise ValueError(f"Version {latest['version']} is still a draft. Change or refresh it, or mark it sent "
                          "before preparing a revised offer.")
-    cents, mode = (_price(price), "override") if price not in (None, "") else (_need_default(snap), "default")
+    cents, mode = (parse_price(price), "override") if price not in (None, "") else (_need_default(snap), "default")
     version = (latest["version"] + 1) if latest else 1
     stamp = now_iso()
     try:
@@ -170,7 +170,7 @@ def prepare(conn: sqlite3.Connection, prop: Mapping[str, Any], snap: Mapping[str
             "recipient_contact_id, recipient_contact, price_cents, price_mode, snapshot_json, snapshot_hash, "
             "created_by, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (pid, version, "internal_draft", "prepared", clean_str(prop.get("owner_name")),
-             *(_recipient(conn, pid).get(k) for k in ("recipient_person_id", "recipient_name",
+             *(current_recipient(conn, pid).get(k) for k in ("recipient_person_id", "recipient_name",
                                                       "recipient_contact_id", "recipient_contact")),
              cents, mode, dumps(snap), snap["hash"], actor, stamp, stamp))
     except sqlite3.IntegrityError:    # a second click or a second program prepared this version first
@@ -189,7 +189,7 @@ def refresh(conn: sqlite3.Connection, offer_id: int, prop: Mapping[str, Any], sn
     price stays. The seller and recipient are read again too."""
     o = unsent(conn, offer_id)
     cents = _need_default(snap) if o["price_mode"] == "default" else o["price_cents"]
-    recipient = _recipient(conn, o["property_id"])
+    recipient = current_recipient(conn, o["property_id"])
     conn.execute(
         "UPDATE offers SET snapshot_json=?, snapshot_hash=?, price_cents=?, seller_name=?, recipient_person_id=?, "
         "recipient_name=?, recipient_contact_id=?, recipient_contact=?, status=?, updated_at=? WHERE id=?",
@@ -210,7 +210,7 @@ def set_price(conn: sqlite3.Connection, offer_id: int, price: Any, actor: str) -
     if price in (None, ""):
         cents, mode = _need_default(loads(o["snapshot_json"], {}) or {}), "default"
     else:
-        cents, mode = _price(price), "override"
+        cents, mode = parse_price(price), "override"
     conn.execute("UPDATE offers SET price_cents=?, price_mode=?, status=?, updated_at=? WHERE id=?",
                  (cents, mode, _reset_letter(o), now_iso(), offer_id))
     _event(conn, offer_id, "price_changed", actor, from_cents=o["price_cents"], to_cents=cents, price_mode=mode)
@@ -297,7 +297,7 @@ def record_historical(conn: sqlite3.Connection, prop: Mapping[str, Any], actor: 
     """An offer made before this app, entered by hand. It is a sent version with an incomplete snapshot (the rent
     it was based on is unknown). The same price, day and method for a property is refused as already recorded."""
     pid = int(prop["id"])
-    cents = _price(price)
+    cents = parse_price(price)
     if how not in SENT_HOW:
         raise ValueError(f"Say how it was sent: {', '.join(SENT_HOW)}.")
     day = _day(sent_on, "send date", cfg.today())
@@ -330,7 +330,7 @@ def correct_historical(conn: sqlite3.Connection, offer_id: int, changes: Mapping
     o = _get(conn, offer_id)
     if o["origin"] != "historical":
         raise ValueError("Only an offer entered after the fact can be corrected. A prepared offer is final once sent.")
-    cents = _price(changes["price"]) if changes.get("price") not in (None, "") else o["price_cents"]
+    cents = parse_price(changes["price"]) if changes.get("price") not in (None, "") else o["price_cents"]
     how = changes.get("how") or o["sent_how"]
     if how not in SENT_HOW:
         raise ValueError(f"Say how it was sent: {', '.join(SENT_HOW)}.")
@@ -358,8 +358,8 @@ def _amounts(classification: str, low: Any, high: Any) -> tuple[int | None, int 
         raise ValueError("Only a counteroffer (or a reply that needs review) can carry an amount.")
     if not has_low:
         raise ValueError("Enter the lower figure of the range (or the single figure they named).")
-    lo = _price(low)
-    hi = _price(high) if has_high else None
+    lo = parse_price(low)
+    hi = parse_price(high) if has_high else None
     if hi is not None and hi < lo:
         raise ValueError("The top of their range is below the bottom of it.")
     return lo, hi
@@ -540,7 +540,7 @@ def property_block(conn: sqlite3.Connection, pid: int, snap: Mapping[str, Any]) 
         "next_version": (latest["version"] + 1) if latest else 1,
         "current": {"annual_cents": snap.get("annual_cents"), "basis": snap.get("basis"), "source": snap.get("source"),
                     "default_cents": default_cents(snap)},
-        "recipient": _recipient(conn, pid).get("recipient_name"),
+        "recipient": current_recipient(conn, pid).get("recipient_name"),
         "sent_how": list(SENT_HOW), "class_choices": [[c, CLASS_LABELS[c]] for c in CLASSES],
     }
 

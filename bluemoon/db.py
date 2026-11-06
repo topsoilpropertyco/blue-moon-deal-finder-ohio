@@ -461,6 +461,39 @@ CREATE TABLE IF NOT EXISTS offer_documents (
 );
 CREATE INDEX IF NOT EXISTS ix_offer_documents_offer ON offer_documents(offer_id);
 
+-- How a property got on the list by hand ("Add a property"), so a new listing, a duplicate and a match resolved by
+-- you stay apart. Appended and never changed. The link is only saved as the source: nothing is fetched from it.
+CREATE TABLE IF NOT EXISTS lead_events (
+  id INTEGER PRIMARY KEY,
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('new_listing', 'duplicate', 'same_property')),
+  detail_json TEXT,
+  actor TEXT NOT NULL, at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_lead_events_property ON lead_events(property_id);
+
+-- "Prepare offers for selected": one batch and one row per property. A row ends as created (a new draft), existing
+-- (the property already had an unsent draft, so nothing was added), failed (can be retried) or excluded (left out
+-- by you). A retry only touches failed rows, so it can never make a second draft.
+CREATE TABLE IF NOT EXISTS offer_batches (
+  id INTEGER PRIMARY KEY,
+  market_id INTEGER NOT NULL REFERENCES markets(id),
+  status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'done', 'partial')),
+  letters_ready INTEGER NOT NULL DEFAULT 0,      -- 1: the LOI template was active when the batch ran
+  created_by TEXT NOT NULL, created_at TEXT NOT NULL, finished_at TEXT
+);
+CREATE TABLE IF NOT EXISTS offer_batch_rows (
+  id INTEGER PRIMARY KEY,
+  batch_id INTEGER NOT NULL REFERENCES offer_batches(id) ON DELETE CASCADE,
+  property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  price_cents INTEGER CHECK (price_cents IS NULL OR price_cents > 0),   -- typed price; NULL follows the 4x default
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'created', 'existing', 'failed', 'excluded')),
+  offer_id INTEGER REFERENCES offers(id) ON DELETE SET NULL,
+  message TEXT,
+  UNIQUE (batch_id, property_id)
+);
+
 -- Deals that worked out (or not), entered by you. Used to tune the score.
 CREATE TABLE IF NOT EXISTS outcomes (
   property_id INTEGER PRIMARY KEY REFERENCES properties(id) ON DELETE CASCADE,

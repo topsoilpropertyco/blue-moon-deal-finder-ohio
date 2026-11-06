@@ -24,5 +24,8 @@ pricing:
   # days after the day it was sent. You can change the date on that action.
   follow_up_days: 7
 
+  # The most properties one "Prepare offers for selected" run takes.
+  batch_max_properties: 100
+
   # The date ages and years owned are worked out against. Leave blank for today; tests set a fixed date.
   evaluation_date:

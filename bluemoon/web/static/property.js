@@ -32,6 +32,7 @@
     year_unknown: 'Year built unknown', year_invalid: 'Year built looked wrong, so it is ignored', units_unknown: 'Unit count unknown',
     units_from_addresses: 'Units estimated from the number of addresses', shared_apn: 'Shares a parcel number with another row',
     no_owner_name: 'No owner name in the export', no_coordinates: 'No map location yet', no_address: 'No street address',
+    manual_lead: 'Added by hand (nothing was fetched for it)',
     county_owner_differs: 'The county tax record shows a different owner than the Crexi export',
   };
   const RENT_FIT = {in: ['g', 'Area rents match the scale'], near: ['y', 'Area rents are close to the scale'], out: ['r', 'Area rents are off the scale'], na: ['n', 'No HUD rent for this area']};
@@ -94,7 +95,7 @@
       c.outcomeEarly = Number((d.drill || {}).level || d.level || 1) === 3 || !!(d.outcome && d.outcome.value);
     }
     const early = c.outcomeEarly;
-    root.innerHTML = headerHtml(d) + BM.people.html(d) + scoreHtml(d) + buyboxHtml(d) + (early ? outcomeHtml(d) : '') + contactHtml(d) + crexiHtml(d) + whyHtml(d) + photoHtml(d) +
+    root.innerHTML = headerHtml(d) + BM.people.html(d) + BM.leads.html(d) + scoreHtml(d) + buyboxHtml(d) + (early ? outcomeHtml(d) : '') + contactHtml(d) + crexiHtml(d) + whyHtml(d) + photoHtml(d) +
       BM.pricing.html(d) + BM.offers.html(d) + rentHtml(d) + buildingHtml(d) + ownerHtml(d) + linksHtml(d) + (early ? '' : outcomeHtml(d)) + rawHtml(d);
     root.querySelectorAll('details[data-keep]').forEach((el) => { if (c.kept.has(el.getAttribute('data-keep'))) el.open = true; });
     BM.pricing.mount(root, d);

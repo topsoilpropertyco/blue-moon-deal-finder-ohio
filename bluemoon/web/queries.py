@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .. import history, napkin, offers, people, pricing
+from .. import history, leads, napkin, offers, people, pricing
 from ..config import AssetClass, Settings, get_settings, has_secret
 from ..db import dumps, loads, market_by_slug, one, pending_rescore, rows, scalar, this_month
 from ..drill import engine
@@ -454,6 +454,7 @@ def property_detail(conn: sqlite3.Connection, slug: str, pid: int, settings: Set
         "owner": _owner_detail(conn, prop, layers["owners"]),
         "people": people.block(conn, prop, mc.settings),
         "offers": offers.property_block(conn, pid, napkin.snapshot(conn, prop, mc.ac.key, pcfg, layers["rent_fits"])),
+        "lead_events": leads.events(conn, pid),
         "drill": drill,
         "links": drill_links.links_for({**prop, "asset_class": mc.ac.key}, None, drill["best_guess_person"],
                                        settings=mc.settings, parse_owner=False),

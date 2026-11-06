@@ -81,7 +81,7 @@
     if (!knownView(s, chips, prefs.view)) prefs.view = 'all';
 
     const ctx = {root, slug, s, prefs, chips, cols: columns(s), items: [], total: 0, counts: {}, token: 0,
-      loading: false, observer: null, group: null, sheet: null, busy: false};
+      loading: false, observer: null, group: null, sheet: null, busy: false, picked: new Set()};
     if (active && active.observer) active.observer.disconnect();
     active = ctx;
 
@@ -91,7 +91,7 @@
     }
     if (review) ctx.group = groupFromSummary(ctx, null);
     root.innerHTML = headHtml(s) + '<div class="strip" data-tiles>' + tilesHtml(s) + '</div>' +
-      '<div class="why-wrap" data-why-wrap></div><div class="review-wrap" data-review></div>' + toolbarHtml(ctx) +
+      '<div class="why-wrap" data-why-wrap></div><div class="review-wrap" data-review></div>' + toolbarHtml(ctx) + '<div data-leads-wrap></div>' +
       '<div class="deals-status note" data-status aria-live="polite"></div><div data-body></div>';
     drawWhy(ctx);
     drawReview(ctx);
@@ -570,6 +570,8 @@
       '<input class="search" type="search" placeholder="Search address, owner, parcel" aria-label="Search" value="' + esc(p.q) + '" data-search>' +
       '<select class="select" aria-label="Sort" data-sort>' + sorts.map(([k, l]) =>
         '<option value="' + k + '"' + (k === p.sort ? ' selected' : '') + '>Sort: ' + esc(l) + '</option>').join('') + '</select>' +
+      '<button type="button" class="btn" data-lead-open>Add a property</button>' +
+      '<button type="button" class="btn" data-batch-open disabled>Prepare offers for selected</button>' +
       '<span class="spacer"></span>' +
       '<div class="seg" role="group" aria-label="Show as">' +
       '<button type="button" data-mode="list" aria-pressed="' + (p.mode === 'list') + '">List</button>' +
@@ -651,9 +653,18 @@
       r.querySelectorAll('[data-mode]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
       refresh(ctx);
     });
+    const wrap = r.querySelector('[data-leads-wrap]');
+    r.querySelector('.deals-tools').addEventListener('click', (ev) => {
+      if (ev.target.closest('[data-lead-open]')) {
+        BM.leads.addPanel(wrap, () => { BM.refreshSummary({fresh: true}).catch(() => {}); refresh(ctx); });
+      } else if (ev.target.closest('[data-batch-open]') && ctx.picked.size) {
+        BM.leads.batchPanel(wrap, Array.from(ctx.picked), () => refresh(ctx));
+      }
+    });
     const body = r.querySelector('[data-body]');
+    body.addEventListener('change', (ev) => onPick(ctx, ev));
     body.addEventListener('click', (ev) => {
-      if (ev.target.closest('a')) return;
+      if (ev.target.closest('a, [data-pick], [data-pick-all], .card-pick')) return;     // a checkbox never opens the drawer
       const act = ev.target.closest('[data-row-act]');     // a row's own buttons never open the drawer
       if (act) { rowAct(ctx, act); return; }
       const more = ev.target.closest('[data-more]');
@@ -671,6 +682,38 @@
       ev.preventDefault();
       BM.openProperty(row.getAttribute('data-id'));
     });
+  }
+
+  /* ---------- picking rows for 'Prepare offers for selected' ---------- */
+
+  function isPicked(p) {
+    return !!active && active.picked.has(Number(p.id));
+  }
+
+  function onPick(ctx, ev) {
+    const t = ev.target;
+    if (!(t instanceof Element)) return;
+    if (t.matches('[data-pick-all]')) {
+      ctx.items.forEach((p) => { if (t.checked) ctx.picked.add(Number(p.id)); else ctx.picked.delete(Number(p.id)); });
+      ctx.root.querySelectorAll('[data-pick]').forEach((box) => { box.checked = t.checked; });
+    } else if (t.matches('[data-pick]')) {
+      const id = Number(t.getAttribute('data-pick'));
+      if (t.checked) ctx.picked.add(id); else ctx.picked.delete(id);
+      ctx.root.querySelectorAll('[data-pick="' + id + '"]').forEach((box) => { box.checked = t.checked; });   // the row and its phone card
+    } else {
+      return;
+    }
+    syncPicks(ctx);
+  }
+
+  function syncPicks(ctx) {
+    const btn = ctx.root.querySelector('[data-batch-open]');
+    if (btn) {
+      btn.disabled = !ctx.picked.size;
+      btn.textContent = 'Prepare offers for selected' + (ctx.picked.size ? ' (' + ctx.picked.size + ')' : '');
+    }
+    const all = ctx.root.querySelector('[data-pick-all]');
+    if (all) all.checked = ctx.items.length > 0 && ctx.items.every((p) => ctx.picked.has(Number(p.id)));
   }
 
   /** Clicks in the Why? panel and the Review header: Review, Decide, a choice, Cancel, Back to all deals. */
@@ -732,6 +775,7 @@
     if (append && ctx.loading) return;
     const token = ++ctx.token;
     ctx.loading = true;
+    if (!append) ctx.picked.clear();     // the rows on screen changed, so the ticks no longer match them
     const body = ctx.root.querySelector('[data-body]');
     const more = body.querySelector('[data-more]');
     if (append && more) {
@@ -797,7 +841,7 @@
       return;
     }
     const c = ctx.cols;
-    const head = '<th>Blue Moon</th><th>Property</th><th>Contact level</th><th class="c">' + esc(c.sizeHead) +
+    const head = '<th class="pick"><input type="checkbox" data-pick-all aria-label="Select every property shown"></th><th>Blue Moon</th><th>Property</th><th>Contact level</th><th class="c">' + esc(c.sizeHead) +
       '</th><th class="c">Drive</th>' + (c.visual ? '<th>' + esc(c.target) + '</th>' : '') + (c.rent ? '<th title="HUD area rents compared with the buyer\'s rent scale">Area rent check</th>' : '') +
       '<th>Owner type</th><th class="c">Owned</th><th title="How many score signals we have data for">Signals</th>';
     const sel = BM.route.property;
@@ -805,6 +849,7 @@
       ctx.items.map((p) => rowHtml(p, c, sel)).join('') + '</tbody></table></div>' +
       '<div class="cards" data-cards>' + ctx.items.map((p) => cardHtml(p, c, sel)).join('') + '</div>' + moreHtml(ctx);
     observeMore(ctx);
+    syncPicks(ctx);
   }
 
   function appendRows(ctx, items) {
@@ -816,6 +861,7 @@
     if (old) old.remove();
     body.insertAdjacentHTML('beforeend', moreHtml(ctx));
     observeMore(ctx);
+    syncPicks(ctx);
   }
 
   function moreHtml(ctx) {
@@ -983,6 +1029,7 @@
     const years = yearsText(p);
     const cls = [p.in_buybox === false ? 'out' : '', Number(sel) === Number(p.id) ? 'sel' : ''].filter(Boolean).join(' ');
     return '<tr data-id="' + esc(p.id) + '" tabindex="0"' + (cls ? ' class="' + cls + '"' : '') + '>' +
+      '<td class="pick"><input type="checkbox" data-pick="' + esc(p.id) + '" aria-label="' + esc('Select ' + addr + ' for offers') + '"' + (isPicked(p) ? ' checked' : '') + '></td>' +
       '<td>' + moonCell(p) + '</td>' +
       '<td><div class="addr" title="' + esc(addr) + '">' + esc(addr) + '</div><div class="city">' + esc(city) + '</div>' +
       (aside.text ? '<span class="' + aside.cls + '">' + esc(aside.text) + '</span>' : '') + offerPill(p) + acts + '</td>' +
@@ -1019,6 +1066,7 @@
     ].filter(Boolean).join('');
     // The card is a button, so its own buttons sit next to it (a button inside a button breaks the card).
     return '<div class="card-row' + (acts ? ' has-acts' : '') + '" data-card="' + esc(p.id) + '">' +
+      '<label class="card-pick"><input type="checkbox" data-pick="' + esc(p.id) + '"' + (isPicked(p) ? ' checked' : '') + '> Select for offers</label>' +
       '<button type="button" class="' + cls + '" data-id="' + esc(p.id) + '">' +
       '<span class="side">' + ui.moon(p.score, 30) + '<span class="pct num">' + fmt.pct(p.score) + '</span></span>' +
       '<span class="who"><span class="addr">' + esc(addr) + '</span><span class="city">' + esc(city + drive) + '</span>' +

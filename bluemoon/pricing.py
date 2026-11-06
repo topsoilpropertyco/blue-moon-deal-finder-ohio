@@ -50,6 +50,7 @@ class PricingConfig(BaseModel):
     nominal_sale_price: Decimal = Decimal(1000)
     earliest_year_built: int = 1700
     follow_up_days: int = Field(default=7, ge=0, le=365)
+    batch_max_properties: int = Field(default=100, ge=1, le=1000)
     evaluation_date: date | str | None = None
 
     def today(self) -> date:
