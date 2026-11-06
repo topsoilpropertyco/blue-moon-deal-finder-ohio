@@ -203,6 +203,13 @@ def plan_facts(existing: Mapping[str, Any], incoming: Mapping[str, Any], columns
                 plan.alternates[f] = (new, old)
                 if f == "owner_name":
                     plan.new_owner = clean_str(new)
+    # The area type labels building_sqft, so it is only filled from the file when the file's sqft is the one kept
+    # (filled, or equal to the stored one). Otherwise the label would sit on a number from another source.
+    if "building_area_type" in plan.fills and "building_sqft" in cols and "building_sqft" not in plan.fills:
+        old_sqft, new_sqft = existing.get("building_sqft"), incoming.get("building_sqft")
+        if not (old_sqft is not None and new_sqft is not None and _same("building_sqft", old_sqft, new_sqft)):
+            del plan.fills["building_area_type"]
+            plan.merged["building_area_type"] = existing.get("building_area_type")
     # Mailing address: one group. A blank original is filled (all its parts); a different address is an alternate
     # and also a new mailing address to try; the same address just gets its blank parts filled. A stored address
     # with no street but a city, state or ZIP that disagrees with the new row is a different address too: the

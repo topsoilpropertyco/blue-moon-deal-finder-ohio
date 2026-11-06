@@ -454,3 +454,12 @@ def test_one_month_projection_is_only_partly_known(conn):
 def test_impossible_sale_dates_are_flagged(sale):
     got = history.ownership_info(sale, CFG)
     assert got["flag"] == "impossible" and got["years"] is None and "can't be right" in got["text"]
+
+
+def test_a_re_import_does_not_label_a_kept_size_with_the_new_files_area_type(conn, tmp_path):
+    p = import_csv(conn, tmp_path, "Building SqFt", "1 Test St,Springfield,OH,45503,Clark,30,527000,40000")
+    assert (p["building_sqft"], p["building_area_type"]) == (40000, None)
+    p = import_csv(conn, tmp_path, "RBA", "1 Test St,Springfield,OH,45503,Clark,30,527000,35000")
+    assert (p["building_sqft"], p["building_area_type"]) == (40000, None)      # 35000 is only an alternate
+    p = import_csv(conn, tmp_path, "RBA", "1 Test St,Springfield,OH,45503,Clark,30,527000,40000")
+    assert p["building_area_type"] == "rentable"                               # same figure: the label fits

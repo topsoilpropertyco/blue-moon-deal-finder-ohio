@@ -1697,6 +1697,9 @@ def _owner_changed(conn: sqlite3.Connection, ctx: Ctx, owner: str) -> None:
     n = pass_number(ctx.attempts) + 1
     _insert_attempt(conn, ctx.id, PASS_MARKER, "skipped", f"Started pass {n}: new owner on record ({owner}).", "auto")
     marks = ",".join("?" for _ in OWNER_NAME_ROLES)   # the old owner's names stay on file, but not as the owner
+    conn.execute(f"DELETE FROM property_recipients WHERE property_id=? AND person_id IN "   # offers must not
+                 f"(SELECT id FROM people WHERE property_id=? AND role IN ({marks}))",       # keep writing to them
+                 (ctx.id, ctx.id, *OWNER_NAME_ROLES))
     conn.execute(f"UPDATE people SET role='previous_owner' WHERE property_id=? AND role IN ({marks})",
                  (ctx.id, *OWNER_NAME_ROLES))
     if st.get("confirmed_at"):

@@ -48,6 +48,22 @@ def _link(value: Any) -> str | None:
     return text if "://" in text else f"https://{text}"
 
 
+_UNIT_TAIL = re.compile(r"^(?P<street>.*?\S)[\s,]+(?:(?:apt|apartment|unit|suite|ste)\b\.?\s*#?|#)\s*(?P<unit>[A-Za-z0-9-]{1,10})$",
+                        re.IGNORECASE)
+
+
+def split_unit(address: str) -> tuple[str, str | None]:
+    """'100 Main St Apt B' -> ('100 Main St', 'B'), the way Crexi rows keep the unit apart from the street."""
+    m = _UNIT_TAIL.match(address.strip())
+    if m and re.match(r"\d", m.group("street")):
+        return m.group("street"), m.group("unit").upper()
+    return address, None
+
+
+def _unit_norm(unit: Any) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(clean_str(unit) or "").upper())
+
+
 def parse(fields: Mapping[str, Any]) -> dict:
     """The lead as the properties table keeps it, or a ValueError in plain English."""
     address = _text(fields.get("address"), "address", MAX_ADDRESS)
@@ -63,9 +79,12 @@ def parse(fields: Mapping[str, Any]) -> dict:
     zip_ = normalize_zip(zip_)
     city = _text(fields.get("city"), "city", MAX_CITY)
     source_id = source_id_from_link(link)
-    lead = {"address": address, "city": city, "state": state.upper() if state else None, "zip": zip_,
+    unit = None
+    if address:
+        address, unit = split_unit(address)
+    lead = {"address": address, "unit": unit, "city": city, "state": state.upper() if state else None, "zip": zip_,
             "crexi_url": link, "source": "crexi" if link else "manual", "source_id": source_id}
-    lead["property_key"] = (address_key(address, None, city, lead["state"], zip_) if address
+    lead["property_key"] = (address_key(address, unit, city, lead["state"], zip_) if address
                             else f"src:crexi:{source_id or link.lower()}")
     return lead
 
@@ -81,8 +100,11 @@ def _match_why(lead: Mapping[str, Any], row: Mapping[str, Any]) -> tuple[str, st
     link = crexi_batches.link_key(lead["crexi_url"])
     if link and link == crexi_batches.link_key(row["crexi_url"]):
         return CERTAIN, "same Crexi link"
+    same_unit = _unit_norm(lead.get("unit")) == _unit_norm(row.get("unit"))
     key = crexi_batches.address_key(lead)
     if key and key == crexi_batches.address_key(row):
+        if not same_unit:
+            return UNSURE, "same street address, city and ZIP, but the unit is different or missing"
         return CERTAIN, "same street address, city and ZIP"
     if _same_street(lead, row):
         return UNSURE, "same street address, but the city or ZIP is different or missing"
@@ -145,10 +167,10 @@ def add(conn: sqlite3.Connection, market: Mapping[str, Any], fields: Mapping[str
     stamp = now_iso()
     try:
         cur = conn.execute(
-            "INSERT INTO properties(market_id, property_key, source, source_id, crexi_url, address, city, state, zip, "
-            "raw_json, flags_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO properties(market_id, property_key, source, source_id, crexi_url, address, unit, city, state, "
+            "zip, raw_json, flags_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (market["id"], lead["property_key"], lead["source"], lead["source_id"], lead["crexi_url"], lead["address"],
-             lead["city"], lead["state"], lead["zip"], "{}", dumps(flags), stamp, stamp))
+             lead["unit"], lead["city"], lead["state"], lead["zip"], "{}", dumps(flags), stamp, stamp))
     except sqlite3.IntegrityError:      # another click or program added the same key a moment ago
         conn.rollback()
         row = one(conn, "SELECT id FROM properties WHERE market_id = ? AND property_key = ?",

@@ -314,3 +314,18 @@ def test_exports_carry_the_lead_flag_and_the_offer_status(conn, settings):
     found = list(csv.DictReader(made["ranked_list.csv"].open(encoding="utf-8-sig")))
     mine = [r for r in found if r["Address"] == "12 Maple St"]
     assert mine and "manual_lead" in mine[0]["Flags"] and mine[0]["Offer status"] == "Internal draft"
+
+
+def test_units_are_compared_when_a_lead_meets_a_unit_row(conn):
+    pid = add_prop(conn, address="100 MAIN ST", unit="B", property_key="addr:100 MAIN ST B|SPRINGFIELD|OH|45503")
+    here = {"city": "Springfield", "state": "OH", "zip": "45503"}
+    typed = leads.parse({"address": "100 Main St Apt B", **here})
+    assert (typed["address"], typed["unit"]) == ("100 Main St", "B")
+    assert leads.parse({"address": "100 Main Street #B", **here})["unit"] == "B"
+    assert [(m["property_id"], m["certainty"]) for m in leads.find_matches(conn, market(conn)["id"], typed)] == [(pid, leads.CERTAIN)]
+    plain = leads.find_matches(conn, market(conn)["id"], leads.parse({"address": "100 Main St", **here}))
+    assert [(m["property_id"], m["certainty"]) for m in plain] == [(pid, leads.UNSURE)]
+    other = leads.find_matches(conn, market(conn)["id"], leads.parse({"address": "100 Main St Unit C", **here}))
+    assert [m["certainty"] for m in other] == [leads.UNSURE]
+    res = leads.add(conn, market(conn), {"address": "100 Main St Apt B", **here}, "seth")
+    assert (res["outcome"], res["property_id"]) == ("duplicate", pid)

@@ -1414,6 +1414,10 @@ def _update(conn: sqlite3.Connection, existing: dict, p: ParsedRow, import_id: i
             if not same_value(f, incoming, edit.get("old_value")):
                 kept["_crexi_new"] += 1
         merged[f] = edit["value"]
+        if (f == "building_sqft" and "building_area_type" not in (edits or {}) and "building_area_type" in merged
+                and not same_value(f, existing.get(f), edit["value"])
+                and not (incoming is not None and same_value(f, incoming, edit["value"]))):
+            merged["building_area_type"] = None   # a hand-set size is not the size the old label described
         if f == "units":
             notes.discard("units_from_addresses")   # a count typed by hand is a real unit count
     rec = PropertyRecord.model_construct(**merged)  # values are already typed (ours or the DB's)

@@ -227,3 +227,17 @@ def test_routes_refuse_a_property_from_another_market(client, conn):
     other = next(m["slug"] for m in rows(conn, "SELECT slug FROM markets") if m["slug"] != MARKET)
     assert client.put(f"/api/m/{other}/properties/{pid}/recipient", json={"person_id": bea}).status_code == 404
     assert client.put(f"/api/m/{other}/properties/{pid}/people/{bea}/role", json={"role": "member"}).status_code == 404
+
+
+def test_a_new_owner_drops_the_old_owner_as_offer_recipient(conn):
+    from bluemoon import offers
+    pid = add_prop(conn, owner_name="ROE RICHARD")
+    engine.run_auto_stages(conn, MARKET)
+    old = scalar(conn, "SELECT id FROM people WHERE property_id=? AND role='owner_of_record'", (pid,))
+    people.choose_recipient(conn, pid, old, None, None, "seth")
+    assert offers.current_recipient(conn, pid)["recipient_person_id"] == old
+    conn.execute("UPDATE properties SET owner_name='SMITH JOHN A' WHERE id=?", (pid,))
+    conn.commit()
+    engine.run_auto_stages(conn, MARKET)
+    assert scalar(conn, "SELECT role FROM people WHERE id=?", (old,)) == "previous_owner"
+    assert offers.current_recipient(conn, pid) == {} and block(conn, pid)["recipient"] is None
