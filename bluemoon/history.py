@@ -66,6 +66,9 @@ def ownership_info(sale_date: Any, cfg: PricingConfig) -> dict:
     if future:
         return {"since": since, "years": None, "precision": precision, "flag": "future",
                 "text": f"The recorded sale ({since}) is in the future, so years owned is not shown"}
+    if int(since[:4]) < cfg.earliest_year_built:
+        return {"since": since, "years": None, "precision": precision, "flag": "impossible",
+                "text": f"The recorded sale ({since}) can't be right, so years owned is not shown"}
     if precision == "exact":
         return {"since": since, "years": years, "precision": precision, "flag": None,
                 "text": f"Owned {years:g} years (exact: sold {since})"}

@@ -36,6 +36,10 @@ STATE_PROJECTION = "projection"       # one month times twelve: a guess about th
 STATE_REVIEW = "needs_review"         # not enough or too ambiguous to turn into a yearly figure
 
 
+MAX_DOLLARS = Decimal(10) ** 12         # one typed amount past this is a typo
+MAX_CENTS = 10**16                      # results (yearly rent, 6x scenarios) stay well inside SQLite's 64-bit integers
+
+
 class MoneyError(ValueError):
     """A money value that can't be used. The message is written for Seth."""
 
@@ -86,11 +90,16 @@ def to_decimal(value: Any, what: str = "amount") -> Decimal:
         raise MoneyError(f"The {what} is not a number.")
     if d < 0:
         raise MoneyError(f"The {what} can't be negative.")
+    if d > MAX_DOLLARS:
+        raise MoneyError(f"The {what} is too large to be right. Check the number of zeros.")
     return d
 
 
 def round_cents(dollars: Decimal) -> int:
-    return int((dollars * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    cents = (dollars * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    if abs(cents) > MAX_CENTS:
+        raise MoneyError("That amount is too large to be right. Check the number of zeros.")
+    return int(cents)
 
 
 def to_cents(value: Any, what: str = "amount") -> int:

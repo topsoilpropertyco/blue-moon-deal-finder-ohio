@@ -134,6 +134,8 @@ def _need_default(snap: Mapping[str, Any]) -> int:
     if cents is None:
         raise ValueError("There is no Blue Moon price to start from because the yearly rent is unknown or $0. "
                          "Enter a rent figure first, or type the price you want.")
+    if cents > MAX_PRICE_CENTS:
+        raise ValueError("The Blue Moon price is too large to be right. Check the rent figure for extra zeros.")
     return cents
 
 

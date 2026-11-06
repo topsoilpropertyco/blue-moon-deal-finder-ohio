@@ -413,3 +413,44 @@ def test_the_export_carries_rent_and_price_and_never_writes_unknown_as_zero(conn
     assert b["prior_check"].startswith("Unavailable")
     headers = [c.header for c in data.our_columns()]
     assert {"Yearly gross rent", "Blue Moon price", "Price multiple", "Area rent check"} <= set(headers)
+
+
+# --- review fixes (math) ------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("body", [
+    {"source": "owner", "basis": "actual", "total": "1e20", "total_period": "monthly"},
+    {"source": "owner", "basis": "actual", "total": "1e30", "total_period": "monthly"},
+    {"source": "owner", "basis": "actual", "total": "92233720368547758", "total_period": "annual"},
+    {"source": "owner", "basis": "actual", "rate": "1e20", "rate_period": "monthly", "quantity": "1e10",
+     "quantity_kind": "units"}])
+def test_huge_money_is_a_400_not_a_500(client, conn, body):
+    pid = add_prop(conn)
+    assert client.post(url(pid, "/rent/records"), json=body).status_code == 400
+    assert client.put(url(pid, "/rent/assumptions"), json={"rents": {"2": "1e30"}}).status_code == 400
+    assert rows(conn, "SELECT id FROM rent_records") == []
+
+
+def test_offer_default_price_past_the_cap_is_refused():
+    from bluemoon import offers
+    snap = {"scenarios": [{"role": "reference", "cents": offers.MAX_PRICE_CENTS + 1}]}
+    with pytest.raises(ValueError, match="too large"):
+        offers._need_default(snap)
+
+
+def test_zero_unit_bedroom_types_do_not_need_a_rent():
+    shares = {0: Decimal(10), 1: Decimal(30), 2: Decimal(50), 3: Decimal(10)}
+    est = napkin.estimate(1, {}, {2: 120000}, shares)
+    assert est["available"] and [line["bedrooms"] for line in est["lines"]] == [2] and est["monthly_cents"] == 120000
+
+
+def test_one_month_projection_is_only_partly_known(conn):
+    pid = add_prop(conn)
+    record(conn, pid, "actual", total="34240", total_period="single_month")
+    res = napkin.resolve(prop_of(conn, pid), napkin.records_of(conn, pid), {}, {}, CFG, "apartments")
+    assert res["record"]["state"] == "projection" and res["confidence"] == napkin.CONFIDENCE["partly"]
+
+
+@pytest.mark.parametrize("sale", ["0000", "1000", "0001-01-01"])
+def test_impossible_sale_dates_are_flagged(sale):
+    got = history.ownership_info(sale, CFG)
+    assert got["flag"] == "impossible" and got["years"] is None and "can't be right" in got["text"]

@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Any
 
 from . import history, pricing
+from .pricing import STATE_PROJECTION
 from .db import dumps, loads, now_iso, one, rows
 from .pricing import (
     STATE_OK,
@@ -119,6 +120,7 @@ def estimate(units: int | None, assumed: Mapping[str, Any], hud: Mapping[int, in
         out["reason"] = ("The unit count is not known. Type it in." if not count else
                          "There is no assumed bedroom mix for this kind of property. Type the real mix in.")
         return out
+    counts = {br: n for br, n in counts.items() if n > 0}     # a type with no units needs no rent
     if not counts:
         out["reason"] = "The typed mix has no units in it."
         return out
@@ -288,7 +290,8 @@ def resolve(prop: Mapping[str, Any], records: list[dict], assumed: Mapping[str, 
     chosen = select(records)
     review = sum(1 for r in records if r["state"] == STATE_REVIEW)
     if chosen:
-        word = "reported" if chosen["basis"] in ("actual", "scheduled") else "partly"
+        word = ("reported" if chosen["basis"] in ("actual", "scheduled") and chosen["state"] != STATE_PROJECTION
+                else "partly")      # one month x 12 is a projection, not a T12
         annual, basis, source = chosen["annual_cents"], chosen["basis"], "record"
     elif est["available"]:
         word = "partly" if est["user_inputs"] else "estimate"
