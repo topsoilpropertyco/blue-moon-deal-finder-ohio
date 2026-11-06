@@ -61,7 +61,7 @@
   }
 
   function sentText(s) {
-    return 'Sent ' + esc(s.how) + (s.on ? ' on ' + esc(BM.fmt.date(s.on)) : '') + (s.by ? ' by ' + esc(s.by) : '') + ' · ' + esc(s.via_label);
+    return 'Sent ' + esc(s.how) + (s.on ? ' on ' + esc(BM.fmt.date(s.on)) : '') + (s.by ? ' by ' + esc(BM.who(s.by)) : '') + ' · ' + esc(s.via_label);
   }
 
   /* ---------- the drawer section ---------- */
@@ -102,7 +102,7 @@
 
   function sendsHtml(o) {
     const list = o.sends.length ? '<ul class="of-list">' + o.sends.map((x) => '<li><span class="pill ' + (x.state === 'failed' ? 'bad' : 'warn') + '">' + esc(x.state_label) + '</span> ' +
-      esc(x.recipient_contact || '') + ' <span class="hint">' + esc(BM.fmt.date(x.updated_at)) + ' · ' + esc(x.created_by) + (x.error ? ' · ' + esc(x.error) : '') + '</span></li>').join('') + '</ul>' : '';
+      esc(x.recipient_contact || '') + ' <span class="hint">' + esc(BM.fmt.date(x.updated_at)) + ' · ' + esc(BM.who(x.created_by)) + (x.error ? ' · ' + esc(x.error) : '') + '</span></li>').join('') + '</ul>' : '';
     const retry = o.sends.some((x) => x.state === 'failed');
     const allowed = o.status === 'ready_to_send' && !o.sends.some((x) => x.state !== 'failed');
     return '<h4>Send</h4><p class="note">There is no live email yet. The test outbox only saves what would be sent, in <code>data/outbox</code>, and the offer stays unsent until you mark it sent.</p>' + list +
@@ -148,7 +148,7 @@
     const link = (url, label) => safeUrl(url) ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + label + '</a>' : '';
     return '<li><span class="pill ' + (d.current ? 'good' : 'warn') + '">' + (d.current ? 'Matches this offer' : 'Made from older numbers') + '</span> ' +
       link(d.doc_url, 'Google Doc') + ' ' + link(d.pdf_url, 'PDF') +
-      ' <span class="hint">' + esc(BM.fmt.date(d.created_at)) + ' · ' + esc(d.created_by) + (d.template_version ? ' · template version ' + esc(d.template_version) : '') + '</span></li>';
+      ' <span class="hint">' + esc(BM.fmt.date(d.created_at)) + ' · ' + esc(BM.who(d.created_by)) + (d.template_version ? ' · template version ' + esc(d.template_version) : '') + '</span></li>';
   }
 
   function reviewHtml(p) {
@@ -175,7 +175,7 @@
 
   function eventsHtml(o) {
     return '<details class="p-more"><summary>History (' + o.events.length + ')</summary><ul class="of-events">' +
-      o.events.map((e) => '<li><b>' + esc(e.kind.replace(/_/g, ' ')) + '</b> <span class="hint">' + esc(BM.fmt.date(e.at)) + ' · ' + esc(e.actor) + '</span></li>').join('') + '</ul></details>';
+      o.events.map((e) => '<li><b>' + esc(e.kind.replace(/_/g, ' ')) + '</b> <span class="hint">' + esc(BM.fmt.date(e.at)) + ' · ' + esc(BM.who(e.actor)) + '</span></li>').join('') + '</ul></details>';
   }
 
   function offerHtml(o, b) {
@@ -211,7 +211,7 @@
     if (!st || st.id !== d.id) st = {id: d.id, root: null, busy: false, previews: {}};
     st.d = d;
     return '<section class="sec of" data-part="offers" aria-labelledby="of-h"><h2 id="of-h">Offers</h2>' +
-      '<p class="note">Blue Moon price (4x rent) is the starting price here. It is not the Blue Moon score, which is the chance the owner sells. A draft is not a sent offer.</p>' +
+      '<p class="note">Blue Moon price (4x rent) is the starting price here. It is not the Blue Moon score, which is how worth chasing the owner is. A draft is not a sent offer.</p>' +
       prepareHtml(b) + (b.offers.length ? b.offers.map((o) => offerHtml(o, b)).join('') : '<p class="note">No offers yet.</p>') +
       '<details class="p-more"><summary>Record an offer you made before</summary><form class="of-stack" data-of-form="historical">' +
       '<label class="field">Price in dollars<input name="price" inputmode="decimal" required maxlength="30"></label>' +

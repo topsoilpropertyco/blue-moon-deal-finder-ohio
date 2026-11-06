@@ -101,6 +101,13 @@ def test_tokens_are_found_with_every_way_they_are_written():
     assert fields.leftovers("done {{two words}} {{x}} {{x}} plain") == ["{{two words}}", "{{x}}"]
 
 
+def test_a_unit_already_in_the_street_is_written_once():
+    assert fields._street("3430 S DIXIE DR STE 303", "303") == "3430 S DIXIE DR STE 303"
+    assert fields._street("3430 S DIXIE DR Ste 303", "ste 303") == "3430 S DIXIE DR Ste 303"
+    assert fields._street("3430 S DIXIE DR STE 303", "3") == "3430 S DIXIE DR STE 303 3"      # a token match, not a substring
+    assert fields._street("12 Main St", "Apt 4") == "12 Main St Apt 4"
+
+
 def test_the_map_in_the_yaml_is_checked(settings):
     default = fields.load_map(settings.loi)
     assert default["seller_name"] == "seller_name" and "annual_rent" not in default.values()

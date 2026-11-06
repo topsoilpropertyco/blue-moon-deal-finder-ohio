@@ -983,6 +983,7 @@
     rerender,
     esc,
     fmt,
+    who: (v) => ({open: 'you', 'this Mac': 'you (on the Mac)', team: 'the team'})[v] || v,
     ui: {logo, emptyHero, moon, levelPips, levelLadder, channelBadges, bars, stat, empty, loading, error: errorBox, emptyMarket, dot, coverage},
     /* extras */
     m: marketPath,

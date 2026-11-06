@@ -106,10 +106,10 @@
       '<div class="big num">' + esc(usd(ref.cents)) + '</div>' +
       (sqText(ref.multiple) ? '<div class="note">' + esc(sqText(ref.multiple)) + '</div>' : '') +
       '<p class="note">Yearly rent ' + esc(usd(p.rent.annual_cents)) + ' x ' + esc(ref.multiple) + '. A starting reference, not a limit. ' +
-      'It is not the Blue Moon score, which is the chance the owner sells.</p>' +
+      'It is not the Blue Moon score, which is how worth chasing the owner is.</p>' +
       (rows ? '<div class="tablewrap"><table class="p-rent"><caption class="sr">Comparison prices (scenarios only)</caption><thead><tr><th>Comparison only</th><th class="c">Price</th><th class="c">Per sq ft</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
         '<p class="note">The comparison prices are scenarios to look at. They are never a ceiling and never the next offer.</p>' : '') +
-      '<p class="note">Proposed offer: ' + esc(usd(ref.cents)) + ', exactly ' + esc(ref.multiple) + 'x (following the default).</p></div>';
+      '<p class="note">Starting price at ' + esc(ref.multiple) + 'x: ' + esc(usd(ref.cents)) + ' (the default, not your saved offer; see Offers).</p></div>';
   }
 
   function priorHtml(p) {
@@ -164,8 +164,9 @@
         '<td><input name="rent_' + esc(k) + '" type="text" inputmode="decimal" class="pr-in" aria-label="Monthly rent, ' + esc(label) + '" value="' + (has(rent) ? esc(rent / 100) : '') + '" placeholder="' + (has(hud) ? esc(hud / 100) : '') + '"></td>' +
         '<td class="c num">' + esc(has(l.monthly_cents) ? usd(l.monthly_cents) : '—') + '</td></tr>';
     }).join('');
+    const totLabel = p.rent && p.rent.source === 'record' ? 'HUD estimate total, not used for the price' : 'Total a month (x 12 = yearly)';
     return '<div class="tablewrap"><table class="p-rent pr-table"><thead><tr><th>Type</th><th class="c shr">Share</th><th>Units</th><th>Rent a month</th><th class="c">Subtotal</th></tr></thead><tbody>' + rows + '</tbody>' +
-      '<tfoot><tr><th scope="row" colspan="4">Total a month (x 12 = yearly)</th><td class="c num">' + esc(usd(p.estimate.monthly_cents)) + '</td></tr></tfoot></table></div>';
+      '<tfoot><tr><th scope="row" colspan="4" class="tot4">' + totLabel + '</th><th scope="row" colspan="3" class="tot3">' + totLabel + '</th><td class="c num">' + esc(usd(p.estimate.monthly_cents)) + '</td></tr></tfoot></table></div>';
   }
 
   function recordsHtml(p) {
@@ -178,15 +179,15 @@
         (r.state === 'needs_review' ? '<span class="pill bad">Needs review</span>' : '') + '</div>' +
         '<div class="note">' + esc([r.source_label, dayText(r.evidence_date), r.basis_label].filter(Boolean).join(' · ')) + '</div>' +
         (r.formula ? '<div class="note">' + esc(r.formula) + '</div>' : '') + (r.reason ? '<div class="note">' + esc(r.reason) + '</div>' : '') +
-        (r.note ? '<div class="note">' + esc(r.note) + '</div>' : '') + '<div class="note">Saved by ' + esc(r.created_by) + '</div>' + pin + '</li>';
+        (r.note ? '<div class="note">' + esc(r.note) + '</div>' : '') + '<div class="note">Saved by ' + esc(BM.who(r.created_by)) + '</div>' + pin + '</li>';
     }).join('') + '</ul>';
   }
 
   function recordForm(p) {
     return '<details class="p-more"><summary>Add rent evidence</summary>' +
       '<form class="p-form pr-form" data-pr-form="record" data-rate="0" data-sqft="0">' +
-      '<div class="fields">' + field('Where it came from', '<select name="source">' + opts(SOURCES, 'rent_roll') + '</select>') +
-      field('What it means', '<select name="basis">' + opts(BASES, 'actual') + '</select>') +
+      '<div class="fields">' + field('Where it came from', '<select name="source">' + opts(SOURCES, 'manual') + '</select>') +
+      field('What it means', '<select name="basis">' + opts(BASES, 'unconfirmed') + '</select>') +
       field('The day the figure is from', '<input name="evidence_date" type="date">') +
       field('How it is given', '<select name="kind">' + KINDS.map(([v, l]) => '<option value="' + v + '">' + esc(l) + '</option>').join('') + '</select>', 'full') +
       field('Amount in dollars', '<input name="amount" type="text" inputmode="decimal" required>') +

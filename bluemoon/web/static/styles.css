@@ -555,11 +555,12 @@ details.p-more[open] > summary{margin-bottom:8px}
 .pr-records .btn{align-self:flex-start}
 .pr-table th,.pr-table td{vertical-align:middle}
 .pr-table tfoot th{text-align:left}
+.pr-table .tot3{display:none}
 .pr-in{width:100%;min-width:64px;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;padding:7px 8px;font-size:14px}
 .pr-in:focus{outline:2px solid var(--accent);outline-offset:0;border-color:var(--accent)}
 .pr-warn{color:var(--warn-ink)}
 .pr-form[data-rate="0"] .rate-only,.pr-form[data-sqft="0"] .sqft-only{display:none}
-@media (max-width:480px){.pr-napkin{padding:var(--s3)}.pr-table .shr{display:none}.pr-in{min-width:56px}.pr-price .big{font-size:32px}}
+@media (max-width:480px){.pr-napkin{padding:var(--s3)}.pr-table .shr{display:none}.pr-table .tot4{display:none}.pr-table .tot3{display:table-cell}.pr-in{min-width:56px}.pr-price .big{font-size:32px}}
 
 /* drawer: who is behind this property (people.js) */
 .pe-who{margin:0}

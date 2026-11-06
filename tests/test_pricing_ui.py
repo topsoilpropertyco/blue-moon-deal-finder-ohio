@@ -198,7 +198,7 @@ def test_the_estimate_shows_exact_money_and_the_right_labels(ran):
     assert "$410,880" in h and "$34,240" in h
     assert "$2,054,400" in h and "$2,465,280" in h and "Comparison only" in h
     assert "never a ceiling and never the next offer" in h and "not the Blue Moon score" in h
-    assert "Estimated" in h and "Proposed offer: $1,643,520, exactly 4x (following the default)" in h
+    assert "Estimated" in h and "Starting price at 4x: $1,643,520 (the default, not your saved offer" in h and "Proposed offer" not in h
     assert "Rent only: no parking, laundry or fees" in h
     assert not ran["longMoney"]                                   # never "$1.6M"
     assert "Below half" in h and "47.9% of $1,100,000" in h and "$23,000 below half" in h
@@ -217,6 +217,29 @@ def test_a_saved_record_is_reported_and_zero_rent_keeps_its_note(ran):
     n = ran["recordNapkin"]
     assert "Used for the price" in n and "Use this one" in n and "Back to the automatic choice" not in n
     assert "Confirmed zero rent" in ran["zero"] and "$0" in ran["zero"]
+
+
+def test_napkin_total_fits_the_phone_and_says_when_it_is_not_used(ran):
+    n, r = ran["napkin"], ran["recordNapkin"]
+    assert 'colspan="4" class="tot4"' in n and 'colspan="3" class="tot3"' in n       # label spans 4 columns, or 3 when Share is hidden
+    assert "HUD estimate total, not used for the price" in r and "HUD estimate total, not used" not in n
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    assert ".pr-table .tot4{display:none}" in css
+
+
+def test_rent_evidence_form_does_not_start_on_the_strongest_labels(ran):
+    n = ran["napkin"]
+    assert "Entered by hand" in n and "Unconfirmed (not checked)" in n
+    import re
+    assert re.search(r'<option value="manual" selected', n) and re.search(r'<option value="unconfirmed" selected', n)
+    assert not re.search(r'<option value="rent_roll" selected', n)
+
+
+def test_actors_read_as_words_and_the_score_has_one_meaning(ran):
+    off = (STATIC / "offers.js").read_text(encoding="utf-8")
+    core = (STATIC / "core.js").read_text(encoding="utf-8")
+    assert "BM.who(e.actor)" in off and "BM.who(s.by)" in off and "'this Mac': 'you (on the Mac)'" in core
+    assert "chance the owner sells" not in off and "chance the owner sells" not in (STATIC / "pricing.js").read_text(encoding="utf-8")
 
 
 def test_the_napkin_shows_known_versus_assumed_and_every_line_is_editable(ran):

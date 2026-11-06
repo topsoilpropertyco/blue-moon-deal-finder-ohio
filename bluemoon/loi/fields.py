@@ -84,7 +84,10 @@ def _text(value: Any) -> str | None:
 
 
 def _street(street: Any, unit: Any) -> str | None:
-    return _text(" ".join(p for p in (clean_str(street), clean_str(unit)) if p))
+    st, un = clean_str(street), clean_str(unit)
+    if st and un and re.search(r"(?<![A-Za-z0-9])" + re.escape(un) + r"(?![A-Za-z0-9])", st, re.I):
+        un = None            # the street text already carries the unit (STE 303 / 303): say it once
+    return _text(" ".join(p for p in (st, un) if p))
 
 
 def _place(city: Any, state: Any, zip_: Any) -> str | None:
